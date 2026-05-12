@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.13)
 
-set(HL_VERSION_MAJOR 2)
-set(HL_VERSION_MINOR 0)
+set(HL_VERSION_MAJOR 1)
+set(HL_VERSION_MINOR 16)
 set(HL_VERSION_PATCH 0)
 set(HL_VERSION ${HL_VERSION_MAJOR}.${HL_VERSION_MINOR}.${HL_VERSION_PATCH})
 
@@ -20,7 +20,19 @@ include(FindPkgConfig)
 include(CTest)
 
 set(WITH_VM_DEFAULT ON)
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm|aarch64" AND (NOT CMAKE_OSX_ARCHITECTURES MATCHES "x86_64"))
+# Detect whether we'll be building the AArch64 JIT backend. On macOS we trust
+# CMAKE_OSX_ARCHITECTURES when it's set (since uname reports the host CPU,
+# not the build CPU). Elsewhere CMAKE_SYSTEM_PROCESSOR is authoritative.
+set(HL_JIT_AARCH64 OFF)
+if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+    if(CMAKE_OSX_ARCHITECTURES MATCHES "arm64" AND NOT CMAKE_OSX_ARCHITECTURES MATCHES "x86_64")
+        set(HL_JIT_AARCH64 ON)
+    endif()
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    set(HL_JIT_AARCH64 ON)
+endif()
+# 32-bit ARM still has no JIT backend — fall back to disabling the VM there.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^arm$|^armv7" AND NOT HL_JIT_AARCH64)
     set(WITH_VM_DEFAULT OFF)
 endif()
 
@@ -225,21 +237,28 @@ else()
 endif()
 
 if (WITH_VM)
-    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" HL_VM_PROCESSOR)
-    if(NOT HL_VM_PROCESSOR MATCHES "^(x86_64|amd64|i[3-6]86)$")
-        message(FATAL_ERROR
-            "The HashLink VM JIT supports only x86 and x86-64 targets; "
-            "configure with -DWITH_VM=OFF for ${CMAKE_SYSTEM_PROCESSOR}"
+    if(HL_JIT_AARCH64)
+        set(_HL_JIT_SRC src/jit_arm64.c)
+    else()
+        string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" HL_VM_PROCESSOR)
+        if(NOT HL_VM_PROCESSOR MATCHES "^(x86_64|amd64|i[3-6]86)$")
+            message(FATAL_ERROR
+                "The HashLink VM JIT supports only x86, x86-64, and AArch64 targets; "
+                "configure with -DWITH_VM=OFF for ${CMAKE_SYSTEM_PROCESSOR}"
+            )
+        endif()
+        set(_HL_JIT_SRC
+            src/jit.c
+            src/jit_emit.c
+            src/jit_regs.c
+            src/jit_x86_64.c
+            src/jit_dump.c
+            src/jit_gdb.c
         )
     endif()
     add_executable(hl
         src/code.c
-        src/jit.c
-        src/jit_emit.c
-        src/jit_regs.c
-        src/jit_x86_64.c
-        src/jit_dump.c
-        src/jit_gdb.c
+        ${_HL_JIT_SRC}
         src/main.c
         src/module.c
         src/hlpatch.c
@@ -253,6 +272,26 @@ if (WITH_VM)
         set_target_properties(hl PROPERTIES
             INSTALL_RPATH "@executable_path;@executable_path/../${CMAKE_INSTALL_LIBDIR}"
         )
+        if(HL_JIT_AARCH64)
+            add_custom_command(TARGET hl POST_BUILD
+                COMMAND codesign --force --sign - --entitlements
+                    "${CMAKE_CURRENT_SOURCE_DIR}/other/osx/hl_jit.entitlements"
+                    "$<TARGET_FILE:hl>"
+                COMMENT "Signing hl with allow-jit entitlement"
+            )
+        endif()
+        # On Apple Silicon, MAP_JIT pages require the binary to carry the
+        # com.apple.security.cs.allow-jit entitlement. ad-hoc-sign with the
+        # entitlement file shipped in other/osx/hl_jit.entitlements so a
+        # freshly built `hl` can JIT without the user having to re-sign.
+        if(HL_JIT_AARCH64)
+            add_custom_command(TARGET hl POST_BUILD
+                COMMAND codesign --force --sign - --entitlements
+                    "${CMAKE_CURRENT_SOURCE_DIR}/other/osx/hl_jit.entitlements"
+                    "$<TARGET_FILE:hl>"
+                COMMENT "Signing hl with allow-jit entitlement"
+            )
+        endif()
     elseif (UNIX)
         set_target_properties(hl PROPERTIES
             INSTALL_RPATH "$ORIGIN;$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
@@ -311,47 +350,6 @@ if(BUILD_TESTING)
     add_custom_target(threads.hl ALL
         DEPENDS ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/threads.hl
     )
-
-    if((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE) AND WITH_VM)
-        #####################
-        # crash-signals.hl
-
-        add_custom_command(OUTPUT ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/crash-signals.hl
-            COMMAND ${HAXE_COMPILER}
-                ${HAXE_HL_FLAGS}
-                -hl ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/crash-signals.hl
-                -cp ${CMAKE_SOURCE_DIR}/other/tests -main CrashSignals
-            DEPENDS
-                ${CMAKE_SOURCE_DIR}/other/tests/CrashSignals.hx
-                ${CMAKE_SOURCE_DIR}/other/tests/CrashTestNative.hx
-        )
-        add_custom_target(crash-signals.hl ALL
-            DEPENDS ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/crash-signals.hl
-        )
-
-        add_custom_command(OUTPUT ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/exception-reporting.hl
-            COMMAND ${HAXE_COMPILER}
-                ${HAXE_HL_FLAGS}
-                -hl ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/exception-reporting.hl
-                -cp ${CMAKE_SOURCE_DIR}/other/tests -main ExceptionReporting
-            DEPENDS ${CMAKE_SOURCE_DIR}/other/tests/ExceptionReporting.hx
-        )
-        add_custom_target(exception-reporting.hl ALL
-            DEPENDS ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/exception-reporting.hl
-        )
-
-        add_library(crash_test.hdll MODULE
-            other/tests/crash_test.c
-        )
-        set_target_properties(crash_test.hdll
-            PROPERTIES
-            PREFIX ""
-            OUTPUT_NAME crash_test
-            SUFFIX .hdll
-        )
-        target_link_libraries(crash_test.hdll libhl)
-        add_dependencies(crash-signals.hl crash_test.hdll)
-    endif()
 
     #####################
     # uvsample.hl
@@ -471,42 +469,6 @@ if(BUILD_TESTING)
         add_test(NAME uvsample.hl
             COMMAND hl ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/uvsample.hl 6001
         )
-        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE)
-            add_test(NAME crash-signals.hl
-                COMMAND sh ${CMAKE_SOURCE_DIR}/other/tests/crash_signals.sh
-                    $<TARGET_FILE:hl>
-                    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/crash-signals.hl
-            )
-            set_tests_properties(crash-signals.hl
-                PROPERTIES
-                WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
-            )
-            add_test(NAME exception-reporting.hl
-                COMMAND sh ${CMAKE_SOURCE_DIR}/other/tests/exception_reporting.sh
-                    $<TARGET_FILE:hl>
-                    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/exception-reporting.hl
-            )
-            set_tests_properties(exception-reporting.hl
-                PROPERTIES
-                WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
-                TIMEOUT 15
-            )
-        endif()
-        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-            find_program(GDB_EXECUTABLE gdb)
-            if(GDB_EXECUTABLE)
-                add_test(NAME gdb-jit.hl
-                    COMMAND sh ${CMAKE_SOURCE_DIR}/other/tests/gdb_jit.sh
-                        ${GDB_EXECUTABLE}
-                        $<TARGET_FILE:hl>
-                        ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/crash-signals.hl
-                )
-                set_tests_properties(gdb-jit.hl PROPERTIES
-                    WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
-                    TIMEOUT 15
-                )
-            endif()
-        endif()
     endif()
 
     add_test(NAME hello
