@@ -153,12 +153,12 @@ typedef struct {
 #endif
 } hl_module;
 
-hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg );
+HL_EXTERN_C HL_EXPORT hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg );
 
 hl_code_hash *hl_code_hash_alloc( hl_code *c );
 void hl_code_hash_finalize( hl_code_hash *h );
 void hl_code_hash_free( hl_code_hash *h );
-void hl_code_free( hl_code *c );
+HL_EXTERN_C HL_EXPORT void hl_code_free( hl_code *c );
 int hl_code_hash_type( hl_code_hash *h, hl_type *t );
 void hl_code_hash_remap_globals( hl_code_hash *hnew, hl_code_hash *hold );
 
@@ -174,10 +174,10 @@ typedef unsigned char h_bool;
 extern int hl_jit_trampoline;
 void hl_jit_tag_callback( void *native );
 
-hl_module *hl_module_alloc( hl_code *code );
-int hl_module_init( hl_module *m, int flags );
+HL_EXTERN_C HL_EXPORT hl_module *hl_module_alloc( hl_code *code );
+HL_EXTERN_C HL_EXPORT int hl_module_init( hl_module *m, int flags );
 h_bool hl_module_patch( hl_module *m, hl_code *code );
-void hl_module_free( hl_module *m );
+HL_EXTERN_C HL_EXPORT void hl_module_free( hl_module *m );
 h_bool hl_module_debug( hl_module *m, int port, h_bool wait );
 hl_type *hl_module_resolve_type( hl_module *m, hl_type *t, bool err );
 hl_module **hl_get_modules( int *count );

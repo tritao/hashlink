@@ -209,7 +209,7 @@ CFLAGS += -m$(MARCH)
 endif
 CFLAGS += -fPIC -pthread -fno-omit-frame-pointer
 LDFLAGS += -Wl,--no-undefined
-USE_LIBHL_LDFLAGS = -Wl,-rpath,.:'$$ORIGIN':$(INSTALL_LIB_DIR)
+USE_LIBHL_LDFLAGS = -Wl,-rpath,.:'$$ORIGIN':$(INSTALL_LIB_DIR) -Wl,--export-dynamic
 
 ifeq ($(MARCH),32)
 CFLAGS += -msse2 -mfpmath=sse
