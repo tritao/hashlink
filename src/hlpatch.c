@@ -110,7 +110,8 @@ static unsigned int hash_type_prefix( hl_code *code, int count ) {
 
 static int opcode_operands( int opcode ) {
 	switch( opcode ) {
-	case OInt: case OFloat: case OBool: case OString: case OCall0: case OJTrue: return 2;
+	case OLabel: return 0;
+	case OMov: case OInt: case OFloat: case OBool: case OString: case OCall0: case OJTrue: return 2;
 	case OAdd: case OSub: case OMul: case OSDiv: case OCall1: case OJSLt: case OJSLte: case OJEq: return 3;
 	case OCall2: return 4;
 	case OJAlways: case ORet: return 1;
@@ -196,6 +197,8 @@ static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function 
 	for(int i=0;i<f->instruction_count;i++){
 		hl_patch_instruction *op=f->instructions+i;int *p=op->operands;
 		switch(op->opcode){
+		case OLabel:break;
+		case OMov:if(!valid_reg(f,p[0])||!valid_reg(f,p[1])){*error="Invalid move operands";return false;}break;
 		case OInt:if(!valid_reg(f,p[0])||p[1]<0||p[1]>=patch->base_int_count+patch->int_count){*error="Invalid Int operands";return false;}break;
 		case OFloat:if(!valid_reg(f,p[0])||p[1]<0||p[1]>=patch->base_float_count+patch->float_count){*error="Invalid Float operands";return false;}break;
 		case OString:if(!valid_reg(f,p[0])||p[1]<0||p[1]>=patch->base_string_count+patch->string_count){*error="Invalid String operands";return false;}break;
