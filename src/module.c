@@ -346,9 +346,10 @@ hl_module *hl_module_alloc( hl_code *c ) {
 	}
 	memset(m->globals_data,0,gsize);
 	m->functions_ptrs = (void**)malloc(sizeof(void*)*(c->nfunctions + c->nnatives));
+	m->patch_owners = (hl_patch_code**)calloc(c->nfunctions + c->nnatives,sizeof(hl_patch_code*));
 	m->functions_indexes = (int*)malloc(sizeof(int)*(c->nfunctions + c->nnatives));
 	m->ctx.functions_types = (hl_type**)malloc(sizeof(void*)*(c->nfunctions + c->nnatives));
-	if( m->functions_ptrs == NULL || m->functions_indexes == NULL || m->ctx.functions_types == NULL ) {
+	if( m->functions_ptrs == NULL || m->functions_indexes == NULL || m->ctx.functions_types == NULL || m->patch_owners == NULL ) {
 		hl_module_free(m);
 		return NULL;
 	}
@@ -357,6 +358,7 @@ hl_module *hl_module_alloc( hl_code *c ) {
 	memset(m->ctx.functions_types,0,sizeof(void*)*(c->nfunctions + c->nnatives));
 	hl_alloc_init(&m->ctx.alloc);
 	m->ctx.functions_ptrs = m->functions_ptrs;
+	m->revision = 1;
 	return m;
 }
 
@@ -1142,6 +1144,7 @@ h_bool hl_module_patch( hl_module *m1, hl_code *c ) {
 }
 
 void hl_module_free( hl_module *m ) {
+	hl_module_patch_release_all(m);
 	for(int i=0;i<m->code->nglobals;i++) {
 		if( hl_is_ptr(m->code->globals[i]) )
 			hl_remove_root(m->globals_data+m->globals_indexes[i]);
@@ -1155,6 +1158,7 @@ void hl_module_free( hl_module *m ) {
 	if( m->hash ) hl_code_hash_free(m->hash);
 	free(m->functions_indexes);
 	free(m->functions_ptrs);
+	free(m->patch_owners);
 	free(m->ctx.functions_types);
 	free(m->globals_indexes);
 	free(m->globals_data);

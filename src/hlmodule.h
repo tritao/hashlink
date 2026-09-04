@@ -164,6 +164,7 @@ typedef struct {
 #endif
 
 typedef struct _jit_ctx jit_ctx;
+typedef struct _hl_patch_code hl_patch_code;
 
 typedef struct {
 	hl_code *code;
@@ -179,6 +180,9 @@ typedef struct {
 	jit_ctx *jit_ctx;
 	bool debug;
 	bool patchable;
+	int revision;
+	int patch_jit_count;
+	hl_patch_code **patch_owners;
 	hl_module_context ctx;
 #ifdef WIN64_UNWIND_TABLES
 	int unwind_table_size;
@@ -215,6 +219,9 @@ h_bool hl_module_patch( hl_module *m, hl_code *code );
 HL_EXTERN_C HL_EXPORT h_bool hl_module_patch_slots( hl_module *target, hl_module *generation, const int *indices, int count );
 /** Validate and redirect every bytecode function to a complete generation. */
 HL_EXTERN_C HL_EXPORT h_bool hl_module_patch_generation( hl_module *target, hl_module *generation );
+HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch( hl_module *module, hl_patch *patch, const char **error_msg );
+HL_EXTERN_C HL_EXPORT int hl_module_patch_allocation_count( hl_module *module );
+void hl_module_patch_release_all( hl_module *module );
 HL_EXTERN_C HL_EXPORT void hl_module_free( hl_module *m );
 /** Remove an initialized module from runtime discovery and release its JIT data. */
 HL_EXTERN_C HL_EXPORT h_bool hl_module_unload( hl_module *m );
