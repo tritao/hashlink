@@ -235,6 +235,7 @@ if (WITH_VM)
         src/main.c
         src/module.c
         src/hlpatch.c
+        src/hlruntime.c
         src/debugger.c
         src/profile.c
     )

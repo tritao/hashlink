@@ -234,6 +234,21 @@ h_bool hl_module_debug( hl_module *m, int port, h_bool wait );
 hl_type *hl_module_resolve_type( hl_module *m, hl_type *t, bool err );
 hl_module **hl_get_modules( int *count );
 
+typedef struct _hl_runtime_module hl_runtime_module;
+typedef enum {
+	HL_RUNTIME_OK = 0, HL_RUNTIME_BAD_ARGUMENT, HL_RUNTIME_BAD_FORMAT,
+	HL_RUNTIME_STALE_PATCH, HL_RUNTIME_INCOMPATIBLE, HL_RUNTIME_JIT_FAILED,
+	HL_RUNTIME_BAD_FUNCTION, HL_RUNTIME_EXCEPTION
+} hl_runtime_status;
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length, hl_runtime_module **out );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int stable_id, int *result, vdynamic **exception );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const unsigned char *bytes, int length );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_hlp_summary( const unsigned char *bytes, int length, int *base_revision, int *revision, int *function_count );
+HL_EXTERN_C HL_EXPORT int hl_runtime_module_revision( hl_runtime_module *runtime );
+HL_EXTERN_C HL_EXPORT int hl_runtime_module_jit_count( hl_runtime_module *runtime );
+HL_EXTERN_C HL_EXPORT int hl_runtime_module_allocation_count( hl_runtime_module *runtime );
+HL_EXTERN_C HL_EXPORT void hl_runtime_module_release( hl_runtime_module *runtime );
+
 void hl_profile_setup( int sample_count );
 void hl_profile_end();
 

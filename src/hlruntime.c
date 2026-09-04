@@ -1,0 +1,126 @@
+#include <hlmodule.h>
+#include <stdlib.h>
+#include <string.h>
+
+struct _hl_runtime_module {
+	hl_module *module;
+	hl_mutex *lock;
+};
+
+static hl_function *find_function( hl_module *module, int stable_id ) {
+	int i;
+	for(i=0;i<module->code->nfunctions;i++)
+		if( module->code->functions[i].findex == stable_id )
+			return module->code->functions + i;
+	return NULL;
+}
+
+hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length, hl_runtime_module **out ) {
+	char *error = NULL;
+	hl_code *code;
+	hl_module *module;
+	hl_runtime_module *runtime;
+	if( out == NULL || bytes == NULL || length <= 0 ) return HL_RUNTIME_BAD_ARGUMENT;
+	*out = NULL;
+	code = hl_code_read(bytes,length,&error);
+	if( code == NULL ) return HL_RUNTIME_BAD_FORMAT;
+	module = hl_module_alloc(code);
+	if( module == NULL || !hl_module_init(module,HL_MODULE_PATCHABLE) ) {
+		if( module != NULL ) hl_module_free(module);
+		hl_code_free(code);
+		return HL_RUNTIME_JIT_FAILED;
+	}
+	hl_code_free(code);
+	runtime = (hl_runtime_module*)malloc(sizeof(hl_runtime_module));
+	if( runtime == NULL ) {
+		hl_module_unload(module);
+		return HL_RUNTIME_JIT_FAILED;
+	}
+	runtime->module = module;
+	runtime->lock = hl_mutex_alloc(true);
+	hl_add_root(&runtime->lock);
+	*out = runtime;
+	return HL_RUNTIME_OK;
+}
+
+hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int stable_id, int *out, vdynamic **exception ) {
+	hl_function *function;
+	vclosure closure;
+	vdynamic *result;
+	bool raised = false;
+	if( runtime == NULL || out == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
+	if( exception != NULL ) *exception = NULL;
+	hl_mutex_acquire(runtime->lock);
+	function = find_function(runtime->module,stable_id);
+	if( function == NULL || function->type->kind != HFUN || function->type->fun->nargs != 0 || function->type->fun->ret->kind != HI32 ) {
+		hl_mutex_release(runtime->lock);
+		return HL_RUNTIME_BAD_FUNCTION;
+	}
+	closure.t = function->type;
+	closure.fun = runtime->module->functions_ptrs[stable_id];
+	closure.hasValue = 0;
+	closure.value = NULL;
+	result = hl_dyn_call_safe(&closure,NULL,0,&raised);
+	hl_mutex_release(runtime->lock);
+	if( raised ) {
+		if( exception != NULL ) *exception = result;
+		return HL_RUNTIME_EXCEPTION;
+	}
+	*out = result->v.i;
+	return HL_RUNTIME_OK;
+}
+
+hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const unsigned char *bytes, int length ) {
+	const char *error = NULL;
+	hl_patch *patch;
+	h_bool applied;
+	if( runtime == NULL || bytes == NULL || length <= 0 ) return HL_RUNTIME_BAD_ARGUMENT;
+	hl_mutex_acquire(runtime->lock);
+	patch = hl_patch_read(bytes,length,&error);
+	if( patch == NULL ) {
+		hl_mutex_release(runtime->lock);
+		return HL_RUNTIME_BAD_FORMAT;
+	}
+	applied = hl_module_apply_patch(runtime->module,patch,&error);
+	hl_patch_free(patch);
+	hl_mutex_release(runtime->lock);
+	if( applied ) return HL_RUNTIME_OK;
+	if( error != NULL && strcmp(error,"Stale patch revision") == 0 ) return HL_RUNTIME_STALE_PATCH;
+	return HL_RUNTIME_INCOMPATIBLE;
+}
+
+hl_runtime_status hl_runtime_hlp_summary( const unsigned char *bytes, int length, int *base_revision, int *revision, int *function_count ) {
+	const char *error = NULL;
+	hl_patch *patch;
+	if( bytes == NULL || length <= 0 || base_revision == NULL || revision == NULL || function_count == NULL )
+		return HL_RUNTIME_BAD_ARGUMENT;
+	patch = hl_patch_read(bytes,length,&error);
+	if( patch == NULL ) return HL_RUNTIME_BAD_FORMAT;
+	*base_revision = patch->base_revision;
+	*revision = patch->revision;
+	*function_count = patch->function_count;
+	hl_patch_free(patch);
+	return HL_RUNTIME_OK;
+}
+
+int hl_runtime_module_revision( hl_runtime_module *runtime ) {
+	return runtime == NULL ? 0 : runtime->module->revision;
+}
+
+int hl_runtime_module_jit_count( hl_runtime_module *runtime ) {
+	return runtime == NULL ? 0 : runtime->module->patch_jit_count;
+}
+
+int hl_runtime_module_allocation_count( hl_runtime_module *runtime ) {
+	return runtime == NULL ? 0 : 1 + hl_module_patch_allocation_count(runtime->module);
+}
+
+void hl_runtime_module_release( hl_runtime_module *runtime ) {
+	if( runtime == NULL ) return;
+	hl_mutex_acquire(runtime->lock);
+	hl_module_unload(runtime->module);
+	hl_mutex_release(runtime->lock);
+	hl_remove_root(&runtime->lock);
+	hl_mutex_free(runtime->lock);
+	free(runtime);
+}
