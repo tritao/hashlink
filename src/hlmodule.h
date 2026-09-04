@@ -181,7 +181,11 @@ HL_EXTERN_C HL_EXPORT int hl_module_init( hl_module *m, int flags );
 h_bool hl_module_patch( hl_module *m, hl_code *code );
 /** Atomically redirect compatible function indices to an initialized generation. */
 HL_EXTERN_C HL_EXPORT h_bool hl_module_patch_slots( hl_module *target, hl_module *generation, const int *indices, int count );
+/** Validate and redirect every bytecode function to a complete generation. */
+HL_EXTERN_C HL_EXPORT h_bool hl_module_patch_generation( hl_module *target, hl_module *generation );
 HL_EXTERN_C HL_EXPORT void hl_module_free( hl_module *m );
+/** Remove an initialized module from runtime discovery and release its JIT data. */
+HL_EXTERN_C HL_EXPORT h_bool hl_module_unload( hl_module *m );
 h_bool hl_module_debug( hl_module *m, int port, h_bool wait );
 hl_type *hl_module_resolve_type( hl_module *m, hl_type *t, bool err );
 hl_module **hl_get_modules( int *count );

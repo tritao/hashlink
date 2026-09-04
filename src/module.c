@@ -877,6 +877,21 @@ h_bool hl_module_patch_slots( hl_module *target, hl_module *generation, const in
 	return true;
 }
 
+h_bool hl_module_patch_generation( hl_module *target, hl_module *generation ) {
+	int i;
+	int *indices;
+	h_bool result;
+	if( target == NULL || generation == NULL || target->code->nfunctions != generation->code->nfunctions )
+		return false;
+	indices = (int*)malloc(sizeof(int) * target->code->nfunctions);
+	if( indices == NULL ) return false;
+	for(i=0;i<target->code->nfunctions;i++)
+		indices[i] = target->code->functions[i].findex;
+	result = hl_module_patch_slots(target,generation,indices,target->code->nfunctions);
+	free(indices);
+	return result;
+}
+
 static int check_same_obj( hl_type_obj *o1, hl_type_obj *o2 ) {
 	if( o1->nproto != o2->nproto || o1->nfields != o2->nfields || o1->nbindings != o2->nbindings )
 		return -1;
@@ -1152,4 +1167,23 @@ void hl_module_free( hl_module *m ) {
 	if( m->jit_ctx )
 		hl_jit_free(m->jit_ctx,false);
 	free(m);
+}
+
+h_bool hl_module_unload( hl_module *m ) {
+	int i;
+	if( m == NULL ) return false;
+	for(i=0;i<modules_count;i++)
+		if( cur_modules[i] == m ) break;
+	if( i == modules_count ) return false;
+	for(;i<modules_count-1;i++) cur_modules[i] = cur_modules[i+1];
+	modules_count--;
+	if( modules_count == 0 ) {
+		free(cur_modules);
+		cur_modules = NULL;
+	} else {
+		hl_module **resized = (hl_module**)realloc(cur_modules,sizeof(hl_module*) * modules_count);
+		if( resized != NULL ) cur_modules = resized;
+	}
+	hl_module_free(m);
+	return true;
 }
