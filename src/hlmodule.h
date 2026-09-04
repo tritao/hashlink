@@ -139,6 +139,7 @@ typedef struct {
 	int string_count;
 	int base_string_count;
 	char **strings;
+	int *string_lens;
 	int type_count;
 	int base_type_count;
 	int function_count;
@@ -194,6 +195,12 @@ typedef struct {
 	int patch_jit_count;
 	hl_patch_code **patch_owners;
 	int *patch_ints;
+	double *patch_floats;
+	char **patch_strings;
+	int *patch_string_lens;
+	uchar **patch_ustrings;
+	char *patch_string_data;
+	int patch_initial_string_count;
 	hl_module_context ctx;
 #ifdef WIN64_UNWIND_TABLES
 	int unwind_table_size;

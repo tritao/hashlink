@@ -1160,6 +1160,12 @@ void hl_module_free( hl_module *m ) {
 	free(m->functions_ptrs);
 	free(m->patch_owners);
 	free(m->patch_ints);
+	free(m->patch_floats);
+	free(m->patch_strings);
+	free(m->patch_string_lens);
+	if(m->patch_ustrings)for(int i=m->patch_initial_string_count;i<m->code->nstrings;i++)free(m->patch_ustrings[i]);
+	free(m->patch_ustrings);
+	free(m->patch_string_data);
 	free(m->ctx.functions_types);
 	free(m->globals_indexes);
 	free(m->globals_data);
