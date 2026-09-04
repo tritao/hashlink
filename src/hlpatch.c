@@ -111,7 +111,7 @@ static unsigned int hash_type_prefix( hl_code *code, int count ) {
 static int opcode_operands( int opcode ) {
 	switch( opcode ) {
 	case OInt: case OFloat: case OBool: case OString: case OCall0: case OJTrue: return 2;
-	case OAdd: case OSub: case OCall1: case OJSLt: case OJSLte: case OJEq: return 3;
+	case OAdd: case OSub: case OMul: case OSDiv: case OCall1: case OJSLt: case OJSLte: case OJEq: return 3;
 	case OCall2: return 4;
 	case OJAlways: case ORet: return 1;
 	default: return -1;
@@ -200,7 +200,7 @@ static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function 
 		case OFloat:if(!valid_reg(f,p[0])||p[1]<0||p[1]>=patch->base_float_count+patch->float_count){*error="Invalid Float operands";return false;}break;
 		case OString:if(!valid_reg(f,p[0])||p[1]<0||p[1]>=patch->base_string_count+patch->string_count){*error="Invalid String operands";return false;}break;
 		case OBool:if(!valid_reg(f,p[0])||(p[1]!=0&&p[1]!=1)){*error="Invalid Bool operands";return false;}break;
-		case OAdd:case OSub:if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||!valid_reg(f,p[2])){*error="Invalid arithmetic operands";return false;}break;
+		case OAdd:case OSub:case OMul:case OSDiv:if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||!valid_reg(f,p[2])){*error="Invalid arithmetic operands";return false;}break;
 		case OCall0:case OCall1:case OCall2:
 			if(!valid_reg(f,p[0])||p[1]<0||p[1]>=m->code->nfunctions+m->code->nnatives||m->functions_ptrs[p[1]]==NULL){*error="Invalid call target";return false;}
 			for(int k=2;k<op->operand_count;k++) if(!valid_reg(f,p[k])){*error="Invalid call argument";return false;}
