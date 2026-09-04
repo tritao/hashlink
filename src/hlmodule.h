@@ -107,6 +107,38 @@ typedef struct {
 } hl_code;
 
 typedef struct {
+	int opcode;
+	int operand_count;
+	int *operands;
+} hl_patch_instruction;
+
+typedef struct {
+	int type;
+	int findex;
+	int register_count;
+	int *registers;
+	int instruction_count;
+	hl_patch_instruction *instructions;
+} hl_patch_function;
+
+typedef struct {
+	int base_revision;
+	int revision;
+	int int_count;
+	int *ints;
+	int float_count;
+	double *floats;
+	int string_count;
+	char **strings;
+	int type_count;
+	int function_count;
+	hl_patch_function *functions;
+} hl_patch;
+
+HL_EXTERN_C HL_EXPORT hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error_msg );
+HL_EXTERN_C HL_EXPORT void hl_patch_free( hl_patch *patch );
+
+typedef struct {
 	void *offsets;
 	void *vars;
 	int start;
