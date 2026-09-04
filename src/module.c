@@ -759,6 +759,7 @@ int hl_module_init( hl_module *m, int flags ) {
 		return 0;
 	bool dump = (flags & HL_MODULE_DUMP) != 0;
 	m->debug = (flags & HL_MODULE_DEBUG) != 0;
+	m->patchable = (flags & HL_MODULE_PATCHABLE) != 0;
 	hl_jit_init(ctx, m);
 	for(i=0;i<m->code->nfunctions;i++) {
 		hl_function *f = m->code->functions + i;
@@ -844,6 +845,36 @@ static bool check_same_type( hl_type *t1, hl_type *t2 ) {
 		break;
 	}
 	return false;
+}
+
+static hl_function *module_find_function( hl_module *m, int findex ) {
+	int i;
+	for(i=0;i<m->code->nfunctions;i++) {
+		hl_function *f = m->code->functions + i;
+		if( f->findex == findex ) return f;
+	}
+	return NULL;
+}
+
+h_bool hl_module_patch_slots( hl_module *target, hl_module *generation, const int *indices, int count ) {
+	int i;
+	if( target == NULL || generation == NULL || !target->patchable || indices == NULL || count <= 0 )
+		return false;
+
+	/* This pass must remain side-effect free: callers rely on rejection leaving
+	   every live slot on the previous generation. */
+	for(i=0;i<count;i++) {
+		hl_function *oldf = module_find_function(target,indices[i]);
+		hl_function *newf = module_find_function(generation,indices[i]);
+		if( oldf == NULL || newf == NULL || generation->functions_ptrs[indices[i]] == NULL )
+			return false;
+		if( !check_same_type(oldf->type,newf->type) )
+			return false;
+	}
+
+	for(i=0;i<count;i++)
+		target->functions_ptrs[indices[i]] = generation->functions_ptrs[indices[i]];
+	return true;
 }
 
 static int check_same_obj( hl_type_obj *o1, hl_type_obj *o2 ) {

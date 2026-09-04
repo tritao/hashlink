@@ -702,9 +702,18 @@ static void seal_block( emit_ctx *ctx, emit_block *b ) {
 }
 
 static ereg emit_call_fid( emit_ctx *ctx, int findex, ereg *args, int nargs, emit_mode mode ) {
-	einstr *e = emit_instr(ctx, CALL_FUN);
+	einstr *e;
+	if( ctx->mod->patchable ) {
+		/* Patchable bytecode calls go through the module table, allowing a
+		   transaction to redirect existing callers without rewriting code. */
+		ereg target = LOAD_MEM_PTR(LOAD_CONST_PTR(ctx->mod->functions_ptrs), findex * HL_WSIZE);
+		e = emit_instr(ctx, CALL_REG);
+		e->a = target;
+	} else {
+		e = emit_instr(ctx, CALL_FUN);
+		e->a = findex;
+	}
 	e->mode = mode;
-	e->a = findex;
 	store_args(ctx, e, args, nargs);
 	return mode == M_VOID ? UNUSED : new_value(ctx);
 }

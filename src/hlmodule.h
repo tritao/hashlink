@@ -146,6 +146,7 @@ typedef struct {
 	hl_debug_infos *jit_debug;
 	jit_ctx *jit_ctx;
 	bool debug;
+	bool patchable;
 	hl_module_context ctx;
 #ifdef WIN64_UNWIND_TABLES
 	int unwind_table_size;
@@ -170,6 +171,7 @@ typedef unsigned char h_bool;
 #define HL_MODULE_HOT_RELOAD 1
 #define HL_MODULE_DUMP 2
 #define HL_MODULE_DEBUG 4
+#define HL_MODULE_PATCHABLE 8
 
 extern int hl_jit_trampoline;
 void hl_jit_tag_callback( void *native );
@@ -177,6 +179,8 @@ void hl_jit_tag_callback( void *native );
 HL_EXTERN_C HL_EXPORT hl_module *hl_module_alloc( hl_code *code );
 HL_EXTERN_C HL_EXPORT int hl_module_init( hl_module *m, int flags );
 h_bool hl_module_patch( hl_module *m, hl_code *code );
+/** Atomically redirect compatible function indices to an initialized generation. */
+HL_EXTERN_C HL_EXPORT h_bool hl_module_patch_slots( hl_module *target, hl_module *generation, const int *indices, int count );
 HL_EXTERN_C HL_EXPORT void hl_module_free( hl_module *m );
 h_bool hl_module_debug( hl_module *m, int port, h_bool wait );
 hl_type *hl_module_resolve_type( hl_module *m, hl_type *t, bool err );
