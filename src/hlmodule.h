@@ -124,13 +124,17 @@ typedef struct {
 typedef struct {
 	int base_revision;
 	int revision;
+	int base_int_count;
 	int int_count;
 	int *ints;
 	int float_count;
+	int base_float_count;
 	double *floats;
 	int string_count;
+	int base_string_count;
 	char **strings;
 	int type_count;
+	int base_type_count;
 	int function_count;
 	hl_patch_function *functions;
 } hl_patch;
@@ -183,6 +187,7 @@ typedef struct {
 	int revision;
 	int patch_jit_count;
 	hl_patch_code **patch_owners;
+	int *patch_ints;
 	hl_module_context ctx;
 #ifdef WIN64_UNWIND_TABLES
 	int unwind_table_size;

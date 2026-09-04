@@ -101,19 +101,19 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 	if( !take(&r,3,&p) ) goto fail;
 	if( memcmp(p,"HLP",3) != 0 ) FAIL("Invalid HLP magic");
 	if( !read_byte(&r,&version) ) goto fail;
-	if( version != 1 ) FAIL("Unsupported HLP version");
+	if( version != 2 ) FAIL("Unsupported HLP version");
 	if( !read_count(&r,&patch->base_revision) || !read_count(&r,&patch->revision) ) goto fail;
 	if( patch->revision <= patch->base_revision ) FAIL("Invalid patch revision range");
-	if( !read_count(&r,&patch->int_count) ) goto fail;
+	if( !read_count(&r,&patch->base_int_count) || !read_count(&r,&patch->int_count) ) goto fail;
 	patch->ints = (int*)calloc(patch->int_count,sizeof(int));
 	for(i=0;i<patch->int_count;i++) { if( !take(&r,4,&p) ) goto fail; patch->ints[i]=(int)(p[0]|(p[1]<<8)|(p[2]<<16)|((unsigned int)p[3]<<24)); }
-	if( !read_count(&r,&patch->float_count) ) goto fail;
+	if( !read_count(&r,&patch->base_float_count) || !read_count(&r,&patch->float_count) ) goto fail;
 	patch->floats = (double*)calloc(patch->float_count,sizeof(double));
 	for(i=0;i<patch->float_count;i++) { if( !take(&r,8,&p) ) goto fail; memcpy(patch->floats+i,p,8); }
-	if( !read_count(&r,&patch->string_count) ) goto fail;
+	if( !read_count(&r,&patch->base_string_count) || !read_count(&r,&patch->string_count) ) goto fail;
 	patch->strings = (char**)calloc(patch->string_count,sizeof(char*));
 	for(i=0;i<patch->string_count;i++) { if( !read_count(&r,&count) || !take(&r,count,&p) ) goto fail; patch->strings[i]=(char*)malloc(count+1); if(!patch->strings[i])FAIL("Out of memory reading HLP");memcpy(patch->strings[i],p,count);patch->strings[i][count]=0; }
-	if( !read_count(&r,&patch->type_count) ) goto fail;
+	if( !read_count(&r,&patch->base_type_count) || !read_count(&r,&patch->type_count) ) goto fail;
 	for(i=0;i<patch->type_count;i++) { if(!read_byte(&r,&tag))goto fail;if(tag==HFUN){if(!read_byte(&r,&count))goto fail;for(j=0;j<count+1;j++)if(!read_index(&r,&version))goto fail;}else if(tag<0||tag>HGUID)FAIL("Unsupported HLP type"); }
 	if( !read_count(&r,&patch->function_count) ) goto fail;
 	patch->functions=(hl_patch_function*)calloc(patch->function_count,sizeof(hl_patch_function));
@@ -145,7 +145,7 @@ static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function 
 	for(int i=0;i<f->instruction_count;i++){
 		hl_patch_instruction *op=f->instructions+i;int *p=op->operands;
 		switch(op->opcode){
-		case OInt:if(!valid_reg(f,p[0])||p[1]<0||p[1]>=patch->int_count){*error="Invalid Int operands";return false;}break;
+		case OInt:if(!valid_reg(f,p[0])||p[1]<0||p[1]>=patch->base_int_count+patch->int_count){*error="Invalid Int operands";return false;}break;
 		case OBool:if(!valid_reg(f,p[0])||(p[1]!=0&&p[1]!=1)){*error="Invalid Bool operands";return false;}break;
 		case OAdd:case OSub:if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||!valid_reg(f,p[2])){*error="Invalid arithmetic operands";return false;}break;
 		case OCall0:case OCall1:case OCall2:
@@ -163,26 +163,29 @@ static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function 
 }
 
 h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_msg ) {
-	const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL;hl_code code;hl_module temp;
+	const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL;hl_code code;hl_module temp;
 	if(!m||!patch||!m->patchable){error="Module is not patchable";goto fail;}
 	if(patch->function_count<=0){error="Patch contains no functions";goto fail;}
 	if(m->revision!=patch->base_revision||patch->revision<=patch->base_revision){error="Stale patch revision";goto fail;}
-	if(patch->type_count!=m->code->ntypes){error="Patch type table does not match module";goto fail;}
-	for(int i=0;i<patch->function_count;i++)if(!validate_function(m,patch,patch->functions+i,&error))goto fail;
+	if(patch->base_int_count!=m->code->nints||patch->base_float_count!=m->code->nfloats||patch->base_string_count!=m->code->nstrings||patch->base_type_count!=m->code->ntypes){error="Patch symbol base does not match module";goto fail;}
+	if(patch->float_count||patch->string_count||patch->type_count){error="This patch introduces unsupported symbols";goto fail;}
+	for(int i=0;i<patch->function_count;i++){for(int j=0;j<i;j++)if(patch->functions[j].findex==patch->functions[i].findex){error="Duplicate stable function slot";goto fail;}if(!validate_function(m,patch,patch->functions+i,&error))goto fail;}
 	allocation=(hl_patch_code*)calloc(1,sizeof(hl_patch_code));if(!allocation){error="Out of memory applying patch";goto fail;}
 	allocation->function_count=patch->function_count;allocation->functions=(hl_function*)calloc(patch->function_count,sizeof(hl_function));
 	offsets=(int*)calloc(patch->function_count,sizeof(int));if(!allocation->functions||!offsets){error="Out of memory applying patch";goto fail;}
 	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;dst->type=m->code->types+src->type;dst->findex=src->findex;dst->nregs=src->register_count;dst->nops=src->instruction_count;dst->regs=(hl_type**)calloc(dst->nregs,sizeof(hl_type*));dst->ops=(hl_opcode*)calloc(dst->nops,sizeof(hl_opcode));if(!dst->regs||!dst->ops){error="Out of memory applying patch";goto fail;}for(int j=0;j<dst->nregs;j++)dst->regs[j]=m->code->types+src->registers[j];for(int j=0;j<dst->nops;j++){hl_patch_instruction *s=src->instructions+j;hl_opcode *d=dst->ops+j;d->op=(hl_op)s->opcode;if(s->operand_count>0)d->p1=s->operands[0];if(s->operand_count>1)d->p2=s->operands[1];if(s->operand_count>2)d->p3=s->operands[2];if(s->operand_count==4)d->extra=(int*)(int_val)s->operands[3];}}
-	memset(&code,0,sizeof(code));code.nints=patch->int_count;code.ints=patch->ints;code.nfloats=patch->float_count;code.floats=patch->floats;code.nstrings=patch->string_count;code.strings=patch->strings;code.ntypes=m->code->ntypes;code.types=m->code->types;code.nfunctions=m->code->nfunctions;code.nnatives=m->code->nnatives;code.functions=allocation->functions;
+	combined_ints=(int*)malloc(sizeof(int)*(patch->base_int_count+patch->int_count));if(!combined_ints){error="Out of memory applying patch";goto fail;}memcpy(combined_ints,m->code->ints,sizeof(int)*patch->base_int_count);memcpy(combined_ints+patch->base_int_count,patch->ints,sizeof(int)*patch->int_count);
+	memset(&code,0,sizeof(code));code.nints=patch->base_int_count+patch->int_count;code.ints=combined_ints;code.nfloats=m->code->nfloats;code.floats=m->code->floats;code.nstrings=m->code->nstrings;code.strings=m->code->strings;code.ntypes=m->code->ntypes;code.types=m->code->types;code.nfunctions=m->code->nfunctions;code.nnatives=m->code->nnatives;code.functions=allocation->functions;
 	temp=*m;temp.code=&code;temp.jit_code=NULL;temp.jit_debug=NULL;temp.jit_ctx=NULL;
 	jit=hl_jit_alloc();if(!jit){error="Could not allocate patch JIT";goto fail;}hl_jit_init(jit,&temp);
 	for(int i=0;i<patch->function_count;i++){offsets[i]=hl_jit_function(jit,&temp,allocation->functions+i);if(offsets[i]<0){error="Could not JIT patch function";goto fail;}}
 	allocation->code=hl_jit_code(jit,&temp,&allocation->code_size,&temp.jit_debug,NULL);if(!allocation->code){error="Could not finalize patch JIT";goto fail;}hl_jit_free(jit,false);jit=NULL;
 	for(int i=0;i<patch->function_count;i++){int slot=allocation->functions[i].findex;hl_patch_code *old=m->patch_owners[slot];m->functions_ptrs[slot]=(unsigned char*)allocation->code+offsets[i];m->patch_owners[slot]=allocation;allocation->references++;if(old&&--old->references==0)patch_code_free(old);}
-	m->revision=patch->revision;m->patch_jit_count+=patch->function_count;free(offsets);if(error_msg)*error_msg=NULL;return true;
+	free(m->patch_ints);m->patch_ints=combined_ints;m->code->ints=combined_ints;m->code->nints=code.nints;combined_ints=NULL;m->revision=patch->revision;m->patch_jit_count+=patch->function_count;free(offsets);if(error_msg)*error_msg=NULL;return true;
 fail:
 	if(jit) hl_jit_free(jit,false);
 	free(offsets);
+	free(combined_ints);
 	patch_code_free(allocation);
 	if(error_msg) *error_msg=error?error:"Invalid patch";
 	return false;

@@ -1159,6 +1159,7 @@ void hl_module_free( hl_module *m ) {
 	free(m->functions_indexes);
 	free(m->functions_ptrs);
 	free(m->patch_owners);
+	free(m->patch_ints);
 	free(m->ctx.functions_types);
 	free(m->globals_indexes);
 	free(m->globals_data);
