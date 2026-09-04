@@ -120,12 +120,16 @@ typedef struct {
 	int *registers;
 	int instruction_count;
 	hl_patch_instruction *instructions;
+	int relocation_count;
+	int *relocation_instructions;
+	int *relocation_stable_ids;
 } hl_patch_function;
 
 typedef struct {
 	unsigned char module_id[16];
 	int base_revision;
 	int revision;
+	unsigned int int_prefix_hash, float_prefix_hash, string_prefix_hash, type_prefix_hash;
 	int base_int_count;
 	int int_count;
 	int *ints;

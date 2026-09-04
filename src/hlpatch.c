@@ -70,6 +70,44 @@ static bool read_count( patch_reader *r, int *out ) {
 	return true;
 }
 
+static bool read_hash( patch_reader *r, unsigned int *out ) {
+	const unsigned char *p;
+	if( !take(r,4,&p) ) return false;
+	*out = p[0] | (p[1] << 8) | (p[2] << 16) | ((unsigned int)p[3] << 24);
+	return true;
+}
+
+static unsigned int hash_bytes( unsigned int hash, const unsigned char *p, int length ) {
+	for(int i=0;i<length;i++) hash = (hash ^ p[i]) * 16777619U;
+	return hash;
+}
+
+static unsigned int hash_i32( unsigned int hash, int value ) {
+	unsigned char bytes[4] = { value & 255, (value >> 8) & 255, (value >> 16) & 255, ((unsigned int)value >> 24) & 255 };
+	return hash_bytes(hash,bytes,4);
+}
+
+static unsigned int hash_int_prefix( hl_code *code, int count ) {
+	unsigned int hash=2166136261U;for(int i=0;i<count;i++)hash=hash_i32(hash,code->ints[i]);return hash;
+}
+
+static unsigned int hash_float_prefix( hl_code *code, int count ) {
+	unsigned int hash=2166136261U;for(int i=0;i<count;i++)hash=hash_bytes(hash,(unsigned char*)(code->floats+i),8);return hash;
+}
+
+static unsigned int hash_string_prefix( hl_code *code, int count ) {
+	unsigned int hash=2166136261U;for(int i=0;i<count;i++){int length=code->strings_lens[i];hash=hash_i32(hash,length);hash=hash_bytes(hash,(unsigned char*)code->strings[i],length);}return hash;
+}
+
+static unsigned int hash_type_prefix( hl_code *code, int count ) {
+	unsigned int hash=2166136261U;
+	for(int i=0;i<count;i++){
+		hl_type *type=code->types+i;hash=hash_i32(hash,type->kind);
+		if(type->kind==HFUN){hash=hash_i32(hash,type->fun->nargs);for(int j=0;j<type->fun->nargs;j++)hash=hash_i32(hash,(int)(type->fun->args[j]-code->types));hash=hash_i32(hash,(int)(type->fun->ret-code->types));}
+	}
+	return hash;
+}
+
 static int opcode_operands( int opcode ) {
 	switch( opcode ) {
 	case OInt: case OBool: case OCall0: case OJTrue: return 2;
@@ -87,7 +125,7 @@ void hl_patch_free( hl_patch *patch ) {
 	for(i=0;i<patch->function_count;i++) {
 		hl_patch_function *f = patch->functions + i;
 		for(j=0;j<f->instruction_count;j++) free(f->instructions[j].operands);
-		free(f->instructions); free(f->registers);
+		free(f->instructions); free(f->registers); free(f->relocation_instructions); free(f->relocation_stable_ids);
 	}
 	free(patch->functions); free(patch->strings); free(patch->floats); free(patch->ints); free(patch);
 }
@@ -95,38 +133,49 @@ void hl_patch_free( hl_patch *patch ) {
 hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error_msg ) {
 	patch_reader r = { data, data + (size < 0 ? 0 : size), NULL };
 	hl_patch *patch = (hl_patch*)calloc(1,sizeof(hl_patch));
-	const unsigned char *p; int version, i, j, count, tag;
+	const unsigned char *p; int version, i, j, count, tag, section_count, section_length;
+	bool have_symbols = false, have_functions = false;
 #define FAIL(msg) do { r.error = msg; goto fail; } while(0)
 	if( patch == NULL ) FAIL("Out of memory reading HLP");
 	if( !take(&r,3,&p) ) goto fail;
 	if( memcmp(p,"HLP",3) != 0 ) FAIL("Invalid HLP magic");
 	if( !read_byte(&r,&version) ) goto fail;
-	if( version != 3 ) FAIL("Unsupported HLP version");
+	if( version != 4 ) FAIL("Unsupported HLP version");
 	if( !take(&r,16,&p) ) goto fail;
 	memcpy(patch->module_id,p,16);
 	if( !read_count(&r,&patch->base_revision) || !read_count(&r,&patch->revision) ) goto fail;
 	if( patch->revision <= patch->base_revision ) FAIL("Invalid patch revision range");
-	if( !read_count(&r,&patch->base_int_count) || !read_count(&r,&patch->int_count) ) goto fail;
-	patch->ints = (int*)calloc(patch->int_count,sizeof(int));
-	for(i=0;i<patch->int_count;i++) { if( !take(&r,4,&p) ) goto fail; patch->ints[i]=(int)(p[0]|(p[1]<<8)|(p[2]<<16)|((unsigned int)p[3]<<24)); }
-	if( !read_count(&r,&patch->base_float_count) || !read_count(&r,&patch->float_count) ) goto fail;
-	patch->floats = (double*)calloc(patch->float_count,sizeof(double));
-	for(i=0;i<patch->float_count;i++) { if( !take(&r,8,&p) ) goto fail; memcpy(patch->floats+i,p,8); }
-	if( !read_count(&r,&patch->base_string_count) || !read_count(&r,&patch->string_count) ) goto fail;
-	patch->strings = (char**)calloc(patch->string_count,sizeof(char*));
-	for(i=0;i<patch->string_count;i++) { if( !read_count(&r,&count) || !take(&r,count,&p) ) goto fail; patch->strings[i]=(char*)malloc(count+1); if(!patch->strings[i])FAIL("Out of memory reading HLP");memcpy(patch->strings[i],p,count);patch->strings[i][count]=0; }
-	if( !read_count(&r,&patch->base_type_count) || !read_count(&r,&patch->type_count) ) goto fail;
-	for(i=0;i<patch->type_count;i++) { if(!read_byte(&r,&tag))goto fail;if(tag==HFUN){if(!read_byte(&r,&count))goto fail;for(j=0;j<count+1;j++)if(!read_index(&r,&version))goto fail;}else if(tag<0||tag>HGUID)FAIL("Unsupported HLP type"); }
-	if( !read_count(&r,&patch->function_count) ) goto fail;
-	patch->functions=(hl_patch_function*)calloc(patch->function_count,sizeof(hl_patch_function));
-	for(i=0;i<patch->function_count;i++) { hl_patch_function *f=patch->functions+i; int length; const unsigned char *end;
-		if( !read_count(&r,&length) || r.end-r.p<length ) goto fail;
-		end=r.p+length;
-		if(!read_count(&r,&f->stable_id)||!read_index(&r,&f->type)||!read_count(&r,&f->findex)||!read_count(&r,&f->register_count)||!read_count(&r,&f->instruction_count))goto fail;
-		f->registers=(int*)calloc(f->register_count,sizeof(int));for(j=0;j<f->register_count;j++)if(!read_index(&r,f->registers+j))goto fail;
-		f->instructions=(hl_patch_instruction*)calloc(f->instruction_count,sizeof(hl_patch_instruction));for(j=0;j<f->instruction_count;j++){hl_patch_instruction *op=f->instructions+j;if(!read_byte(&r,&op->opcode))goto fail;op->operand_count=opcode_operands(op->opcode);if(op->operand_count<0)FAIL("Unsupported patch opcode");op->operands=(int*)calloc(op->operand_count,sizeof(int));for(int k=0;k<op->operand_count;k++)if(!read_index(&r,op->operands+k))goto fail;}
-		if(r.p!=end)FAIL("Invalid patch function length");
+	if( !read_count(&r,&section_count) ) goto fail;
+	for(int section=0;section<section_count;section++) {
+		patch_reader s;
+		if( !read_byte(&r,&tag) || !read_count(&r,&section_length) || r.end-r.p<section_length ) goto fail;
+		s.p=r.p;s.end=r.p+section_length;s.error=NULL;r.p=s.end;
+		if( tag == 1 ) {
+			if( have_symbols ) FAIL("Duplicate HLP symbols section");
+			have_symbols=true;
+			if( !read_hash(&s,&patch->int_prefix_hash) || !read_count(&s,&patch->base_int_count) || !read_count(&s,&patch->int_count) ) goto section_fail;
+			patch->ints=(int*)calloc(patch->int_count,sizeof(int));
+			for(i=0;i<patch->int_count;i++){if(!take(&s,4,&p))goto section_fail;patch->ints[i]=(int)(p[0]|(p[1]<<8)|(p[2]<<16)|((unsigned int)p[3]<<24));}
+			if(!read_hash(&s,&patch->float_prefix_hash)||!read_count(&s,&patch->base_float_count)||!read_count(&s,&patch->float_count))goto section_fail;
+			patch->floats=(double*)calloc(patch->float_count,sizeof(double));for(i=0;i<patch->float_count;i++){if(!take(&s,8,&p))goto section_fail;memcpy(patch->floats+i,p,8);}
+			if(!read_hash(&s,&patch->string_prefix_hash)||!read_count(&s,&patch->base_string_count)||!read_count(&s,&patch->string_count))goto section_fail;
+			patch->strings=(char**)calloc(patch->string_count,sizeof(char*));for(i=0;i<patch->string_count;i++){if(!read_count(&s,&count)||!take(&s,count,&p))goto section_fail;patch->strings[i]=(char*)malloc(count+1);if(!patch->strings[i])FAIL("Out of memory reading HLP");memcpy(patch->strings[i],p,count);patch->strings[i][count]=0;}
+			if(!read_hash(&s,&patch->type_prefix_hash)||!read_count(&s,&patch->base_type_count)||!read_count(&s,&patch->type_count))goto section_fail;
+			for(i=0;i<patch->type_count;i++){if(!read_byte(&s,&tag))goto section_fail;if(tag==HFUN){if(!read_byte(&s,&count))goto section_fail;for(j=0;j<count+1;j++)if(!read_index(&s,&version))goto section_fail;}else if(tag<0||tag>HGUID)FAIL("Unsupported HLP type");}
+		} else if( tag == 2 ) {
+			if( have_functions ) FAIL("Duplicate HLP functions section");
+			have_functions=true;if(!read_count(&s,&patch->function_count))goto section_fail;
+			patch->functions=(hl_patch_function*)calloc(patch->function_count,sizeof(hl_patch_function));
+			for(i=0;i<patch->function_count;i++){hl_patch_function *f=patch->functions+i;int length;const unsigned char *end;if(!read_count(&s,&length)||s.end-s.p<length)goto section_fail;end=s.p+length;if(!read_count(&s,&f->stable_id)||!read_index(&s,&f->type)||!read_count(&s,&f->findex)||!read_count(&s,&f->register_count)||!read_count(&s,&f->instruction_count))goto section_fail;f->registers=(int*)calloc(f->register_count,sizeof(int));for(j=0;j<f->register_count;j++)if(!read_index(&s,f->registers+j))goto section_fail;f->instructions=(hl_patch_instruction*)calloc(f->instruction_count,sizeof(hl_patch_instruction));for(j=0;j<f->instruction_count;j++){hl_patch_instruction *op=f->instructions+j;if(!read_byte(&s,&op->opcode))goto section_fail;op->operand_count=opcode_operands(op->opcode);if(op->operand_count<0)FAIL("Unsupported patch opcode");op->operands=(int*)calloc(op->operand_count,sizeof(int));for(int k=0;k<op->operand_count;k++)if(!read_index(&s,op->operands+k))goto section_fail;}if(!read_count(&s,&f->relocation_count))goto section_fail;f->relocation_instructions=(int*)calloc(f->relocation_count,sizeof(int));f->relocation_stable_ids=(int*)calloc(f->relocation_count,sizeof(int));for(j=0;j<f->relocation_count;j++)if(!read_count(&s,f->relocation_instructions+j)||!read_count(&s,f->relocation_stable_ids+j))goto section_fail;if(s.p!=end)FAIL("Invalid patch function length");}
+		} else {
+			s.p = s.end;
+		}
+		if( s.p != s.end ) FAIL("Invalid HLP section length");
+		continue;
+section_fail:
+		r.error=s.error?s.error:"Truncated HLP data";goto fail;
 	}
+	if( !have_symbols || !have_functions ) FAIL("Missing required HLP section");
 	if(r.p!=r.end)FAIL("Trailing HLP data");
 	if( error_msg ) *error_msg=NULL;
 	return patch;
@@ -170,6 +219,7 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	if(patch->function_count<=0){error="Patch contains no functions";goto fail;}
 	if(m->revision!=patch->base_revision||patch->revision<=patch->base_revision){error="Stale patch revision";goto fail;}
 	if(patch->base_int_count!=m->code->nints||patch->base_float_count!=m->code->nfloats||patch->base_string_count!=m->code->nstrings||patch->base_type_count!=m->code->ntypes){error="Patch symbol base does not match module";goto fail;}
+	if(patch->int_prefix_hash!=hash_int_prefix(m->code,patch->base_int_count)||patch->float_prefix_hash!=hash_float_prefix(m->code,patch->base_float_count)||patch->string_prefix_hash!=hash_string_prefix(m->code,patch->base_string_count)||patch->type_prefix_hash!=hash_type_prefix(m->code,patch->base_type_count)){error="Patch symbol prefix hash does not match module";goto fail;}
 	if(patch->float_count||patch->string_count||patch->type_count){error="This patch introduces unsupported symbols";goto fail;}
 	for(int i=0;i<patch->function_count;i++){for(int j=0;j<i;j++)if(patch->functions[j].findex==patch->functions[i].findex){error="Duplicate stable function slot";goto fail;}if(!validate_function(m,patch,patch->functions+i,&error))goto fail;}
 	allocation=(hl_patch_code*)calloc(1,sizeof(hl_patch_code));if(!allocation){error="Out of memory applying patch";goto fail;}

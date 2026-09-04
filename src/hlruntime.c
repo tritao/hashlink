@@ -124,6 +124,13 @@ hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const
 		int slot = resolve_stable_id(runtime,patch->functions[i].stable_id);
 		if( slot < 0 ) { hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE; }
 		patch->functions[i].findex = slot;
+		for(int j=0;j<patch->functions[i].relocation_count;j++) {
+			int instruction=patch->functions[i].relocation_instructions[j];
+			int target=resolve_stable_id(runtime,patch->functions[i].relocation_stable_ids[j]);
+			int opcode=instruction<0||instruction>=patch->functions[i].instruction_count?-1:patch->functions[i].instructions[instruction].opcode;
+			if(target<0||(opcode!=OCall0&&opcode!=OCall1&&opcode!=OCall2)){hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE;}
+			patch->functions[i].instructions[instruction].operands[1]=target;
+		}
 	}
 	applied = hl_module_apply_patch(runtime->module,patch,&error);
 	hl_patch_free(patch);
