@@ -5,6 +5,10 @@
 struct _hl_runtime_module {
 	hl_module *module;
 	hl_mutex *lock;
+	unsigned char module_id[16];
+	int identity_count;
+	int *stable_ids;
+	int *slots;
 };
 
 static hl_function *find_function( hl_module *module, int stable_id ) {
@@ -15,13 +19,21 @@ static hl_function *find_function( hl_module *module, int stable_id ) {
 	return NULL;
 }
 
-hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length, hl_runtime_module **out ) {
+static unsigned int read_u32( const unsigned char *p ) {
+	return p[0] | (p[1] << 8) | (p[2] << 16) | ((unsigned int)p[3] << 24);
+}
+
+hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out ) {
 	char *error = NULL;
 	hl_code *code;
 	hl_module *module;
 	hl_runtime_module *runtime;
-	if( out == NULL || bytes == NULL || length <= 0 ) return HL_RUNTIME_BAD_ARGUMENT;
+	int identity_count, i, j;
+	if( out == NULL || bytes == NULL || length <= 0 || identity == NULL || identity_length < 24 ) return HL_RUNTIME_BAD_ARGUMENT;
 	*out = NULL;
+	if( memcmp(identity,"HLI",3) != 0 || identity[3] != 1 ) return HL_RUNTIME_BAD_FORMAT;
+	identity_count = (int)read_u32(identity + 20);
+	if( identity_count < 0 || identity_count > 0x100000 || identity_length != 24 + identity_count * 8 ) return HL_RUNTIME_BAD_FORMAT;
 	code = hl_code_read(bytes,length,&error);
 	if( code == NULL ) return HL_RUNTIME_BAD_FORMAT;
 	module = hl_module_alloc(code);
@@ -37,10 +49,33 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 		return HL_RUNTIME_JIT_FAILED;
 	}
 	runtime->module = module;
+	memcpy(runtime->module_id,identity + 4,16);
+	runtime->identity_count = identity_count;
+	runtime->stable_ids = (int*)malloc(sizeof(int) * identity_count);
+	runtime->slots = (int*)malloc(sizeof(int) * identity_count);
+	if( (identity_count > 0) && (runtime->stable_ids == NULL || runtime->slots == NULL) ) {
+		free(runtime->stable_ids);free(runtime->slots);free(runtime);hl_module_unload(module);return HL_RUNTIME_JIT_FAILED;
+	}
+	for(i=0;i<identity_count;i++) {
+		runtime->stable_ids[i] = (int)read_u32(identity + 24 + i * 8);
+		runtime->slots[i] = (int)read_u32(identity + 28 + i * 8);
+		if( runtime->stable_ids[i] < 0 || find_function(module,runtime->slots[i]) == NULL ) {
+			free(runtime->stable_ids);free(runtime->slots);free(runtime);hl_module_unload(module);return HL_RUNTIME_BAD_FORMAT;
+		}
+		for(j=0;j<i;j++) if( runtime->stable_ids[j] == runtime->stable_ids[i] || runtime->slots[j] == runtime->slots[i] ) {
+			free(runtime->stable_ids);free(runtime->slots);free(runtime);hl_module_unload(module);return HL_RUNTIME_BAD_FORMAT;
+		}
+	}
 	runtime->lock = hl_mutex_alloc(true);
 	hl_add_root(&runtime->lock);
 	*out = runtime;
 	return HL_RUNTIME_OK;
+}
+
+static int resolve_stable_id( hl_runtime_module *runtime, int stable_id ) {
+	int i;
+	for(i=0;i<runtime->identity_count;i++) if( runtime->stable_ids[i] == stable_id ) return runtime->slots[i];
+	return -1;
 }
 
 hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int stable_id, int *out, vdynamic **exception ) {
@@ -51,6 +86,7 @@ hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int st
 	if( runtime == NULL || out == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
 	if( exception != NULL ) *exception = NULL;
 	hl_mutex_acquire(runtime->lock);
+	stable_id = resolve_stable_id(runtime,stable_id);
 	function = find_function(runtime->module,stable_id);
 	if( function == NULL || function->type->kind != HFUN || function->type->fun->nargs != 0 || function->type->fun->ret->kind != HI32 ) {
 		hl_mutex_release(runtime->lock);
@@ -80,6 +116,14 @@ hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const
 	if( patch == NULL ) {
 		hl_mutex_release(runtime->lock);
 		return HL_RUNTIME_BAD_FORMAT;
+	}
+	if( memcmp(runtime->module_id,patch->module_id,16) != 0 ) {
+		hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE;
+	}
+	for(int i=0;i<patch->function_count;i++) {
+		int slot = resolve_stable_id(runtime,patch->functions[i].stable_id);
+		if( slot < 0 ) { hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE; }
+		patch->functions[i].findex = slot;
 	}
 	applied = hl_module_apply_patch(runtime->module,patch,&error);
 	hl_patch_free(patch);
@@ -122,5 +166,7 @@ void hl_runtime_module_release( hl_runtime_module *runtime ) {
 	hl_mutex_release(runtime->lock);
 	hl_remove_root(&runtime->lock);
 	hl_mutex_free(runtime->lock);
+	free(runtime->stable_ids);
+	free(runtime->slots);
 	free(runtime);
 }

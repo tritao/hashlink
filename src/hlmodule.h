@@ -114,6 +114,7 @@ typedef struct {
 
 typedef struct {
 	int type;
+	int stable_id;
 	int findex;
 	int register_count;
 	int *registers;
@@ -122,6 +123,7 @@ typedef struct {
 } hl_patch_function;
 
 typedef struct {
+	unsigned char module_id[16];
 	int base_revision;
 	int revision;
 	int base_int_count;
@@ -240,7 +242,7 @@ typedef enum {
 	HL_RUNTIME_STALE_PATCH, HL_RUNTIME_INCOMPATIBLE, HL_RUNTIME_JIT_FAILED,
 	HL_RUNTIME_BAD_FUNCTION, HL_RUNTIME_EXCEPTION
 } hl_runtime_status;
-HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length, hl_runtime_module **out );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int stable_id, int *result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const unsigned char *bytes, int length );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_hlp_summary( const unsigned char *bytes, int length, int *base_revision, int *revision, int *function_count );

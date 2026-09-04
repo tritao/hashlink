@@ -101,7 +101,9 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 	if( !take(&r,3,&p) ) goto fail;
 	if( memcmp(p,"HLP",3) != 0 ) FAIL("Invalid HLP magic");
 	if( !read_byte(&r,&version) ) goto fail;
-	if( version != 2 ) FAIL("Unsupported HLP version");
+	if( version != 3 ) FAIL("Unsupported HLP version");
+	if( !take(&r,16,&p) ) goto fail;
+	memcpy(patch->module_id,p,16);
 	if( !read_count(&r,&patch->base_revision) || !read_count(&r,&patch->revision) ) goto fail;
 	if( patch->revision <= patch->base_revision ) FAIL("Invalid patch revision range");
 	if( !read_count(&r,&patch->base_int_count) || !read_count(&r,&patch->int_count) ) goto fail;
@@ -120,7 +122,7 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 	for(i=0;i<patch->function_count;i++) { hl_patch_function *f=patch->functions+i; int length; const unsigned char *end;
 		if( !read_count(&r,&length) || r.end-r.p<length ) goto fail;
 		end=r.p+length;
-		if(!read_index(&r,&f->type)||!read_count(&r,&f->findex)||!read_count(&r,&f->register_count)||!read_count(&r,&f->instruction_count))goto fail;
+		if(!read_count(&r,&f->stable_id)||!read_index(&r,&f->type)||!read_count(&r,&f->findex)||!read_count(&r,&f->register_count)||!read_count(&r,&f->instruction_count))goto fail;
 		f->registers=(int*)calloc(f->register_count,sizeof(int));for(j=0;j<f->register_count;j++)if(!read_index(&r,f->registers+j))goto fail;
 		f->instructions=(hl_patch_instruction*)calloc(f->instruction_count,sizeof(hl_patch_instruction));for(j=0;j<f->instruction_count;j++){hl_patch_instruction *op=f->instructions+j;if(!read_byte(&r,&op->opcode))goto fail;op->operand_count=opcode_operands(op->opcode);if(op->operand_count<0)FAIL("Unsupported patch opcode");op->operands=(int*)calloc(op->operand_count,sizeof(int));for(int k=0;k<op->operand_count;k++)if(!read_index(&r,op->operands+k))goto fail;}
 		if(r.p!=end)FAIL("Invalid patch function length");
