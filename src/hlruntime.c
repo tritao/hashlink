@@ -106,6 +106,58 @@ hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int st
 	return HL_RUNTIME_OK;
 }
 
+static hl_runtime_status call_checked( hl_runtime_module *runtime, int stable_id, int nargs, hl_type_kind result_kind,
+	vdynamic **args, vdynamic **result_out, vdynamic **exception ) {
+	hl_function *function;
+	vclosure closure;
+	vdynamic *result;
+	bool raised = false;
+	int slot;
+	if( runtime == NULL || (nargs > 0 && args == NULL) ) return HL_RUNTIME_BAD_ARGUMENT;
+	if( exception != NULL ) *exception = NULL;
+	if( result_out != NULL ) *result_out = NULL;
+	hl_mutex_acquire(runtime->lock);
+	slot = resolve_stable_id(runtime,stable_id);
+	function = find_function(runtime->module,slot);
+	if( function == NULL || function->type->kind != HFUN || function->type->fun->nargs != nargs || function->type->fun->ret->kind != result_kind ) {
+		hl_mutex_release(runtime->lock);
+		return HL_RUNTIME_BAD_FUNCTION;
+	}
+	closure.t = function->type;
+	closure.fun = runtime->module->functions_ptrs[slot];
+	closure.hasValue = 0;
+	closure.value = NULL;
+	result = hl_dyn_call_safe(&closure,args,nargs,&raised);
+	hl_mutex_release(runtime->lock);
+	if( raised ) {
+		if( exception != NULL ) *exception = result;
+		return HL_RUNTIME_EXCEPTION;
+	}
+	if( result_out != NULL ) *result_out = result;
+	return HL_RUNTIME_OK;
+}
+
+hl_runtime_status hl_runtime_module_call_void( hl_runtime_module *runtime, int stable_id, vdynamic **exception ) {
+	return call_checked(runtime,stable_id,0,HVOID,NULL,NULL,exception);
+}
+
+hl_runtime_status hl_runtime_module_call_bytes( hl_runtime_module *runtime, int stable_id, vbyte **out, vdynamic **exception ) {
+	vdynamic *result = NULL;
+	hl_runtime_status status;
+	if( out == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
+	status = call_checked(runtime,stable_id,0,HBYTES,NULL,&result,exception);
+	if( status == HL_RUNTIME_OK ) *out = result == NULL ? NULL : result->v.bytes;
+	return status;
+}
+
+hl_runtime_status hl_runtime_module_call_bytes1( hl_runtime_module *runtime, int stable_id, vbyte *argument, vdynamic **exception ) {
+	vdynamic *args[1];
+	if( runtime == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
+	args[0] = hl_alloc_dynamic(&hlt_bytes);
+	args[0]->v.bytes = argument;
+	return call_checked(runtime,stable_id,1,HVOID,args,NULL,exception);
+}
+
 hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const unsigned char *bytes, int length ) {
 	const char *error = NULL;
 	hl_patch *patch;
