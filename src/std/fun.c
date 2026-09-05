@@ -212,6 +212,7 @@ HL_PRIM vdynamic *hl_dyn_call( vclosure *c, vdynamic **args, int nargs ) {
 	tmp.a.at = &hlt_dyn;
 	tmp.a.size = nargs;
 	tmp.a.capacity = nargs;
+	tmp.a.data = (vbyte*)&tmp.a.data;
 	if( c->hasValue && c->t->fun->nargs >= 0 && c->t->fun->parent != NULL ) {
 		ctmp.t = c->t->fun->parent;
 		ctmp.hasValue = 0;

@@ -514,6 +514,7 @@ typedef struct {
 	hl_type *at;
 	int size;
 	int capacity; // allocated element capacity; preserves the 16-byte header alignment
+	vbyte *data; // exact backing allocation base; growth never changes the array identity
 } varray;
 
 typedef struct _vclosure {
@@ -646,9 +647,10 @@ HL_API bool hl_is_ptr( hl_type *t );
 HL_API bool hl_same_type( hl_type *a, hl_type *b );
 HL_API bool hl_safe_cast( hl_type *t, hl_type *to );
 
-#define hl_aptr(a,t)	((t*)(((varray*)(a))+1))
+#define hl_aptr(a,t)	((t*)(((varray*)(a))->data + HL_WSIZE))
 
 HL_API varray *hl_alloc_array( hl_type *t, int size );
+HL_API void hl_array_reserve( varray *a, int capacity );
 HL_API void hl_array_check( varray *a, int index );
 HL_API vdynamic *hl_alloc_dynamic( hl_type *t );
 HL_API vdynamic *hl_alloc_dynbool( bool b );

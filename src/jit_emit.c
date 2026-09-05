@@ -2052,7 +2052,8 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 				ereg val = isPtr ? LOAD_MEM_PTR(pos,0) : pos;
 				STORE(dst, val);
 			} else {
-				ereg pos = OFFSET(LOAD(ra), LOAD(rb), hl_type_size(dst->t), sizeof(varray));
+				ereg data = OFFSET(LOAD_MEM_PTR(LOAD(ra), offsetof(varray,data)), UNUSED, 0, HL_WSIZE);
+				ereg pos = OFFSET(data, LOAD(rb), hl_type_size(dst->t), 0);
 				STORE(dst, LOAD_MEM(pos,0,dst->t));
 			}
 		}
@@ -2073,7 +2074,8 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 				ereg pos = (osize <= 8 && ((osize - 1) & osize) == 0) ? OFFSET(LOAD(dst), LOAD(ra), osize, 0) : OFFSET(LOAD(dst), emit_gen_ext(ctx,BINOP,LOAD(ra),MK_CONST(osize),M_I32,OMul),1,0);
 				emit_store_size(ctx, pos, 0, LOAD(rb), 0, osize);
 			} else  {
-				ereg pos = OFFSET(LOAD(dst), LOAD(ra), hl_type_size(rb->t), sizeof(varray));
+				ereg data = OFFSET(LOAD_MEM_PTR(LOAD(dst), offsetof(varray,data)), UNUSED, 0, HL_WSIZE);
+				ereg pos = OFFSET(data, LOAD(ra), hl_type_size(rb->t), 0);
 				STORE_MEM(pos, 0, LOAD(rb));
 			}
 		}
@@ -2093,7 +2095,7 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 	case ORefData:
 		switch( ra->t->kind ) {
 		case HARRAY:
-			STORE(dst, OFFSET(LOAD(ra),UNUSED,0,sizeof(varray)));
+			STORE(dst, OFFSET(LOAD_MEM_PTR(LOAD(ra), offsetof(varray,data)), UNUSED, 0, HL_WSIZE));
 			break;
 		default:
 			jit_assert();

@@ -935,7 +935,7 @@ static void compact_write_content( mem_context *ctx, vdynamic *d ) {
 		compact_write_ptr(ctx, a->at);
 		compact_write_int(ctx, a->size);
 		compact_write_int(ctx, a->capacity);
-		char *array_data = (char*)(a + 1);
+		char *array_data = (char*)a->data + HL_WSIZE;
 		int stride = hl_type_size(a->at);
 		for(i=0;i<a->size;i++) {
 			compact_write_data(ctx,a->at, array_data + stride * i);

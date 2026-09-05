@@ -20,19 +20,50 @@
  * DEALINGS IN THE SOFTWARE.
  */
 #include <hl.h>
+#include <string.h>
+
+static vbyte *hl_array_alloc_storage( hl_type *at, int capacity ) {
+	int esize = hl_type_size(at);
+	/* Keep a type word in the backing allocation so the precise GC can treat
+	 * it like a dynamic array block.  The public data pointer skips that word. */
+	hl_type **storage = (hl_type**)hl_gc_alloc_gen(&hlt_array,
+		sizeof(hl_type*) + (size_t)esize * capacity,
+		(hl_is_ptr(at) ? MEM_KIND_DYNAMIC : MEM_KIND_NOPTR) | MEM_ZERO);
+	*storage = &hlt_array;
+	return (vbyte*)storage;
+}
 
 HL_PRIM varray *hl_alloc_array( hl_type *at, int size ) {
-	int esize = hl_type_size(at);
 	int capacity;
 	varray *a;
 	if( size < 0 ) hl_error("Invalid array size");
 	capacity = size < 4 ? 4 : size + size / 2;
-	a = (varray*)hl_gc_alloc_gen(&hlt_array, sizeof(varray) + esize*capacity, (hl_is_ptr(at) ? MEM_KIND_DYNAMIC : MEM_KIND_NOPTR) | MEM_ZERO);
+	a = (varray*)hl_gc_alloc_gen(&hlt_array, sizeof(varray), MEM_KIND_DYNAMIC | MEM_ZERO);
 	a->t = &hlt_array;
 	a->at = at;
 	a->size = size;
 	a->capacity = capacity;
+	a->data = hl_array_alloc_storage(at, capacity);
 	return a;
+}
+
+HL_PRIM void hl_array_reserve( varray *a, int capacity ) {
+	if( capacity <= a->capacity ) return;
+	int next = a->capacity < 4 ? 4 : a->capacity;
+	while( next < capacity ) {
+		int grown = next + next / 2;
+		if( grown <= next ) {
+			next = capacity;
+			break;
+		}
+		next = grown;
+	}
+	vbyte *data = hl_array_alloc_storage(a->at, next);
+	int stride = hl_type_size(a->at);
+	if( a->size > 0 )
+		memcpy(data + HL_WSIZE, a->data + HL_WSIZE, (size_t)a->size * stride);
+	a->data = data;
+	a->capacity = next;
 }
 
 HL_PRIM void hl_array_check( varray *a, int index ) {
