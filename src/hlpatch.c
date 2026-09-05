@@ -380,24 +380,37 @@ static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function 
 	return true;
 }
 
-static bool stage_patch_types( hl_module *m, hl_patch *patch, uchar **strings, int string_count, void ***allocations, int *allocation_count, const char **error ) {
+static bool validate_patch_types( hl_module *m, hl_patch *patch, int string_count, const char **error ) {
 	int total=patch->base_type_count+patch->type_count;
 	if(total>m->code->types_capacity){*error="Type arena capacity exceeded";return false;}
+	for(int i=0;i<patch->type_count;i++){
+		hl_patch_type *type=patch->types+i;
+		if(type->tag==HFUN){
+			for(int j=0;j<type->count;j++)if(type->arguments[j]<0||type->arguments[j]>=total){*error="Invalid appended function argument type";return false;}
+			if(type->result<0||type->result>=total){*error="Invalid appended function result type";return false;}
+		}else if(type->tag==HABSTRACT){
+			if(type->name<0||type->name>=string_count){*error="Invalid appended abstract name";return false;}
+		}else if(type->tag<HVOID||type->tag>HGUID||type->tag==HOBJ||type->tag==HVIRTUAL||type->tag==HENUM||type->tag==HREF||type->tag==HNULL||type->tag==HPACKED){
+			*error="Unsupported HLP type";return false;
+		}
+	}
+	return true;
+}
+
+static bool stage_patch_types( hl_module *m, hl_patch *patch, uchar **strings, void ***allocations, int *allocation_count, const char **error ) {
 	*allocations=(void**)calloc(patch->type_count,sizeof(void*));
 	if(patch->type_count&&!*allocations){*error="Out of memory staging patch types";return false;}
 	for(int i=0;i<patch->type_count;i++){
 		hl_patch_type *src=patch->types+i;hl_type *dst=m->code->types+patch->base_type_count+i;
 		memset(dst,0,sizeof(*dst));dst->kind=(hl_type_kind)src->tag;
 		if(src->tag==HFUN){
-			for(int j=0;j<src->count;j++)if(src->arguments[j]<0||src->arguments[j]>=total){*error="Invalid appended function argument type";return false;}
-			if(src->result<0||src->result>=total){*error="Invalid appended function result type";return false;}
 			size_t size=sizeof(hl_type_fun)+sizeof(hl_type*)*src->count;hl_type_fun *fun=(hl_type_fun*)calloc(1,size);
 			if(!fun){*error="Out of memory staging function type";return false;}
 			(*allocations)[(*allocation_count)++]=fun;fun->nargs=src->count;fun->args=(hl_type**)(fun+1);fun->ret=m->code->types+src->result;
 			for(int j=0;j<src->count;j++)fun->args[j]=m->code->types+src->arguments[j];
 			dst->fun=fun;
 		}else if(src->tag==HABSTRACT){
-			if(src->name<0||src->name>=string_count){*error="Invalid appended abstract name";return false;}dst->abs_name=strings[src->name];
+			dst->abs_name=strings[src->name];
 		}
 	}
 	return true;
@@ -410,11 +423,12 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	if(m->revision!=patch->base_revision||patch->revision<=patch->base_revision){error="Stale patch revision";goto fail;}
 	if(patch->base_int_count!=m->code->nints||patch->base_float_count!=m->code->nfloats||patch->base_string_count!=m->code->nstrings||patch->base_type_count!=m->code->ntypes){error="Patch symbol base does not match module";goto fail;}
 	if(patch->int_prefix_hash!=hash_int_prefix(m->code,patch->base_int_count)||patch->float_prefix_hash!=hash_float_prefix(m->code,patch->base_float_count)||patch->string_prefix_hash!=hash_string_prefix(m->code,patch->base_string_count)||patch->type_prefix_hash!=hash_type_prefix(m,patch->base_type_count)){error="Patch symbol prefix hash does not match module";goto fail;}
+	if(!validate_patch_types(m,patch,patch->base_string_count+patch->string_count,&error))goto fail;
 	for(int i=0;i<patch->function_count;i++){for(int j=0;j<i;j++)if(patch->functions[j].findex==patch->functions[i].findex){error="Duplicate stable function slot";goto fail;}if(!validate_function(m,patch,patch->functions+i,&error))goto fail;}
 	combined_ints=(int*)malloc(sizeof(int)*(patch->base_int_count+patch->int_count));if(!combined_ints){error="Out of memory applying patch";goto fail;}memcpy(combined_ints,m->code->ints,sizeof(int)*patch->base_int_count);memcpy(combined_ints+patch->base_int_count,patch->ints,sizeof(int)*patch->int_count);
 	combined_floats=(double*)malloc(sizeof(double)*(patch->base_float_count+patch->float_count));if(!combined_floats){error="Out of memory applying patch";goto fail;}memcpy(combined_floats,m->code->floats,sizeof(double)*patch->base_float_count);memcpy(combined_floats+patch->base_float_count,patch->floats,sizeof(double)*patch->float_count);
 	{int total=patch->base_string_count+patch->string_count,bytes=0,pos=0;for(int i=0;i<patch->base_string_count;i++)bytes+=m->code->strings_lens[i]+1;for(int i=0;i<patch->string_count;i++)bytes+=patch->string_lens[i]+1;combined_strings=(char**)malloc(sizeof(char*)*total);combined_string_lens=(int*)malloc(sizeof(int)*total);combined_ustrings=(uchar**)calloc(total,sizeof(uchar*));combined_string_data=(char*)malloc(bytes);if((total>0)&&(!combined_strings||!combined_string_lens||!combined_ustrings||!combined_string_data)){error="Out of memory applying patch";goto fail;}for(int i=0;i<total;i++){const char *src;int length;if(i<patch->base_string_count){src=m->code->strings[i];length=m->code->strings_lens[i];combined_ustrings[i]=(uchar*)hl_get_ustring(m->code,i);}else{src=patch->strings[i-patch->base_string_count];length=patch->string_lens[i-patch->base_string_count];int usize=hl_utf8_length((vbyte*)src,0);combined_ustrings[i]=(uchar*)malloc((usize+1)*sizeof(uchar));if(!combined_ustrings[i]){error="Out of memory applying patch";goto fail;}hl_from_utf8(combined_ustrings[i],usize,src);}combined_strings[i]=combined_string_data+pos;combined_string_lens[i]=length;memcpy(combined_string_data+pos,src,length);combined_string_data[pos+length]=0;pos+=length+1;}}
-	if(!stage_patch_types(m,patch,combined_ustrings,patch->base_string_count+patch->string_count,&type_allocations,&type_allocation_count,&error))goto fail;
+	if(!stage_patch_types(m,patch,combined_ustrings,&type_allocations,&type_allocation_count,&error))goto fail;
 	allocation=(hl_patch_code*)calloc(1,sizeof(hl_patch_code));if(!allocation){error="Out of memory applying patch";goto fail;}
 	allocation->function_count=patch->function_count;allocation->functions=(hl_function*)calloc(patch->function_count,sizeof(hl_function));
 	offsets=(int*)calloc(patch->function_count,sizeof(int));if(!allocation->functions||!offsets){error="Out of memory applying patch";goto fail;}
