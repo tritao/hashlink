@@ -513,7 +513,7 @@ typedef struct {
 	hl_type *t;
 	hl_type *at;
 	int size;
-	int __pad; // force align on 16 bytes for double
+	int capacity; // allocated element capacity; preserves the 16-byte header alignment
 } varray;
 
 typedef struct _vclosure {
