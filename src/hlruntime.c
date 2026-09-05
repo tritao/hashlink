@@ -263,6 +263,14 @@ int hl_runtime_module_retired_allocation_count( hl_runtime_module *runtime ) {
 	return runtime == NULL ? 0 : hl_module_patch_retired_allocation_count(runtime->module);
 }
 
+int hl_runtime_module_type_count( hl_runtime_module *runtime ) {
+	return runtime == NULL ? 0 : runtime->module->code->ntypes;
+}
+
+int hl_runtime_module_type_capacity( hl_runtime_module *runtime ) {
+	return runtime == NULL ? 0 : runtime->module->code->types_capacity;
+}
+
 void hl_runtime_module_release( hl_runtime_module *runtime ) {
 	if( runtime == NULL ) return;
 	hl_mutex_acquire(runtime->lock);

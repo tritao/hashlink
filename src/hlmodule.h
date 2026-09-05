@@ -74,6 +74,9 @@ typedef struct {
 	int *fields;
 } hl_constant;
 
+/* Extra contiguous type slots reserved at load time for non-moving patch metadata. */
+#define HL_PATCH_TYPE_RESERVE 65536
+
 typedef struct {
 	int version;
 	int nints;
@@ -283,6 +286,8 @@ HL_EXTERN_C HL_EXPORT int hl_runtime_module_revision( hl_runtime_module *runtime
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_jit_count( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_allocation_count( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_retired_allocation_count( hl_runtime_module *runtime );
+HL_EXTERN_C HL_EXPORT int hl_runtime_module_type_count( hl_runtime_module *runtime );
+HL_EXTERN_C HL_EXPORT int hl_runtime_module_type_capacity( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT void hl_runtime_module_release( hl_runtime_module *runtime );
 
 void hl_profile_setup( int sample_count );

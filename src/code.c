@@ -507,7 +507,7 @@ hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg ) {
 		c->debugfiles = hl_read_strings(r, c->ndebugfiles, &c->debugfiles_lens);
 		CHK_ERROR();
 	}
-	c->types_capacity = c->ntypes > 0x7FFFFFFF - 65536 ? c->ntypes : c->ntypes + 65536;
+	c->types_capacity = c->ntypes > 0x7FFFFFFF - HL_PATCH_TYPE_RESERVE ? c->ntypes : c->ntypes + HL_PATCH_TYPE_RESERVE;
 	ALLOC(c->types, hl_type, c->types_capacity);
 	for(i=0;i<c->ntypes;i++) {
 		hl_read_type(r, c->types + i);
