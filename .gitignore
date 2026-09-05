@@ -49,6 +49,7 @@ shiroLibs
 /libs/bullet/bullet_js.cpp
 /libs/bullet/bullet.js
 *.bc
+*.d
 /libs/mesa/sample/output.png
 /other/debugger/debugger.js
 node_modules

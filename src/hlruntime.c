@@ -170,6 +170,15 @@ hl_runtime_status hl_runtime_module_call_bytes1( hl_runtime_module *runtime, int
 	return call_checked(runtime,stable_id,1,HVOID,args,NULL,exception);
 }
 
+hl_runtime_status hl_runtime_module_call_closure( hl_runtime_module *runtime, int stable_id, vclosure **out, vdynamic **exception ) {
+	vdynamic *result = NULL;
+	hl_runtime_status status;
+	if( out == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
+	status = call_checked(runtime,stable_id,0,HFUN,NULL,&result,exception);
+	if( status == HL_RUNTIME_OK ) *out = (vclosure*)result;
+	return status;
+}
+
 hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const unsigned char *bytes, int length ) {
 	const char *error = NULL;
 	hl_patch *patch;
