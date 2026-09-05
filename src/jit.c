@@ -380,5 +380,30 @@ void *hl_jit_patch_code( jit_ctx *ctx, hl_module *m, int *codesize, hl_debug_inf
 }
 
 void hl_jit_patch_method( void*fun, void**newt ) {
-	jit_assert();
+	unsigned char *code = (unsigned char*)fun;
+	unsigned long long target = (unsigned long long)(int_val)newt;
+	/* Keep pointers already stored in object prototypes and closures valid by
+	   turning the superseded entry into an indirect jump through its stable
+	   function slot. JIT function entries are padded sufficiently for this
+	   twelve-byte x86-64 sequence. */
+#	ifdef HL_64
+	*code++ = 0x48;
+	*code++ = 0xB8;
+	*code++ = (unsigned char)target;
+	*code++ = (unsigned char)(target >> 8);
+	*code++ = (unsigned char)(target >> 16);
+	*code++ = (unsigned char)(target >> 24);
+	*code++ = (unsigned char)(target >> 32);
+	*code++ = (unsigned char)(target >> 40);
+	*code++ = (unsigned char)(target >> 48);
+	*code++ = (unsigned char)(target >> 56);
+#	else
+	*code++ = 0xB8;
+	*code++ = (unsigned char)target;
+	*code++ = (unsigned char)(target >> 8);
+	*code++ = (unsigned char)(target >> 16);
+	*code++ = (unsigned char)(target >> 24);
+#	endif
+	*code++ = 0xFF;
+	*code++ = 0x20;
 }
