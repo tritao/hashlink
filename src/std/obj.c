@@ -459,6 +459,20 @@ HL_API void hl_flush_proto( hl_type *ot ) {
 	hl_runtime_obj *rt = ot->obj->rt;
 	hl_module_context *m = o->m;
 	if( !rt || !ot->vobj_proto ) return;
+	{
+		hl_runtime_obj *parent = o->super ? hl_get_obj_rt(o->super) : NULL;
+		int next_method = parent ? parent->nmethods : 0;
+		for(i=0;i<o->nproto;i++) {
+			hl_obj_proto *proto = o->proto + i;
+			int method_index;
+			if( proto->pindex >= 0 ) ((void**)ot->vobj_proto)[proto->pindex] = m->functions_ptrs[proto->findex];
+			if( parent && proto->pindex >= 0 && proto->pindex < parent->nproto )
+				method_index = -obj_resolve_field(o->super->obj,proto->hashed_name)->field_index-1;
+			else
+				method_index = next_method++;
+			rt->methods[method_index] = m->functions_ptrs[proto->findex];
+		}
+	}
 	for(i=0;i<o->nbindings;i++) {
 		int fid = o->bindings[i<<1];
 		int mid = o->bindings[(i<<1)|1];
