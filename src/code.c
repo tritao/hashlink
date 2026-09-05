@@ -344,6 +344,32 @@ static void hl_read_function( hl_reader *r, hl_function *f ) {
 		hl_read_opcode(r, f, f->ops+i);
 }
 
+static const char *hl_validate_function_control_flow( hl_function *f ) {
+	for( int i = 0; i < f->nops; i++ ) {
+		hl_opcode *op = f->ops + i;
+#define VALID_TARGET(offset) (i + 1 + (offset) >= 0 && i + 1 + (offset) < f->nops)
+		switch( op->op ) {
+		case OJAlways:
+			if( !VALID_TARGET(op->p1) ) return "Invalid jump target";
+			break;
+		case OJTrue: case OJFalse: case OJNull: case OJNotNull:
+			if( !VALID_TARGET(op->p2) ) return "Invalid conditional jump target";
+			break;
+		case OJSLt: case OJSGte: case OJSGt: case OJSLte: case OJULt: case OJUGte:
+		case OJNotLt: case OJNotGte: case OJEq: case OJNotEq:
+			if( !VALID_TARGET(op->p3) ) return "Invalid comparison jump target";
+			break;
+		case OTrap:
+			if( op->p2 < 0 || !VALID_TARGET(op->p2) ) return "Invalid trap target";
+			break;
+		default:
+			break;
+		}
+#undef VALID_TARGET
+	}
+	return NULL;
+}
+
 #undef CHK_ERROR
 #define CHK_ERROR() if( r->error ) { if( c ) hl_free(&c->alloc); *error_msg = (char*)r->error; return NULL; }
 #define EXIT(msg) { ERROR(msg); CHK_ERROR(); }
@@ -503,6 +529,10 @@ hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg ) {
 	for(i=0;i<c->nfunctions;i++) {
 		hl_read_function(r,c->functions+i);
 		CHK_ERROR();
+		{
+			const char *validation_error = hl_validate_function_control_flow(c->functions+i);
+			if( validation_error != NULL ) EXIT(validation_error);
+		}
 		if( c->hasdebug ) {
 			c->functions[i].debug = hl_read_debug_infos(r,c->functions[i].nops);
 			if( c->version >= 3 ) {

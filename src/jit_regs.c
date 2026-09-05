@@ -910,8 +910,7 @@ void hl_regs_flush( jit_ctx *jit ) {
 	if( ctx->pos_map ) ctx->pos_map[ctx->cur_op+1] = ctx->emit_pos;
 	hl_emit_remap_jumps(jit->emit, &ctx->jump_regs, ctx->instrs, ctx->pos_map);
 
-	int_arr regs_track;
-	int_arr_free(&regs_track);
+	int_arr regs_track = {0};
 
 	// register persist backup for debugger
 	int nsaved = 0;
