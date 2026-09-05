@@ -271,6 +271,13 @@ int hl_runtime_module_type_capacity( hl_runtime_module *runtime ) {
 	return runtime == NULL ? 0 : runtime->module->code->types_capacity;
 }
 
+void hl_runtime_module_set_patch_failure_stage( hl_runtime_module *runtime, int stage ) {
+	if( runtime == NULL ) return;
+	hl_mutex_acquire(runtime->lock);
+	runtime->module->patch_failure_stage = stage >= 1 && stage <= 3 ? stage : 0;
+	hl_mutex_release(runtime->lock);
+}
+
 void hl_runtime_module_release( hl_runtime_module *runtime ) {
 	if( runtime == NULL ) return;
 	hl_mutex_acquire(runtime->lock);

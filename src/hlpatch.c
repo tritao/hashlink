@@ -397,6 +397,11 @@ static bool validate_patch_types( hl_module *m, hl_patch *patch, int string_coun
 	return true;
 }
 
+static bool inject_patch_failure( hl_module *m, int stage, const char **error ) {
+	if(m->patch_failure_stage!=stage)return false;
+	m->patch_failure_stage=0;*error="Injected patch staging failure";return true;
+}
+
 static bool stage_patch_types( hl_module *m, hl_patch *patch, uchar **strings, void ***allocations, int *allocation_count, const char **error ) {
 	*allocations=(void**)calloc(patch->type_count,sizeof(void*));
 	if(patch->type_count&&!*allocations){*error="Out of memory staging patch types";return false;}
@@ -428,7 +433,9 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	combined_ints=(int*)malloc(sizeof(int)*(patch->base_int_count+patch->int_count));if(!combined_ints){error="Out of memory applying patch";goto fail;}memcpy(combined_ints,m->code->ints,sizeof(int)*patch->base_int_count);memcpy(combined_ints+patch->base_int_count,patch->ints,sizeof(int)*patch->int_count);
 	combined_floats=(double*)malloc(sizeof(double)*(patch->base_float_count+patch->float_count));if(!combined_floats){error="Out of memory applying patch";goto fail;}memcpy(combined_floats,m->code->floats,sizeof(double)*patch->base_float_count);memcpy(combined_floats+patch->base_float_count,patch->floats,sizeof(double)*patch->float_count);
 	{int total=patch->base_string_count+patch->string_count,bytes=0,pos=0;for(int i=0;i<patch->base_string_count;i++)bytes+=m->code->strings_lens[i]+1;for(int i=0;i<patch->string_count;i++)bytes+=patch->string_lens[i]+1;combined_strings=(char**)malloc(sizeof(char*)*total);combined_string_lens=(int*)malloc(sizeof(int)*total);combined_ustrings=(uchar**)calloc(total,sizeof(uchar*));combined_string_data=(char*)malloc(bytes);if((total>0)&&(!combined_strings||!combined_string_lens||!combined_ustrings||!combined_string_data)){error="Out of memory applying patch";goto fail;}for(int i=0;i<total;i++){const char *src;int length;if(i<patch->base_string_count){src=m->code->strings[i];length=m->code->strings_lens[i];combined_ustrings[i]=(uchar*)hl_get_ustring(m->code,i);}else{src=patch->strings[i-patch->base_string_count];length=patch->string_lens[i-patch->base_string_count];int usize=hl_utf8_length((vbyte*)src,0);combined_ustrings[i]=(uchar*)malloc((usize+1)*sizeof(uchar));if(!combined_ustrings[i]){error="Out of memory applying patch";goto fail;}hl_from_utf8(combined_ustrings[i],usize,src);}combined_strings[i]=combined_string_data+pos;combined_string_lens[i]=length;memcpy(combined_string_data+pos,src,length);combined_string_data[pos+length]=0;pos+=length+1;}}
+	if(inject_patch_failure(m,1,&error))goto fail;
 	if(!stage_patch_types(m,patch,combined_ustrings,&type_allocations,&type_allocation_count,&error))goto fail;
+	if(inject_patch_failure(m,2,&error))goto fail;
 	allocation=(hl_patch_code*)calloc(1,sizeof(hl_patch_code));if(!allocation){error="Out of memory applying patch";goto fail;}
 	allocation->function_count=patch->function_count;allocation->functions=(hl_function*)calloc(patch->function_count,sizeof(hl_function));
 	offsets=(int*)calloc(patch->function_count,sizeof(int));if(!allocation->functions||!offsets){error="Out of memory applying patch";goto fail;}
@@ -446,6 +453,7 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	jit=hl_jit_alloc();if(!jit){error="Could not allocate patch JIT";goto fail;}hl_jit_init(jit,&temp);
 	for(int i=0;i<patch->function_count;i++){offsets[i]=hl_jit_function(jit,&temp,allocation->functions+i);if(offsets[i]<0){error="Could not JIT patch function";goto fail;}}
 	allocation->code=hl_jit_patch_code(jit,&temp,&allocation->code_size,&temp.jit_debug);if(!allocation->code){error="Could not finalize patch JIT";goto fail;}hl_jit_free(jit,false);jit=NULL;free(combined_functions);combined_functions=NULL;
+	if(inject_patch_failure(m,3,&error))goto fail;
 	if(type_allocation_count){int needed=m->patch_type_allocation_count+type_allocation_count;if(needed>m->patch_type_allocation_capacity){int capacity=needed<16?16:needed*2;void **owners=(void**)realloc(m->patch_type_allocations,sizeof(void*)*capacity);if(!owners){error="Out of memory publishing patch types";goto fail;}m->patch_type_allocations=owners;m->patch_type_allocation_capacity=capacity;}}
 	for(int i=0;i<type_allocation_count;i++)m->patch_type_allocations[m->patch_type_allocation_count++]=type_allocations[i];
 	free(type_allocations);type_allocations=NULL;type_allocation_count=0;m->code->ntypes=code.ntypes;

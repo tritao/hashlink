@@ -219,6 +219,7 @@ typedef struct {
 	void **patch_type_allocations;
 	int patch_type_allocation_count;
 	int patch_type_allocation_capacity;
+	int patch_failure_stage;
 	hl_module_context ctx;
 #ifdef WIN64_UNWIND_TABLES
 	int unwind_table_size;
@@ -288,6 +289,8 @@ HL_EXTERN_C HL_EXPORT int hl_runtime_module_allocation_count( hl_runtime_module 
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_retired_allocation_count( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_type_count( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_type_capacity( hl_runtime_module *runtime );
+/** Test hook: fail the next patch at a staging boundary (1..3), or disable with 0. */
+HL_EXTERN_C HL_EXPORT void hl_runtime_module_set_patch_failure_stage( hl_runtime_module *runtime, int stage );
 HL_EXTERN_C HL_EXPORT void hl_runtime_module_release( hl_runtime_module *runtime );
 
 void hl_profile_setup( int sample_count );
