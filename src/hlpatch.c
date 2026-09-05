@@ -177,8 +177,8 @@ static int opcode_operands( int opcode ) {
 	case OGetGlobal: case OSetGlobal: case OGetThis: case OSetThis: case ONull: case OArraySize: case ONew:
 	case OToDyn: case OToSFloat: case OToUFloat: case OToInt: case OSafeCast: case OUnsafeCast: case OToVirtual:
 	case OEnumAlloc: case OEnumIndex: case OJTrue: case OJFalse: case OJNull: case OJNotNull: case ORet:
-	case OThrow: case OTrap: case OEndTrap:
-		return opcode == ONull || opcode == ONew || opcode == ORet || opcode == OThrow || opcode == OEndTrap ? 1 : 2;
+	case OThrow: case ORethrow: case OTrap: case OEndTrap:
+		return opcode == ONull || opcode == ONew || opcode == ORet || opcode == OThrow || opcode == ORethrow || opcode == OEndTrap ? 1 : 2;
 	case OAdd: case OSub: case OMul: case OSDiv: case OUDiv: case OSMod: case OUMod: case OShl: case OSShr: case OUShr:
 	case OAnd: case OOr: case OXor: case OCall1: case OInstanceClosure: case OField: case OSetField: case OGetArray:
 	case OSetArray: case OJSLt: case OJSGte: case OJSGt: case OJSLte: case OJULt: case OJUGte: case OJNotLt:
@@ -353,7 +353,7 @@ static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function 
 		case OJSLt:case OJSLte:case OJEq:if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||i+1+p[2]<0||i+1+p[2]>=f->instruction_count){*error="Invalid comparison branch";return false;}break;
 		case OJAlways:if(i+1+p[0]<0||i+1+p[0]>=f->instruction_count){*error="Invalid branch";return false;}break;
 		case ORet:if(!valid_reg(f,p[0])){*error="Invalid return register";return false;}break;
-		case OThrow:if(!valid_reg(f,p[0])){*error="Invalid throw register";return false;}break;
+		case OThrow:case ORethrow:if(!valid_reg(f,p[0])){*error="Invalid throw register";return false;}break;
 		case OTrap:
 			if(!valid_reg(f,p[0])||p[1]<0||i+1+p[1]>=f->instruction_count||trap_depth==256){*error="Invalid trap operands";return false;}
 			trap_targets[trap_depth++]=i+1+p[1];
