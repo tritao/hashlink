@@ -36,6 +36,11 @@ HL_PRIM varray *hl_alloc_array( hl_type *at, int size ) {
 	return a;
 }
 
+HL_PRIM void hl_array_check( varray *a, int index ) {
+	if( index < 0 || index >= a->size )
+		hl_error("Array index out of bounds");
+}
+
 HL_PRIM void hl_array_blit( varray *dst, int dpos, varray *src, int spos, int len ) {
 	int size = hl_type_size(dst->at);
 	memmove( hl_aptr(dst,vbyte) + dpos * size, hl_aptr(src,vbyte) + spos * size, len * size);
@@ -50,6 +55,7 @@ HL_PRIM vbyte *hl_array_bytes( varray *a ) {
 }
 
 DEFINE_PRIM(_ARR,alloc_array,_TYPE _I32);
+DEFINE_PRIM(_VOID,array_check,_ARR _I32);
 DEFINE_PRIM(_VOID,array_blit,_ARR _I32 _ARR _I32 _I32);
 DEFINE_PRIM(_TYPE,array_type,_ARR);
 DEFINE_PRIM(_BYTES,array_bytes,_ARR);

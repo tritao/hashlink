@@ -649,6 +649,7 @@ HL_API bool hl_safe_cast( hl_type *t, hl_type *to );
 #define hl_aptr(a,t)	((t*)(((varray*)(a))+1))
 
 HL_API varray *hl_alloc_array( hl_type *t, int size );
+HL_API void hl_array_check( varray *a, int index );
 HL_API vdynamic *hl_alloc_dynamic( hl_type *t );
 HL_API vdynamic *hl_alloc_dynbool( bool b );
 HL_API vdynamic *hl_alloc_obj( hl_type *t );

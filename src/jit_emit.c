@@ -2037,6 +2037,8 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 		break;
 	case OGetArray:
 		{
+			ereg check_args[2] = { LOAD(ra), LOAD(rb) };
+			emit_native_call(ctx, hl_array_check, check_args, 2, NULL);
 			if( ra->t->kind == HABSTRACT ) {
 				int osize;
 				bool isPtr = dst->t->kind != HOBJ && dst->t->kind != HSTRUCT;
@@ -2057,6 +2059,8 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 		break;
 	case OSetArray:
 		{
+			ereg check_args[2] = { LOAD(dst), LOAD(ra) };
+			emit_native_call(ctx, hl_array_check, check_args, 2, NULL);
 			if( dst->t->kind == HABSTRACT ) {
 				int osize;
 				bool isPtr = rb->t->kind != HOBJ && rb->t->kind != HSTRUCT;
