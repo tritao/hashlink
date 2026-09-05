@@ -81,6 +81,7 @@ typedef struct {
 	int nstrings;
 	int nbytes;
 	int ntypes;
+	int types_capacity;
 	int nglobals;
 	int nnatives;
 	int nfunctions;
@@ -113,6 +114,14 @@ typedef struct {
 } hl_patch_instruction;
 
 typedef struct {
+	int tag;
+	int name;
+	int count;
+	int *arguments;
+	int result;
+} hl_patch_type;
+
+typedef struct {
 	int type;
 	int stable_id;
 	int findex;
@@ -142,6 +151,7 @@ typedef struct {
 	int *string_lens;
 	int type_count;
 	int base_type_count;
+	hl_patch_type *types;
 	int function_count;
 	hl_patch_function *functions;
 } hl_patch;
@@ -201,6 +211,9 @@ typedef struct {
 	uchar **patch_ustrings;
 	char *patch_string_data;
 	int patch_initial_string_count;
+	void **patch_type_allocations;
+	int patch_type_allocation_count;
+	int patch_type_allocation_capacity;
 	hl_module_context ctx;
 #ifdef WIN64_UNWIND_TABLES
 	int unwind_table_size;

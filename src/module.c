@@ -456,7 +456,7 @@ static void *resolve_library( const char *lib, bool is_opt ) {
 	strcpy(tmp+strlen(lib),".hdll");
 	h = dlopen(tmp,RTLD_LAZY);
 	if( h == NULL && !is_opt )
-		hl_fatal1("Failed to load library %s",tmp);
+		hl_fatal2("Failed to load library %s (%s)",tmp,dlerror());
 	return h;
 }
 
@@ -1166,6 +1166,8 @@ void hl_module_free( hl_module *m ) {
 	if(m->patch_ustrings)for(int i=m->patch_initial_string_count;i<m->code->nstrings;i++)free(m->patch_ustrings[i]);
 	free(m->patch_ustrings);
 	free(m->patch_string_data);
+	for(int i=0;i<m->patch_type_allocation_count;i++)free(m->patch_type_allocations[i]);
+	free(m->patch_type_allocations);
 	free(m->ctx.functions_types);
 	free(m->globals_indexes);
 	free(m->globals_data);

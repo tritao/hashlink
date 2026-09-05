@@ -204,6 +204,8 @@ void hl_patch_free( hl_patch *patch ) {
 		for(j=0;j<f->instruction_count;j++) free(f->instructions[j].operands);
 		free(f->instructions); free(f->registers); free(f->relocation_instructions); free(f->relocation_stable_ids);
 	}
+	for(i=0;i<patch->type_count;i++) free(patch->types[i].arguments);
+	free(patch->types);
 	free(patch->functions); free(patch->strings); free(patch->string_lens); free(patch->floats); free(patch->ints); free(patch);
 }
 
@@ -238,7 +240,13 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 			if(!read_hash(&s,&patch->string_prefix_hash)||!read_count(&s,&patch->base_string_count)||!read_count(&s,&patch->string_count))goto section_fail;
 			patch->strings=(char**)calloc(patch->string_count,sizeof(char*));patch->string_lens=(int*)calloc(patch->string_count,sizeof(int));for(i=0;i<patch->string_count;i++){if(!read_count(&s,&count)||!take(&s,count,&p))goto section_fail;patch->string_lens[i]=count;patch->strings[i]=(char*)malloc(count+1);if(!patch->strings[i])FAIL("Out of memory reading HLP");memcpy(patch->strings[i],p,count);patch->strings[i][count]=0;}
 			if(!read_hash(&s,&patch->type_prefix_hash)||!read_count(&s,&patch->base_type_count)||!read_count(&s,&patch->type_count))goto section_fail;
-			for(i=0;i<patch->type_count;i++){if(!read_byte(&s,&tag))goto section_fail;if(tag==HFUN){if(!read_byte(&s,&count))goto section_fail;for(j=0;j<count+1;j++)if(!read_index(&s,&version))goto section_fail;}else if(tag<0||tag>HGUID)FAIL("Unsupported HLP type");}
+			patch->types=(hl_patch_type*)calloc(patch->type_count,sizeof(hl_patch_type));if(patch->type_count&&!patch->types)FAIL("Out of memory reading patch types");
+			for(i=0;i<patch->type_count;i++){
+				hl_patch_type *type=patch->types+i;if(!read_byte(&s,&type->tag))goto section_fail;
+				if(type->tag==HFUN){if(!read_byte(&s,&type->count))goto section_fail;type->arguments=(int*)calloc(type->count,sizeof(int));if(type->count&&!type->arguments)FAIL("Out of memory reading function type");for(j=0;j<type->count;j++)if(!read_index(&s,type->arguments+j))goto section_fail;if(!read_index(&s,&type->result))goto section_fail;}
+				else if(type->tag==HABSTRACT){if(!read_index(&s,&type->name))goto section_fail;}
+				else if(type->tag<HVOID||type->tag>HGUID||type->tag==HOBJ||type->tag==HVIRTUAL||type->tag==HENUM||type->tag==HREF||type->tag==HNULL||type->tag==HPACKED)FAIL("Unsupported HLP type");
+			}
 		} else if( tag == 2 ) {
 			if( have_functions ) FAIL("Duplicate HLP functions section");
 			have_functions=true;if(!read_count(&s,&patch->function_count))goto section_fail;
@@ -273,9 +281,10 @@ static bool valid_function_target( hl_module *m, int index ) {
 static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function *f, const char **error ) {
 	hl_function *live=find_live_function(m,f->findex);
 	int trap_depth=0, trap_targets[256];
+	int type_count=patch->base_type_count+patch->type_count;
 	if(!live){*error="Unknown stable function slot";return false;}
-	if(f->type<0||f->type>=m->code->ntypes||live->type!=m->code->types+f->type){*error="Patch function signature changed";return false;}
-	for(int i=0;i<f->register_count;i++)if(f->registers[i]<0||f->registers[i]>=m->code->ntypes){*error="Invalid patch register type";return false;}
+	if(f->type<0||f->type>=type_count||live->type!=m->code->types+f->type){*error="Patch function signature changed";return false;}
+	for(int i=0;i<f->register_count;i++)if(f->registers[i]<0||f->registers[i]>=type_count){*error="Invalid patch register type";return false;}
 	for(int i=0;i<f->instruction_count;i++){
 		hl_patch_instruction *op=f->instructions+i;int *p=op->operands;
 		while(trap_depth>0&&trap_targets[trap_depth-1]==i)trap_depth--;
@@ -360,22 +369,45 @@ static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function 
 	return true;
 }
 
+static bool stage_patch_types( hl_module *m, hl_patch *patch, uchar **strings, int string_count, void ***allocations, int *allocation_count, const char **error ) {
+	int total=patch->base_type_count+patch->type_count;
+	if(total>m->code->types_capacity){*error="Type arena capacity exceeded";return false;}
+	*allocations=(void**)calloc(patch->type_count,sizeof(void*));
+	if(patch->type_count&&!*allocations){*error="Out of memory staging patch types";return false;}
+	for(int i=0;i<patch->type_count;i++){
+		hl_patch_type *src=patch->types+i;hl_type *dst=m->code->types+patch->base_type_count+i;
+		memset(dst,0,sizeof(*dst));dst->kind=(hl_type_kind)src->tag;
+		if(src->tag==HFUN){
+			for(int j=0;j<src->count;j++)if(src->arguments[j]<0||src->arguments[j]>=total){*error="Invalid appended function argument type";return false;}
+			if(src->result<0||src->result>=total){*error="Invalid appended function result type";return false;}
+			size_t size=sizeof(hl_type_fun)+sizeof(hl_type*)*src->count;hl_type_fun *fun=(hl_type_fun*)calloc(1,size);
+			if(!fun){*error="Out of memory staging function type";return false;}
+			(*allocations)[(*allocation_count)++]=fun;fun->nargs=src->count;fun->args=(hl_type**)(fun+1);fun->ret=m->code->types+src->result;
+			for(int j=0;j<src->count;j++)fun->args[j]=m->code->types+src->arguments[j];
+			dst->fun=fun;
+		}else if(src->tag==HABSTRACT){
+			if(src->name<0||src->name>=string_count){*error="Invalid appended abstract name";return false;}dst->abs_name=strings[src->name];
+		}
+	}
+	return true;
+}
+
 h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_msg ) {
-	const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;hl_code code;hl_module temp;
+	const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;hl_code code;hl_module temp;
 	if(!m||!patch||!m->patchable){error="Module is not patchable";goto fail;}
 	if(patch->function_count<=0){error="Patch contains no functions";goto fail;}
 	if(m->revision!=patch->base_revision||patch->revision<=patch->base_revision){error="Stale patch revision";goto fail;}
 	if(patch->base_int_count!=m->code->nints||patch->base_float_count!=m->code->nfloats||patch->base_string_count!=m->code->nstrings||patch->base_type_count!=m->code->ntypes){error="Patch symbol base does not match module";goto fail;}
 	if(patch->int_prefix_hash!=hash_int_prefix(m->code,patch->base_int_count)||patch->float_prefix_hash!=hash_float_prefix(m->code,patch->base_float_count)||patch->string_prefix_hash!=hash_string_prefix(m->code,patch->base_string_count)||patch->type_prefix_hash!=hash_type_prefix(m,patch->base_type_count)){error="Patch symbol prefix hash does not match module";goto fail;}
-	if(patch->type_count){error="This patch introduces unsupported types";goto fail;}
 	for(int i=0;i<patch->function_count;i++){for(int j=0;j<i;j++)if(patch->functions[j].findex==patch->functions[i].findex){error="Duplicate stable function slot";goto fail;}if(!validate_function(m,patch,patch->functions+i,&error))goto fail;}
+	combined_ints=(int*)malloc(sizeof(int)*(patch->base_int_count+patch->int_count));if(!combined_ints){error="Out of memory applying patch";goto fail;}memcpy(combined_ints,m->code->ints,sizeof(int)*patch->base_int_count);memcpy(combined_ints+patch->base_int_count,patch->ints,sizeof(int)*patch->int_count);
+	combined_floats=(double*)malloc(sizeof(double)*(patch->base_float_count+patch->float_count));if(!combined_floats){error="Out of memory applying patch";goto fail;}memcpy(combined_floats,m->code->floats,sizeof(double)*patch->base_float_count);memcpy(combined_floats+patch->base_float_count,patch->floats,sizeof(double)*patch->float_count);
+	{int total=patch->base_string_count+patch->string_count,bytes=0,pos=0;for(int i=0;i<patch->base_string_count;i++)bytes+=m->code->strings_lens[i]+1;for(int i=0;i<patch->string_count;i++)bytes+=patch->string_lens[i]+1;combined_strings=(char**)malloc(sizeof(char*)*total);combined_string_lens=(int*)malloc(sizeof(int)*total);combined_ustrings=(uchar**)calloc(total,sizeof(uchar*));combined_string_data=(char*)malloc(bytes);if((total>0)&&(!combined_strings||!combined_string_lens||!combined_ustrings||!combined_string_data)){error="Out of memory applying patch";goto fail;}for(int i=0;i<total;i++){const char *src;int length;if(i<patch->base_string_count){src=m->code->strings[i];length=m->code->strings_lens[i];combined_ustrings[i]=(uchar*)hl_get_ustring(m->code,i);}else{src=patch->strings[i-patch->base_string_count];length=patch->string_lens[i-patch->base_string_count];int usize=hl_utf8_length((vbyte*)src,0);combined_ustrings[i]=(uchar*)malloc((usize+1)*sizeof(uchar));if(!combined_ustrings[i]){error="Out of memory applying patch";goto fail;}hl_from_utf8(combined_ustrings[i],usize,src);}combined_strings[i]=combined_string_data+pos;combined_string_lens[i]=length;memcpy(combined_string_data+pos,src,length);combined_string_data[pos+length]=0;pos+=length+1;}}
+	if(!stage_patch_types(m,patch,combined_ustrings,patch->base_string_count+patch->string_count,&type_allocations,&type_allocation_count,&error))goto fail;
 	allocation=(hl_patch_code*)calloc(1,sizeof(hl_patch_code));if(!allocation){error="Out of memory applying patch";goto fail;}
 	allocation->function_count=patch->function_count;allocation->functions=(hl_function*)calloc(patch->function_count,sizeof(hl_function));
 	offsets=(int*)calloc(patch->function_count,sizeof(int));if(!allocation->functions||!offsets){error="Out of memory applying patch";goto fail;}
 	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;dst->type=m->code->types+src->type;dst->findex=src->findex;dst->nregs=src->register_count;dst->nops=src->instruction_count;dst->regs=(hl_type**)calloc(dst->nregs,sizeof(hl_type*));dst->ops=(hl_opcode*)calloc(dst->nops,sizeof(hl_opcode));if(!dst->regs||!dst->ops){error="Out of memory applying patch";goto fail;}for(int j=0;j<dst->nregs;j++)dst->regs[j]=m->code->types+src->registers[j];for(int j=0;j<dst->nops;j++){hl_patch_instruction *s=src->instructions+j;hl_opcode *d=dst->ops+j;d->op=(hl_op)s->opcode;if(s->operand_count>0)d->p1=s->operands[0];if(s->operand_count>1)d->p2=s->operands[1];if(s->operand_count>2)d->p3=s->operands[2];if(s->operand_count==4&&d->op!=OCallN&&d->op!=OCallMethod&&d->op!=OCallThis&&d->op!=OCallClosure&&d->op!=OMakeEnum)d->extra=(int*)(int_val)s->operands[3];if(s->operand_count>3&&(d->op==OCall3||d->op==OCall4||d->op==OCallN||d->op==OCallMethod||d->op==OCallThis||d->op==OCallClosure||d->op==OMakeEnum)){int count=d->op==OCall3?2:d->op==OCall4?3:s->operand_count-3;d->extra=(int*)malloc(sizeof(int)*count);if(!d->extra){error="Out of memory applying patch";goto fail;}memcpy(d->extra,s->operands+3,sizeof(int)*count);}}}
-	combined_ints=(int*)malloc(sizeof(int)*(patch->base_int_count+patch->int_count));if(!combined_ints){error="Out of memory applying patch";goto fail;}memcpy(combined_ints,m->code->ints,sizeof(int)*patch->base_int_count);memcpy(combined_ints+patch->base_int_count,patch->ints,sizeof(int)*patch->int_count);
-	combined_floats=(double*)malloc(sizeof(double)*(patch->base_float_count+patch->float_count));if(!combined_floats){error="Out of memory applying patch";goto fail;}memcpy(combined_floats,m->code->floats,sizeof(double)*patch->base_float_count);memcpy(combined_floats+patch->base_float_count,patch->floats,sizeof(double)*patch->float_count);
-	{int total=patch->base_string_count+patch->string_count,bytes=0,pos=0;for(int i=0;i<patch->base_string_count;i++)bytes+=m->code->strings_lens[i]+1;for(int i=0;i<patch->string_count;i++)bytes+=patch->string_lens[i]+1;combined_strings=(char**)malloc(sizeof(char*)*total);combined_string_lens=(int*)malloc(sizeof(int)*total);combined_ustrings=(uchar**)calloc(total,sizeof(uchar*));combined_string_data=(char*)malloc(bytes);if((total>0)&&(!combined_strings||!combined_string_lens||!combined_ustrings||!combined_string_data)){error="Out of memory applying patch";goto fail;}for(int i=0;i<total;i++){const char *src;int length;if(i<patch->base_string_count){src=m->code->strings[i];length=m->code->strings_lens[i];combined_ustrings[i]=(uchar*)hl_get_ustring(m->code,i);}else{src=patch->strings[i-patch->base_string_count];length=patch->string_lens[i-patch->base_string_count];int usize=hl_utf8_length((vbyte*)src,0);combined_ustrings[i]=(uchar*)malloc((usize+1)*sizeof(uchar));if(!combined_ustrings[i]){error="Out of memory applying patch";goto fail;}hl_from_utf8(combined_ustrings[i],usize,src);}combined_strings[i]=combined_string_data+pos;combined_string_lens[i]=length;memcpy(combined_string_data+pos,src,length);combined_string_data[pos+length]=0;pos+=length+1;}}
 	combined_functions=(hl_function*)calloc(m->code->nfunctions,sizeof(hl_function));
 	if(!combined_functions){error="Out of memory applying patch";goto fail;}
 	memcpy(combined_functions,m->code->functions,sizeof(hl_function)*m->code->nfunctions);
@@ -384,11 +416,14 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 		if(function_index<0||function_index>=m->code->nfunctions){error="Invalid patch function slot";goto fail;}
 		combined_functions[function_index]=allocation->functions[i];
 	}
-	memset(&code,0,sizeof(code));code.nints=patch->base_int_count+patch->int_count;code.ints=combined_ints;code.nfloats=patch->base_float_count+patch->float_count;code.floats=combined_floats;code.nstrings=patch->base_string_count+patch->string_count;code.strings=combined_strings;code.strings_lens=combined_string_lens;code.ustrings=combined_ustrings;code.ntypes=m->code->ntypes;code.types=m->code->types;code.nfunctions=m->code->nfunctions;code.nnatives=m->code->nnatives;code.functions=combined_functions;code.alloc=m->code->alloc;
+	memset(&code,0,sizeof(code));code.nints=patch->base_int_count+patch->int_count;code.ints=combined_ints;code.nfloats=patch->base_float_count+patch->float_count;code.floats=combined_floats;code.nstrings=patch->base_string_count+patch->string_count;code.strings=combined_strings;code.strings_lens=combined_string_lens;code.ustrings=combined_ustrings;code.ntypes=patch->base_type_count+patch->type_count;code.types_capacity=m->code->types_capacity;code.types=m->code->types;code.nfunctions=m->code->nfunctions;code.nnatives=m->code->nnatives;code.functions=combined_functions;code.alloc=m->code->alloc;
 	temp=*m;temp.code=&code;temp.jit_code=NULL;temp.jit_debug=NULL;temp.jit_ctx=NULL;
 	jit=hl_jit_alloc();if(!jit){error="Could not allocate patch JIT";goto fail;}hl_jit_init(jit,&temp);
 	for(int i=0;i<patch->function_count;i++){offsets[i]=hl_jit_function(jit,&temp,allocation->functions+i);if(offsets[i]<0){error="Could not JIT patch function";goto fail;}}
 	allocation->code=hl_jit_code(jit,&temp,&allocation->code_size,&temp.jit_debug,NULL);if(!allocation->code){error="Could not finalize patch JIT";goto fail;}hl_jit_free(jit,false);jit=NULL;free(combined_functions);combined_functions=NULL;
+	if(type_allocation_count){int needed=m->patch_type_allocation_count+type_allocation_count;if(needed>m->patch_type_allocation_capacity){int capacity=needed<16?16:needed*2;void **owners=(void**)realloc(m->patch_type_allocations,sizeof(void*)*capacity);if(!owners){error="Out of memory publishing patch types";goto fail;}m->patch_type_allocations=owners;m->patch_type_allocation_capacity=capacity;}}
+	for(int i=0;i<type_allocation_count;i++)m->patch_type_allocations[m->patch_type_allocation_count++]=type_allocations[i];
+	free(type_allocations);type_allocations=NULL;type_allocation_count=0;m->code->ntypes=code.ntypes;
 	for(int i=0;i<patch->function_count;i++){int slot=allocation->functions[i].findex;hl_patch_code *old=m->patch_owners[slot];m->functions_ptrs[slot]=(unsigned char*)allocation->code+offsets[i];m->patch_owners[slot]=allocation;allocation->references++;if(old&&--old->references==0)patch_code_free(old);}
 	if(m->patch_ustrings==NULL)m->patch_initial_string_count=patch->base_string_count;
 	free(m->patch_ints);free(m->patch_floats);free(m->patch_strings);free(m->patch_string_lens);free(m->patch_ustrings);free(m->patch_string_data);
@@ -402,6 +437,8 @@ fail:
 	free(offsets);
 	free(combined_ints);
 	free(combined_floats);free(combined_strings);free(combined_string_lens);if(combined_ustrings)for(int i=patch->base_string_count;i<patch->base_string_count+patch->string_count;i++)free(combined_ustrings[i]);free(combined_ustrings);free(combined_string_data);
+	for(int i=0;i<type_allocation_count;i++)free(type_allocations[i]);
+	free(type_allocations);if(m&&patch&&m->code&&patch->base_type_count<=m->code->types_capacity&&patch->type_count<=m->code->types_capacity-patch->base_type_count)memset(m->code->types+patch->base_type_count,0,sizeof(hl_type)*patch->type_count);
 	patch_code_free(allocation);
 	if(error_msg) *error_msg=error?error:"Invalid patch";
 	return false;
