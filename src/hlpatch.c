@@ -174,7 +174,7 @@ static int opcode_operands( int opcode ) {
 	switch( opcode ) {
 	case OLabel: return 0;
 	case OMov: case OInt: case OFloat: case OBool: case OBytes: case OString: case OCall0: case OStaticClosure:
-	case OGetGlobal: case OSetGlobal: case OGetThis: case OSetThis: case ONull: case OArraySize: case ONew:
+	case OGetGlobal: case OSetGlobal: case OGetThis: case OSetThis: case ONull: case OArraySize: case ONew: case OType:
 	case OToDyn: case OToSFloat: case OToUFloat: case OToInt: case OSafeCast: case OUnsafeCast: case OToVirtual:
 	case OEnumAlloc: case OEnumIndex: case OJTrue: case OJFalse: case OJNull: case OJNotNull: case ORet:
 	case OThrow: case ORethrow: case OTrap: case OEndTrap:
@@ -345,6 +345,9 @@ static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function 
 			break;
 		case OEnumField:
 			if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||p[2]<0||p[3]<0){*error="Invalid enum field";return false;}
+			break;
+		case OType:
+			if(!valid_reg(f,p[0])||p[1]<0||p[1]>=type_count){*error="Invalid type literal";return false;}
 			break;
 		case ONull:case OGetGlobal:case OSetGlobal:case OGetThis:case OSetThis:case OToDyn:case OToSFloat:case OToUFloat:case OToInt:case OSafeCast:case OUnsafeCast:case OToVirtual:
 			if(!valid_reg(f,p[0])||(op->operand_count>1&&!valid_reg(f,p[1]))){*error="Invalid unary operation";return false;}
