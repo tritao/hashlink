@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define HL_RUNTIME_INIT_STABLE_ID 0x7FFF0000
+
 struct _hl_runtime_module {
 	hl_module *module;
 	hl_mutex *lock;
@@ -10,6 +12,8 @@ struct _hl_runtime_module {
 	int *stable_ids;
 	int *slots;
 };
+
+static int resolve_stable_id( hl_runtime_module *runtime, int stable_id );
 
 static hl_function *find_function( hl_module *module, int stable_id ) {
 	int i;
@@ -68,6 +72,14 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 	}
 	runtime->lock = hl_mutex_alloc(true);
 	hl_add_root(&runtime->lock);
+	if( resolve_stable_id(runtime,HL_RUNTIME_INIT_STABLE_ID) >= 0 ) {
+		vdynamic *exception = NULL;
+		hl_runtime_status status = hl_runtime_module_call_void(runtime,HL_RUNTIME_INIT_STABLE_ID,&exception);
+		if( status != HL_RUNTIME_OK ) {
+			hl_runtime_module_release(runtime);
+			return status;
+		}
+	}
 	*out = runtime;
 	return HL_RUNTIME_OK;
 }
