@@ -254,6 +254,7 @@ HL_EXTERN_C HL_EXPORT h_bool hl_module_patch_slots( hl_module *target, hl_module
 HL_EXTERN_C HL_EXPORT h_bool hl_module_patch_generation( hl_module *target, hl_module *generation );
 HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch( hl_module *module, hl_patch *patch, const char **error_msg );
 HL_EXTERN_C HL_EXPORT int hl_module_patch_allocation_count( hl_module *module );
+HL_EXTERN_C HL_EXPORT int hl_module_patch_retired_allocation_count( hl_module *module );
 void hl_module_patch_release_all( hl_module *module );
 HL_EXTERN_C HL_EXPORT void hl_module_free( hl_module *m );
 /** Remove an initialized module from runtime discovery and release its JIT data. */
@@ -279,6 +280,7 @@ HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_hlp_summary( const unsigned c
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_revision( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_jit_count( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_allocation_count( hl_runtime_module *runtime );
+HL_EXTERN_C HL_EXPORT int hl_runtime_module_retired_allocation_count( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT void hl_runtime_module_release( hl_runtime_module *runtime );
 
 void hl_profile_setup( int sample_count );

@@ -47,6 +47,12 @@ int hl_module_patch_allocation_count( hl_module *m ) {
 	return count;
 }
 
+int hl_module_patch_retired_allocation_count( hl_module *m ) {
+	int count=0;
+	for(hl_patch_code *owner=m==NULL?NULL:m->retired_patch_code;owner;owner=owner->next_retired)count++;
+	return count;
+}
+
 static bool take( patch_reader *r, int count, const unsigned char **out ) {
 	if( count < 0 || r->end - r->p < count ) { r->error = "Truncated HLP data"; return false; }
 	*out = r->p; r->p += count; return true;
