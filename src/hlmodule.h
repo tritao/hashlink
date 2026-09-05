@@ -201,6 +201,7 @@ typedef struct {
 	jit_ctx *jit_ctx;
 	bool debug;
 	bool patchable;
+	bool staging_patch;
 	int revision;
 	int patch_jit_count;
 	hl_patch_code **patch_owners;

@@ -1700,10 +1700,14 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 		{
 			ereg args[3];
 			args[0] = LOAD_CONST_PTR(m->code->functions[m->functions_indexes[o->p2]].type);
-			einstr *e = emit_instr(ctx, LOAD_FUN);
-			e->mode = M_PTR;
-			e->size_offs = o->p2;
-			args[1] = new_value(ctx);
+			if( m->staging_patch )
+				args[1] = LOAD_MEM_PTR(LOAD_CONST_PTR(m->functions_ptrs), o->p2 * HL_WSIZE);
+			else {
+				einstr *e = emit_instr(ctx, LOAD_FUN);
+				e->mode = M_PTR;
+				e->size_offs = o->p2;
+				args[1] = new_value(ctx);
+			}
 			args[2] = LOAD(rb);
 			STORE(dst, emit_native_call(ctx,hl_alloc_closure_ptr,args,3,dst->t));
 		}
@@ -1769,8 +1773,15 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 		break;
 	case OStaticClosure:
 		{
-			vclosure *c = alloc_static_closure(ctx,o->p2);
-			STORE(dst, LOAD_CONST_PTR(c));
+			if( m->staging_patch ) {
+				ereg args[2];
+				args[0] = LOAD_CONST_PTR(m->code->functions[m->functions_indexes[o->p2]].type);
+				args[1] = LOAD_MEM_PTR(LOAD_CONST_PTR(m->functions_ptrs), o->p2 * HL_WSIZE);
+				STORE(dst, emit_native_call(ctx,hl_alloc_closure_void,args,2,dst->t));
+			} else {
+				vclosure *c = alloc_static_closure(ctx,o->p2);
+				STORE(dst, LOAD_CONST_PTR(c));
+			}
 		}
 		break;
 	case OField:
