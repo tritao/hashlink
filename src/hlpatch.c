@@ -423,7 +423,7 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	temp=*m;temp.code=&code;temp.jit_code=NULL;temp.jit_debug=NULL;temp.jit_ctx=NULL;
 	jit=hl_jit_alloc();if(!jit){error="Could not allocate patch JIT";goto fail;}hl_jit_init(jit,&temp);
 	for(int i=0;i<patch->function_count;i++){offsets[i]=hl_jit_function(jit,&temp,allocation->functions+i);if(offsets[i]<0){error="Could not JIT patch function";goto fail;}}
-	allocation->code=hl_jit_code(jit,&temp,&allocation->code_size,&temp.jit_debug,NULL);if(!allocation->code){error="Could not finalize patch JIT";goto fail;}hl_jit_free(jit,false);jit=NULL;free(combined_functions);combined_functions=NULL;
+	allocation->code=hl_jit_patch_code(jit,&temp,&allocation->code_size,&temp.jit_debug);if(!allocation->code){error="Could not finalize patch JIT";goto fail;}hl_jit_free(jit,false);jit=NULL;free(combined_functions);combined_functions=NULL;
 	if(type_allocation_count){int needed=m->patch_type_allocation_count+type_allocation_count;if(needed>m->patch_type_allocation_capacity){int capacity=needed<16?16:needed*2;void **owners=(void**)realloc(m->patch_type_allocations,sizeof(void*)*capacity);if(!owners){error="Out of memory publishing patch types";goto fail;}m->patch_type_allocations=owners;m->patch_type_allocation_capacity=capacity;}}
 	for(int i=0;i<type_allocation_count;i++)m->patch_type_allocations[m->patch_type_allocation_count++]=type_allocations[i];
 	free(type_allocations);type_allocations=NULL;type_allocation_count=0;m->code->ntypes=code.ntypes;

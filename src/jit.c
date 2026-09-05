@@ -344,7 +344,7 @@ double hl_jit_wrapper_d( vclosure_wrapper *c, char *stack_args, void **regs ) {
 	return hl_dyn_castd(&ret,&hlt_dyn);
 }
 
-void *hl_jit_code( jit_ctx *ctx, hl_module *m, int *codesize, hl_debug_infos **debug, hl_module *previous ) {
+static void *hl_jit_code_finalize( jit_ctx *ctx, hl_module *m, int *codesize, hl_debug_infos **debug, hl_module *previous, bool publish_wrappers ) {
 	hl_codegen_flush_consts(ctx);
 	jit_code_append(ctx);
 	int size = ctx->out_pos;
@@ -357,16 +357,26 @@ void *hl_jit_code( jit_ctx *ctx, hl_module *m, int *codesize, hl_debug_infos **d
 	ctx->final_code = code;
 	hl_emit_final(ctx);
 	hl_codegen_final(ctx);
-	arg_reg_count = ctx->cfg.regs.nargs;
-	arg_fp_count = ctx->cfg.floats.nargs;
-	call_jit_c2hl = ctx->final_code + ctx->code_funs.c2hl;
-	call_jit_hl2c = ctx->final_code + ctx->code_funs.hl2c;
+	if( publish_wrappers ) {
+		arg_reg_count = ctx->cfg.regs.nargs;
+		arg_fp_count = ctx->cfg.floats.nargs;
+		call_jit_c2hl = ctx->final_code + ctx->code_funs.c2hl;
+		call_jit_hl2c = ctx->final_code + ctx->code_funs.hl2c;
+	}
 #	ifdef WIN64_UNWIND_TABLES
 	ctx->mod->unwind_table_size = ctx->fdef_index;
 #	endif
 	hl_setup.get_wrapper = default_wrapper;
 	hl_setup.static_call = callback_c2hl;
 	return code;
+}
+
+void *hl_jit_code( jit_ctx *ctx, hl_module *m, int *codesize, hl_debug_infos **debug, hl_module *previous ) {
+	return hl_jit_code_finalize(ctx,m,codesize,debug,previous,true);
+}
+
+void *hl_jit_patch_code( jit_ctx *ctx, hl_module *m, int *codesize, hl_debug_infos **debug ) {
+	return hl_jit_code_finalize(ctx,m,codesize,debug,NULL,false);
 }
 
 void hl_jit_patch_method( void*fun, void**newt ) {
