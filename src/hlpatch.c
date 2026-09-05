@@ -21,6 +21,10 @@ static hl_function *find_live_function( hl_module *m, int findex ) {
 static void patch_code_free( hl_patch_code *code ) {
 	if(!code)return;
 	for(int i=0;i<code->function_count;i++) {
+		for(int j=0;j<code->functions[i].nops;j++) {
+			hl_opcode *op=code->functions[i].ops+j;
+			if(op->extra && (op->op==OCall3||op->op==OCall4||op->op==OCallN||op->op==OCallMethod||op->op==OCallThis||op->op==OCallClosure||op->op==OMakeEnum)) free(op->extra);
+		}
 		free(code->functions[i].regs);
 		free(code->functions[i].ops);
 	}
@@ -99,11 +103,69 @@ static unsigned int hash_string_prefix( hl_code *code, int count ) {
 	unsigned int hash=2166136261U;for(int i=0;i<count;i++){int length=code->strings_lens[i];hash=hash_i32(hash,length);hash=hash_bytes(hash,(unsigned char*)code->strings[i],length);}return hash;
 }
 
-static unsigned int hash_type_prefix( hl_code *code, int count ) {
+static int hash_type_string_index( hl_code *code, const uchar *name ) {
+	int length = ustrlen(name);
+	for(int i=0;i<code->nstrings;i++) {
+		const uchar *candidate = hl_get_ustring(code,i);
+		if( ustrlen(candidate) == length && memcmp(candidate,name,length * sizeof(uchar)) == 0 )
+			return i;
+	}
+	return -1;
+}
+
+static int hash_type_index( hl_code *code, hl_type *type ) {
+	return type == NULL ? -1 : (int)(type - code->types);
+}
+
+static int hash_type_global_index( hl_module *module, void **value ) {
+	int i;
+	if( value == NULL ) return 0;
+	for( i = 0; i < module->code->nglobals; i++ )
+		if( module->globals_data + module->globals_indexes[i] == (unsigned char*)value ) return i + 1;
+	return -1;
+}
+
+static unsigned int hash_type_prefix( hl_module *module, int count ) {
+	hl_code *code = module->code;
 	unsigned int hash=2166136261U;
 	for(int i=0;i<count;i++){
-		hl_type *type=code->types+i;hash=hash_i32(hash,type->kind);
-		if(type->kind==HFUN){hash=hash_i32(hash,type->fun->nargs);for(int j=0;j<type->fun->nargs;j++)hash=hash_i32(hash,(int)(type->fun->args[j]-code->types));hash=hash_i32(hash,(int)(type->fun->ret-code->types));}
+		hl_type *type=code->types+i;
+		hash=hash_i32(hash,type->kind);
+		switch(type->kind) {
+		case HFUN:
+			hash=hash_i32(hash,type->fun->nargs);
+			for(int j=0;j<type->fun->nargs;j++) hash=hash_i32(hash,hash_type_index(code,type->fun->args[j]));
+			hash=hash_i32(hash,hash_type_index(code,type->fun->ret));
+			break;
+		case HABSTRACT:
+			hash=hash_i32(hash,hash_type_string_index(code,type->abs_name));
+			break;
+		case HOBJ: case HSTRUCT: {
+			hl_type_obj *obj=type->obj;
+			hash=hash_i32(hash,hash_type_string_index(code,obj->name));
+			hash=hash_i32(hash,obj->super == NULL ? -1 : hash_type_index(code,obj->super));
+			hash=hash_i32(hash,hash_type_global_index(module,obj->global_value));
+			hash=hash_i32(hash,obj->nfields);
+			for(int j=0;j<obj->nfields;j++) { hash=hash_i32(hash,hash_type_string_index(code,obj->fields[j].name)); hash=hash_i32(hash,hash_type_index(code,obj->fields[j].t)); }
+			hash=hash_i32(hash,obj->nproto);
+			for(int j=0;j<obj->nproto;j++) { hash=hash_i32(hash,hash_type_string_index(code,obj->proto[j].name)); hash=hash_i32(hash,obj->proto[j].findex); hash=hash_i32(hash,obj->proto[j].pindex); }
+			hash=hash_i32(hash,obj->nbindings);
+			for(int j=0;j<obj->nbindings*2;j++) hash=hash_i32(hash,obj->bindings[j]);
+			break;
+		}
+		case HVIRTUAL:
+			hash=hash_i32(hash,type->virt->nfields);
+			for(int j=0;j<type->virt->nfields;j++) { hash=hash_i32(hash,hash_type_string_index(code,type->virt->fields[j].name)); hash=hash_i32(hash,hash_type_index(code,type->virt->fields[j].t)); }
+			break;
+		case HENUM:
+			hash=hash_i32(hash,hash_type_string_index(code,type->tenum->name));
+			hash=hash_i32(hash,hash_type_global_index(module,type->tenum->global_value));
+			hash=hash_i32(hash,type->tenum->nconstructs);
+			for(int j=0;j<type->tenum->nconstructs;j++) { hl_enum_construct *c=type->tenum->constructs+j; hash=hash_i32(hash,hash_type_string_index(code,c->name)); hash=hash_i32(hash,c->nparams); for(int k=0;k<c->nparams;k++) hash=hash_i32(hash,hash_type_index(code,c->params[k])); }
+			break;
+		default:
+			break;
+		}
 	}
 	return hash;
 }
@@ -111,10 +173,23 @@ static unsigned int hash_type_prefix( hl_code *code, int count ) {
 static int opcode_operands( int opcode ) {
 	switch( opcode ) {
 	case OLabel: return 0;
-	case OMov: case OInt: case OFloat: case OBool: case OString: case OCall0: case OJTrue: return 2;
-	case OAdd: case OSub: case OMul: case OSDiv: case OCall1: case OJSLt: case OJSLte: case OJEq: return 3;
+	case OMov: case OInt: case OFloat: case OBool: case OBytes: case OString: case OCall0: case OStaticClosure:
+	case OGetGlobal: case OSetGlobal: case OGetThis: case OSetThis: case ONull: case OArraySize: case ONew:
+	case OToDyn: case OToSFloat: case OToUFloat: case OToInt: case OSafeCast: case OUnsafeCast: case OToVirtual:
+	case OEnumAlloc: case OEnumIndex: case OJTrue: case OJFalse: case OJNull: case OJNotNull: case ORet:
+		return opcode == ONull || opcode == ONew || opcode == ORet ? 1 : 2;
+	case OAdd: case OSub: case OMul: case OSDiv: case OUDiv: case OSMod: case OUMod: case OShl: case OSShr: case OUShr:
+	case OAnd: case OOr: case OXor: case OCall1: case OInstanceClosure: case OField: case OSetField: case OGetArray:
+	case OSetArray: case OJSLt: case OJSGte: case OJSGt: case OJSLte: case OJULt: case OJUGte: case OJNotLt:
+	case OJNotGte: case OJEq: case OJNotEq: case OEnumField:
+		return 3;
 	case OCall2: return 4;
-	case OJAlways: case ORet: return 1;
+	case OCall3: return 5;
+	case OCall4: return 6;
+	case OCallN: case OCallMethod: case OCallThis: case OCallClosure: case OMakeEnum: case OSwitch: return -1;
+	case OVirtualClosure: return 3;
+	case ONeg: case ONot: case OIncr: case ODecr: case ONullCheck: return 2;
+	case OJAlways: return 1;
 	default: return -1;
 	}
 }
@@ -167,7 +242,7 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 			if( have_functions ) FAIL("Duplicate HLP functions section");
 			have_functions=true;if(!read_count(&s,&patch->function_count))goto section_fail;
 			patch->functions=(hl_patch_function*)calloc(patch->function_count,sizeof(hl_patch_function));
-			for(i=0;i<patch->function_count;i++){hl_patch_function *f=patch->functions+i;int length;const unsigned char *end;if(!read_count(&s,&length)||s.end-s.p<length)goto section_fail;end=s.p+length;if(!read_count(&s,&f->stable_id)||!read_index(&s,&f->type)||!read_count(&s,&f->findex)||!read_count(&s,&f->register_count)||!read_count(&s,&f->instruction_count))goto section_fail;f->registers=(int*)calloc(f->register_count,sizeof(int));for(j=0;j<f->register_count;j++)if(!read_index(&s,f->registers+j))goto section_fail;f->instructions=(hl_patch_instruction*)calloc(f->instruction_count,sizeof(hl_patch_instruction));for(j=0;j<f->instruction_count;j++){hl_patch_instruction *op=f->instructions+j;if(!read_byte(&s,&op->opcode))goto section_fail;op->operand_count=opcode_operands(op->opcode);if(op->operand_count<0)FAIL("Unsupported patch opcode");op->operands=(int*)calloc(op->operand_count,sizeof(int));for(int k=0;k<op->operand_count;k++)if(!read_index(&s,op->operands+k))goto section_fail;}if(!read_count(&s,&f->relocation_count))goto section_fail;f->relocation_instructions=(int*)calloc(f->relocation_count,sizeof(int));f->relocation_stable_ids=(int*)calloc(f->relocation_count,sizeof(int));for(j=0;j<f->relocation_count;j++)if(!read_count(&s,f->relocation_instructions+j)||!read_count(&s,f->relocation_stable_ids+j))goto section_fail;if(s.p!=end)FAIL("Invalid patch function length");}
+				for(i=0;i<patch->function_count;i++){hl_patch_function *f=patch->functions+i;int length;const unsigned char *end;if(!read_count(&s,&length)||s.end-s.p<length)goto section_fail;end=s.p+length;if(!read_count(&s,&f->stable_id)||!read_index(&s,&f->type)||!read_count(&s,&f->findex)||!read_count(&s,&f->register_count)||!read_count(&s,&f->instruction_count))goto section_fail;f->registers=(int*)calloc(f->register_count,sizeof(int));for(j=0;j<f->register_count;j++)if(!read_index(&s,f->registers+j))goto section_fail;f->instructions=(hl_patch_instruction*)calloc(f->instruction_count,sizeof(hl_patch_instruction));for(j=0;j<f->instruction_count;j++){hl_patch_instruction *op=f->instructions+j;if(!read_byte(&s,&op->opcode))goto section_fail;op->operand_count=opcode_operands(op->opcode);if(op->operand_count<0){if(op->opcode!=OCallN&&op->opcode!=OCallMethod&&op->opcode!=OCallThis&&op->opcode!=OCallClosure&&op->opcode!=OMakeEnum)FAIL("Unsupported patch opcode");op->operand_count=3;}op->operands=(int*)calloc(op->operand_count,sizeof(int));for(int k=0;k<op->operand_count;k++)if(!read_index(&s,op->operands+k))goto section_fail;if(opcode_operands(op->opcode)<0){int count=op->operands[2];if(count<0||count>0x1000000)FAIL("Invalid variable operand count");op->operand_count=3+count;op->operands=(int*)realloc(op->operands,sizeof(int)*op->operand_count);if(!op->operands)FAIL("Out of memory reading patch operands");for(int k=3;k<op->operand_count;k++)if(!read_index(&s,op->operands+k))goto section_fail;}}if(!read_count(&s,&f->relocation_count))goto section_fail;f->relocation_instructions=(int*)calloc(f->relocation_count,sizeof(int));f->relocation_stable_ids=(int*)calloc(f->relocation_count,sizeof(int));for(j=0;j<f->relocation_count;j++)if(!read_count(&s,f->relocation_instructions+j)||!read_count(&s,f->relocation_stable_ids+j))goto section_fail;if(s.p!=end)FAIL("Invalid patch function length");}
 		} else {
 			s.p = s.end;
 		}
@@ -189,6 +264,11 @@ fail:
 
 static bool valid_reg( hl_patch_function *f, int reg ) { return reg >= 0 && reg < f->register_count; }
 
+static bool valid_function_target( hl_module *m, int index ) {
+	return index >= 0 && index < m->code->nfunctions + m->code->nnatives && m->functions_ptrs[index] != NULL
+		&& m->functions_indexes[index] >= 0 && m->functions_indexes[index] < m->code->nfunctions;
+}
+
 static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function *f, const char **error ) {
 	hl_function *live=find_live_function(m,f->findex);
 	if(!live){*error="Unknown stable function slot";return false;}
@@ -204,9 +284,58 @@ static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function 
 		case OString:if(!valid_reg(f,p[0])||p[1]<0||p[1]>=patch->base_string_count+patch->string_count){*error="Invalid String operands";return false;}break;
 		case OBool:if(!valid_reg(f,p[0])||(p[1]!=0&&p[1]!=1)){*error="Invalid Bool operands";return false;}break;
 		case OAdd:case OSub:case OMul:case OSDiv:if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||!valid_reg(f,p[2])){*error="Invalid arithmetic operands";return false;}break;
-		case OCall0:case OCall1:case OCall2:case OCallN:
+		case OCall0:case OCall1:case OCall2:case OCall3:case OCall4:
 			if(!valid_reg(f,p[0])||p[1]<0||p[1]>=m->code->nfunctions+m->code->nnatives||m->functions_ptrs[p[1]]==NULL){*error="Invalid call target";return false;}
 			for(int k=2;k<op->operand_count;k++) if(!valid_reg(f,p[k])){*error="Invalid call argument";return false;}
+			break;
+		case OCallN:
+			if(!valid_reg(f,p[0])||p[1]<0||p[1]>=m->code->nfunctions+m->code->nnatives||m->functions_ptrs[p[1]]==NULL||p[2]<0||p[2]!=op->operand_count-3){*error="Invalid variadic call";return false;}
+			for(int k=3;k<op->operand_count;k++) if(!valid_reg(f,p[k])){*error="Invalid call argument";return false;}
+			break;
+		case OCallMethod:case OCallThis:
+			if(!valid_reg(f,p[0])||p[1]<0||p[2]<0||p[2]!=op->operand_count-3){*error="Invalid method call";return false;}
+			for(int k=3;k<op->operand_count;k++) if(!valid_reg(f,p[k])){*error="Invalid call argument";return false;}
+			break;
+		case OCallClosure:
+			if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||p[2]<0||p[2]!=op->operand_count-3){*error="Invalid closure call";return false;}
+			for(int k=3;k<op->operand_count;k++) if(!valid_reg(f,p[k])){*error="Invalid call argument";return false;}
+			break;
+		case OStaticClosure:
+			if(!valid_reg(f,p[0])||!valid_function_target(m,p[1])){*error="Invalid static closure";return false;}
+			break;
+		case OInstanceClosure:
+			if(!valid_reg(f,p[0])||!valid_function_target(m,p[1])||!valid_reg(f,p[2])){*error="Invalid instance closure";return false;}
+			break;
+		case OField:
+			if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||p[2]<0){*error="Invalid field read";return false;}
+			break;
+		case OSetField:
+			if(!valid_reg(f,p[0])||p[1]<0||!valid_reg(f,p[2])){*error="Invalid field write";return false;}
+			break;
+		case OGetArray:
+			if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||!valid_reg(f,p[2])){*error="Invalid array read";return false;}
+			break;
+		case OSetArray:
+			if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||!valid_reg(f,p[2])){*error="Invalid array write";return false;}
+			break;
+		case OArraySize:
+			if(!valid_reg(f,p[0])||!valid_reg(f,p[1])){*error="Invalid array size";return false;}
+			break;
+		case ONew:
+			if(!valid_reg(f,p[0])){*error="Invalid object allocation";return false;}
+			break;
+		case OMakeEnum:
+			if(!valid_reg(f,p[0])||p[1]<0||p[2]<0||p[2]!=op->operand_count-3){*error="Invalid enum construction";return false;}
+			for(int k=3;k<op->operand_count;k++) if(!valid_reg(f,p[k])){*error="Invalid enum argument";return false;}
+			break;
+		case OEnumAlloc:case OEnumIndex:
+			if(!valid_reg(f,p[0])||!valid_reg(f,p[1])){*error="Invalid enum operation";return false;}
+			break;
+		case OEnumField:
+			if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||p[2]<0||p[3]<0){*error="Invalid enum field";return false;}
+			break;
+		case ONull:case OGetGlobal:case OSetGlobal:case OGetThis:case OSetThis:case OToDyn:case OToSFloat:case OToUFloat:case OToInt:case OSafeCast:case OUnsafeCast:case OToVirtual:
+			if(!valid_reg(f,p[0])||(op->operand_count>1&&!valid_reg(f,p[1]))){*error="Invalid unary operation";return false;}
 			break;
 		case OJTrue:if(!valid_reg(f,p[0])||i+1+p[1]<0||i+1+p[1]>=f->instruction_count){*error="Invalid conditional branch";return false;}break;
 		case OJSLt:case OJSLte:case OJEq:if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||i+1+p[2]<0||i+1+p[2]>=f->instruction_count){*error="Invalid comparison branch";return false;}break;
@@ -219,26 +348,34 @@ static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function 
 }
 
 h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_msg ) {
-	const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_code code;hl_module temp;
+	const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;hl_code code;hl_module temp;
 	if(!m||!patch||!m->patchable){error="Module is not patchable";goto fail;}
 	if(patch->function_count<=0){error="Patch contains no functions";goto fail;}
 	if(m->revision!=patch->base_revision||patch->revision<=patch->base_revision){error="Stale patch revision";goto fail;}
 	if(patch->base_int_count!=m->code->nints||patch->base_float_count!=m->code->nfloats||patch->base_string_count!=m->code->nstrings||patch->base_type_count!=m->code->ntypes){error="Patch symbol base does not match module";goto fail;}
-	if(patch->int_prefix_hash!=hash_int_prefix(m->code,patch->base_int_count)||patch->float_prefix_hash!=hash_float_prefix(m->code,patch->base_float_count)||patch->string_prefix_hash!=hash_string_prefix(m->code,patch->base_string_count)||patch->type_prefix_hash!=hash_type_prefix(m->code,patch->base_type_count)){error="Patch symbol prefix hash does not match module";goto fail;}
+	if(patch->int_prefix_hash!=hash_int_prefix(m->code,patch->base_int_count)||patch->float_prefix_hash!=hash_float_prefix(m->code,patch->base_float_count)||patch->string_prefix_hash!=hash_string_prefix(m->code,patch->base_string_count)||patch->type_prefix_hash!=hash_type_prefix(m,patch->base_type_count)){error="Patch symbol prefix hash does not match module";goto fail;}
 	if(patch->type_count){error="This patch introduces unsupported types";goto fail;}
 	for(int i=0;i<patch->function_count;i++){for(int j=0;j<i;j++)if(patch->functions[j].findex==patch->functions[i].findex){error="Duplicate stable function slot";goto fail;}if(!validate_function(m,patch,patch->functions+i,&error))goto fail;}
 	allocation=(hl_patch_code*)calloc(1,sizeof(hl_patch_code));if(!allocation){error="Out of memory applying patch";goto fail;}
 	allocation->function_count=patch->function_count;allocation->functions=(hl_function*)calloc(patch->function_count,sizeof(hl_function));
 	offsets=(int*)calloc(patch->function_count,sizeof(int));if(!allocation->functions||!offsets){error="Out of memory applying patch";goto fail;}
-	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;dst->type=m->code->types+src->type;dst->findex=src->findex;dst->nregs=src->register_count;dst->nops=src->instruction_count;dst->regs=(hl_type**)calloc(dst->nregs,sizeof(hl_type*));dst->ops=(hl_opcode*)calloc(dst->nops,sizeof(hl_opcode));if(!dst->regs||!dst->ops){error="Out of memory applying patch";goto fail;}for(int j=0;j<dst->nregs;j++)dst->regs[j]=m->code->types+src->registers[j];for(int j=0;j<dst->nops;j++){hl_patch_instruction *s=src->instructions+j;hl_opcode *d=dst->ops+j;d->op=(hl_op)s->opcode;if(s->operand_count>0)d->p1=s->operands[0];if(s->operand_count>1)d->p2=s->operands[1];if(s->operand_count>2)d->p3=s->operands[2];if(s->operand_count==4)d->extra=(int*)(int_val)s->operands[3];}}
+	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;dst->type=m->code->types+src->type;dst->findex=src->findex;dst->nregs=src->register_count;dst->nops=src->instruction_count;dst->regs=(hl_type**)calloc(dst->nregs,sizeof(hl_type*));dst->ops=(hl_opcode*)calloc(dst->nops,sizeof(hl_opcode));if(!dst->regs||!dst->ops){error="Out of memory applying patch";goto fail;}for(int j=0;j<dst->nregs;j++)dst->regs[j]=m->code->types+src->registers[j];for(int j=0;j<dst->nops;j++){hl_patch_instruction *s=src->instructions+j;hl_opcode *d=dst->ops+j;d->op=(hl_op)s->opcode;if(s->operand_count>0)d->p1=s->operands[0];if(s->operand_count>1)d->p2=s->operands[1];if(s->operand_count>2)d->p3=s->operands[2];if(s->operand_count==4&&d->op!=OCallN&&d->op!=OCallMethod&&d->op!=OCallThis&&d->op!=OCallClosure&&d->op!=OMakeEnum)d->extra=(int*)(int_val)s->operands[3];if(s->operand_count>3&&(d->op==OCall3||d->op==OCall4||d->op==OCallN||d->op==OCallMethod||d->op==OCallThis||d->op==OCallClosure||d->op==OMakeEnum)){int count=d->op==OCall3?2:d->op==OCall4?3:s->operand_count-3;d->extra=(int*)malloc(sizeof(int)*count);if(!d->extra){error="Out of memory applying patch";goto fail;}memcpy(d->extra,s->operands+3,sizeof(int)*count);}}}
 	combined_ints=(int*)malloc(sizeof(int)*(patch->base_int_count+patch->int_count));if(!combined_ints){error="Out of memory applying patch";goto fail;}memcpy(combined_ints,m->code->ints,sizeof(int)*patch->base_int_count);memcpy(combined_ints+patch->base_int_count,patch->ints,sizeof(int)*patch->int_count);
 	combined_floats=(double*)malloc(sizeof(double)*(patch->base_float_count+patch->float_count));if(!combined_floats){error="Out of memory applying patch";goto fail;}memcpy(combined_floats,m->code->floats,sizeof(double)*patch->base_float_count);memcpy(combined_floats+patch->base_float_count,patch->floats,sizeof(double)*patch->float_count);
 	{int total=patch->base_string_count+patch->string_count,bytes=0,pos=0;for(int i=0;i<patch->base_string_count;i++)bytes+=m->code->strings_lens[i]+1;for(int i=0;i<patch->string_count;i++)bytes+=patch->string_lens[i]+1;combined_strings=(char**)malloc(sizeof(char*)*total);combined_string_lens=(int*)malloc(sizeof(int)*total);combined_ustrings=(uchar**)calloc(total,sizeof(uchar*));combined_string_data=(char*)malloc(bytes);if((total>0)&&(!combined_strings||!combined_string_lens||!combined_ustrings||!combined_string_data)){error="Out of memory applying patch";goto fail;}for(int i=0;i<total;i++){const char *src;int length;if(i<patch->base_string_count){src=m->code->strings[i];length=m->code->strings_lens[i];combined_ustrings[i]=(uchar*)hl_get_ustring(m->code,i);}else{src=patch->strings[i-patch->base_string_count];length=patch->string_lens[i-patch->base_string_count];int usize=hl_utf8_length((vbyte*)src,0);combined_ustrings[i]=(uchar*)malloc((usize+1)*sizeof(uchar));if(!combined_ustrings[i]){error="Out of memory applying patch";goto fail;}hl_from_utf8(combined_ustrings[i],usize,src);}combined_strings[i]=combined_string_data+pos;combined_string_lens[i]=length;memcpy(combined_string_data+pos,src,length);combined_string_data[pos+length]=0;pos+=length+1;}}
-	memset(&code,0,sizeof(code));code.nints=patch->base_int_count+patch->int_count;code.ints=combined_ints;code.nfloats=patch->base_float_count+patch->float_count;code.floats=combined_floats;code.nstrings=patch->base_string_count+patch->string_count;code.strings=combined_strings;code.strings_lens=combined_string_lens;code.ustrings=combined_ustrings;code.ntypes=m->code->ntypes;code.types=m->code->types;code.nfunctions=m->code->nfunctions;code.nnatives=m->code->nnatives;code.functions=allocation->functions;code.alloc=m->code->alloc;
+	combined_functions=(hl_function*)calloc(m->code->nfunctions,sizeof(hl_function));
+	if(!combined_functions){error="Out of memory applying patch";goto fail;}
+	memcpy(combined_functions,m->code->functions,sizeof(hl_function)*m->code->nfunctions);
+	for(int i=0;i<patch->function_count;i++) {
+		int function_index=m->functions_indexes[allocation->functions[i].findex];
+		if(function_index<0||function_index>=m->code->nfunctions){error="Invalid patch function slot";goto fail;}
+		combined_functions[function_index]=allocation->functions[i];
+	}
+	memset(&code,0,sizeof(code));code.nints=patch->base_int_count+patch->int_count;code.ints=combined_ints;code.nfloats=patch->base_float_count+patch->float_count;code.floats=combined_floats;code.nstrings=patch->base_string_count+patch->string_count;code.strings=combined_strings;code.strings_lens=combined_string_lens;code.ustrings=combined_ustrings;code.ntypes=m->code->ntypes;code.types=m->code->types;code.nfunctions=m->code->nfunctions;code.nnatives=m->code->nnatives;code.functions=combined_functions;code.alloc=m->code->alloc;
 	temp=*m;temp.code=&code;temp.jit_code=NULL;temp.jit_debug=NULL;temp.jit_ctx=NULL;
 	jit=hl_jit_alloc();if(!jit){error="Could not allocate patch JIT";goto fail;}hl_jit_init(jit,&temp);
 	for(int i=0;i<patch->function_count;i++){offsets[i]=hl_jit_function(jit,&temp,allocation->functions+i);if(offsets[i]<0){error="Could not JIT patch function";goto fail;}}
-	allocation->code=hl_jit_code(jit,&temp,&allocation->code_size,&temp.jit_debug,NULL);if(!allocation->code){error="Could not finalize patch JIT";goto fail;}hl_jit_free(jit,false);jit=NULL;
+	allocation->code=hl_jit_code(jit,&temp,&allocation->code_size,&temp.jit_debug,NULL);if(!allocation->code){error="Could not finalize patch JIT";goto fail;}hl_jit_free(jit,false);jit=NULL;free(combined_functions);combined_functions=NULL;
 	for(int i=0;i<patch->function_count;i++){int slot=allocation->functions[i].findex;hl_patch_code *old=m->patch_owners[slot];m->functions_ptrs[slot]=(unsigned char*)allocation->code+offsets[i];m->patch_owners[slot]=allocation;allocation->references++;if(old&&--old->references==0)patch_code_free(old);}
 	if(m->patch_ustrings==NULL)m->patch_initial_string_count=patch->base_string_count;
 	free(m->patch_ints);free(m->patch_floats);free(m->patch_strings);free(m->patch_string_lens);free(m->patch_ustrings);free(m->patch_string_data);
@@ -248,6 +385,7 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	m->revision=patch->revision;m->patch_jit_count+=patch->function_count;free(offsets);if(error_msg)*error_msg=NULL;return true;
 fail:
 	if(jit) hl_jit_free(jit,false);
+	free(combined_functions);
 	free(offsets);
 	free(combined_ints);
 	free(combined_floats);free(combined_strings);free(combined_string_lens);if(combined_ustrings)for(int i=patch->base_string_count;i<patch->base_string_count+patch->string_count;i++)free(combined_ustrings[i]);free(combined_ustrings);free(combined_string_data);
