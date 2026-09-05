@@ -32,12 +32,13 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 	hl_code *code;
 	hl_module *module;
 	hl_runtime_module *runtime;
-	int identity_count, i, j;
-	if( out == NULL || bytes == NULL || length <= 0 || identity == NULL || identity_length < 24 ) return HL_RUNTIME_BAD_ARGUMENT;
+	int identity_count, revision, i, j;
+	if( out == NULL || bytes == NULL || length <= 0 || identity == NULL || identity_length < 28 ) return HL_RUNTIME_BAD_ARGUMENT;
 	*out = NULL;
-	if( memcmp(identity,"HLI",3) != 0 || identity[3] != 1 ) return HL_RUNTIME_BAD_FORMAT;
-	identity_count = (int)read_u32(identity + 20);
-	if( identity_count < 0 || identity_count > 0x100000 || identity_length != 24 + identity_count * 8 ) return HL_RUNTIME_BAD_FORMAT;
+	if( memcmp(identity,"HLI",3) != 0 || identity[3] != 2 ) return HL_RUNTIME_BAD_FORMAT;
+	revision = (int)read_u32(identity + 20);
+	identity_count = (int)read_u32(identity + 24);
+	if( revision < 0 || identity_count < 0 || identity_count > 0x100000 || identity_length != 28 + identity_count * 8 ) return HL_RUNTIME_BAD_FORMAT;
 	code = hl_code_read(bytes,length,&error);
 	if( code == NULL ) return HL_RUNTIME_BAD_FORMAT;
 	module = hl_module_alloc(code);
@@ -53,6 +54,7 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 		return HL_RUNTIME_JIT_FAILED;
 	}
 	runtime->module = module;
+	runtime->module->revision = revision;
 	memcpy(runtime->module_id,identity + 4,16);
 	runtime->identity_count = identity_count;
 	runtime->stable_ids = (int*)malloc(sizeof(int) * identity_count);
@@ -61,8 +63,8 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 		free(runtime->stable_ids);free(runtime->slots);free(runtime);hl_module_unload(module);return HL_RUNTIME_JIT_FAILED;
 	}
 	for(i=0;i<identity_count;i++) {
-		runtime->stable_ids[i] = (int)read_u32(identity + 24 + i * 8);
-		runtime->slots[i] = (int)read_u32(identity + 28 + i * 8);
+		runtime->stable_ids[i] = (int)read_u32(identity + 28 + i * 8);
+		runtime->slots[i] = (int)read_u32(identity + 32 + i * 8);
 		if( runtime->stable_ids[i] < 0 || find_function(module,runtime->slots[i]) == NULL ) {
 			free(runtime->stable_ids);free(runtime->slots);free(runtime);hl_module_unload(module);return HL_RUNTIME_BAD_FORMAT;
 		}
