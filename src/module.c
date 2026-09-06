@@ -764,7 +764,7 @@ int hl_module_init( hl_module *m, int flags ) {
 		hl_type *t = m->code->globals[i];
 		if( t->kind == HFUN ) *(void**)(m->globals_data + m->globals_indexes[i]) = null_function;
 		if( hl_is_ptr(t) )
-			hl_add_root(m->globals_data+m->globals_indexes[i]);
+			hl_add_root_owner(m->globals_data+m->globals_indexes[i],m);
 	}
 	// inits
 	if( hot_reload ) m->hash = hl_code_hash_alloc(m->code);
@@ -825,6 +825,10 @@ int hl_module_init( hl_module *m, int flags ) {
 
 int hl_module_live_allocation_count( hl_module *m ) {
 	return m == NULL ? 0 : hl_gc_owner_live_count(m);
+}
+
+int hl_module_native_root_count( hl_module *m ) {
+	return m == NULL ? 0 : hl_gc_owner_root_count(m);
 }
 
 static bool check_same_type( hl_type *t1, hl_type *t2 ) {
@@ -981,7 +985,7 @@ h_bool hl_module_patch( hl_module *m1, hl_code *c ) {
 		m2->globals_indexes[i] = gsize;
 		gsize += hl_type_size(t);
 		if( hl_is_ptr(t) )
-			hl_add_root(m2->globals_data+m2->globals_indexes[i]);
+			hl_add_root_owner(m2->globals_data+m2->globals_indexes[i],m2);
 	}
 	memset(m2->globals_data+m1->globals_size,0,gsize - m1->globals_size);
 	m2->globals_size = gsize;

@@ -240,6 +240,7 @@ static struct {
 // -------------------------  ROOTS ----------------------------------------------------------
 
 static void ***gc_roots = NULL;
+static void **gc_root_owners = NULL;
 static int gc_roots_count = 0;
 static int gc_roots_max = 0;
 
@@ -296,18 +297,28 @@ HL_PRIM void hl_global_lock( bool lock ) {
 		hl_mutex_release(gc_threads.exclusive_lock);
 }
 
-HL_PRIM void hl_add_root( void *r ) {
+HL_API void hl_add_root_owner( void *r, void *owner ) {
 	gc_global_lock(true);
 	if( gc_roots_count == gc_roots_max ) {
 		int nroots = gc_roots_max ? (gc_roots_max << 1) : 16;
 		void ***roots = (void***)malloc(sizeof(void*)*nroots);
+		void **owners = (void**)malloc(sizeof(void*)*nroots);
+		if( roots == NULL || owners == NULL ) out_of_memory("roots");
 		memcpy(roots,gc_roots,sizeof(void*)*gc_roots_count);
+		memcpy(owners,gc_root_owners,sizeof(void*)*gc_roots_count);
 		free(gc_roots);
+		free(gc_root_owners);
 		gc_roots = roots;
+		gc_root_owners = owners;
 		gc_roots_max = nroots;
 	}
-	gc_roots[gc_roots_count++] = (void**)r;
+	gc_roots[gc_roots_count] = (void**)r;
+	gc_root_owners[gc_roots_count++] = owner;
 	gc_global_lock(false);
+}
+
+HL_PRIM void hl_add_root( void *r ) {
+	hl_add_root_owner(r,NULL);
 }
 
 HL_PRIM void hl_remove_root( void *v ) {
@@ -317,9 +328,20 @@ HL_PRIM void hl_remove_root( void *v ) {
 		if( gc_roots[i] == (void**)v ) {
 			gc_roots_count--;
 			gc_roots[i] = gc_roots[gc_roots_count];
+			gc_root_owners[i] = gc_root_owners[gc_roots_count];
 			break;
 		}
 	gc_global_lock(false);
+}
+
+HL_API int hl_gc_owner_root_count( void *owner ) {
+	int count = 0;
+	if( owner == NULL ) return 0;
+	gc_global_lock(true);
+	for(int i=0;i<gc_roots_count;i++)
+		if( gc_root_owners[i] == owner ) count++;
+	gc_global_lock(false);
+	return count;
 }
 
 HL_PRIM gc_pheader *hl_gc_get_page( void *v ) {
