@@ -69,6 +69,13 @@ static void send_patch_regions( hl_module *m ) {
 	send(&m->debug_hlb_size,4);
 	if( m->debug_hlb_size > 0 ) send(m->debug_hlb,m->debug_hlb_size);
 	send(&m->revision,4);
+	send(&m->globals_data,sizeof(void*));
+	send(&m->code->types,sizeof(void*));
+	send(&m->jit_code,sizeof(void*));
+	send(&m->codesize,4);
+	send(&m->code->nfunctions,4);
+	for(int i=0;i<m->code->nfunctions;i++)
+		send_debug_function(m->code->functions+i,m->jit_debug+i,i,false);
 	send(&count,4);
 	for(int i=0;i<count;i++) {
 		hl_patch_debug_region region;
