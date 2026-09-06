@@ -136,3 +136,15 @@ to distinguish a partial capture while still recovering its complete records.
 
 Because metadata and sample chunks are preserved rather than pre-aggregated,
 offline tools can reconstruct call trees, timelines, and alternative reports.
+
+The reference client can read captures without a running HashLink process:
+
+```sh
+hlprof-live report --top 30 capture.hlprof
+hlprof-live export --format folded capture.hlprof > stacks.folded
+```
+
+`report` reconstructs metadata revisions and prints aggregate self/inclusive
+costs. Folded export emits root-to-leaf stack keys and occurrence counts for
+FlameGraph-compatible tools. Both modes validate cursor continuity and recover
+all complete records from partial captures, reporting truncation on stderr.
