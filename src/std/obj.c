@@ -609,7 +609,7 @@ vvirtual *hl_to_virtual( hl_type *vt, vdynamic *obj ) {
 				hl_field_lookup *f = obj_resolve_field(obj->t->obj,vt->virt->fields[i].hashed_name);
 				if( f && f->field_index < 0 ) {
 					hl_type *ft = vt->virt->fields[i].t;
-					hl_type tmp;
+					hl_type tmp = {0};
 					hl_type_fun tf;
 					tmp.kind = HMETHOD;
 					tmp.fun = &tf;

@@ -27,7 +27,7 @@ static void fun_var_args() {
 }
 
 HL_PRIM vclosure *hl_alloc_closure_void( hl_type *t, void *fvalue ) {
-	vclosure *c = (vclosure*)hl_gc_alloc_noptr(sizeof(vclosure));
+	vclosure *c = (vclosure*)hl_gc_alloc_gen_owner(&hlt_bytes,sizeof(vclosure),MEM_KIND_NOPTR,t->gc_owner);
 	c->t = t;
 	c->fun = fvalue;
 	c->hasValue = 0;
@@ -51,7 +51,7 @@ static hl_type *hl_get_closure_type( hl_type *t ) {
 
 HL_PRIM vclosure *hl_alloc_closure_ptr( hl_type *fullt, void *fvalue, void *v ) {
 	hl_type *t = hl_get_closure_type(fullt);
-	vclosure *c = (vclosure*)hl_gc_alloc(t, sizeof(vclosure) + sizeof(void*) * hl_setup.closure_stack_capture);
+	vclosure *c = (vclosure*)hl_gc_alloc_gen_owner(t,sizeof(vclosure) + sizeof(void*) * hl_setup.closure_stack_capture,MEM_KIND_DYNAMIC,fullt->gc_owner);
 	c->t = t;
 	c->fun = fvalue;
 	c->hasValue = 1;

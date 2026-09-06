@@ -744,6 +744,7 @@ static void hl_module_add( hl_module *m ) {
 int hl_module_init( hl_module *m, int flags ) {
 	int i;
 	jit_ctx *ctx;
+	for(i=0;i<m->code->ntypes;i++) m->code->types[i].gc_owner = m;
 	bool hot_reload = (flags & HL_MODULE_HOT_RELOAD) != 0;
 	// expand globals
 	if( hot_reload ) {
@@ -820,6 +821,10 @@ int hl_module_init( hl_module *m, int flags ) {
 		m->jit_ctx = ctx;
 	}
 	return 1;
+}
+
+int hl_module_live_allocation_count( hl_module *m ) {
+	return m == NULL ? 0 : hl_gc_owner_live_count(m);
 }
 
 static bool check_same_type( hl_type *t1, hl_type *t2 ) {

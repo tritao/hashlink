@@ -460,6 +460,7 @@ struct hl_type {
 	};
 	void **vobj_proto;
 	unsigned int *mark_bits;
+	void *gc_owner;
 };
 
 C_FUNCTION_BEGIN
@@ -810,6 +811,8 @@ HL_API void hl_tls_free( hl_tls *l );
 #define MEM_ZERO			256
 
 HL_API void *hl_gc_alloc_gen( hl_type *t, int size, int flags );
+HL_API void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner );
+HL_API int hl_gc_owner_live_count( void *owner );
 HL_API void hl_add_root( void *ptr );
 HL_API void hl_remove_root( void *ptr );
 HL_API void hl_gc_major( void );

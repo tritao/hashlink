@@ -316,6 +316,14 @@ int hl_runtime_module_type_capacity( hl_runtime_module *runtime ) {
 	return result;
 }
 
+int hl_runtime_module_live_allocation_count( hl_runtime_module *runtime ) {
+	if( runtime == NULL ) return 0;
+	hl_mutex_acquire(runtime->lock);
+	int result = hl_module_live_allocation_count(runtime->module);
+	hl_mutex_release(runtime->lock);
+	return result;
+}
+
 void hl_runtime_module_set_patch_failure_stage( hl_runtime_module *runtime, int stage ) {
 	if( runtime == NULL ) return;
 	hl_mutex_acquire(runtime->lock);

@@ -174,12 +174,35 @@ static gc_pheader *gc_level1_null[1<<GC_LEVEL1_BITS] = {NULL};
 static gc_pheader **hl_gc_page_map[1<<GC_LEVEL0_BITS] = {NULL};
 static gc_pheader *gc_free_pheaders = NULL;
 
+typedef struct _gc_owned_alloc gc_owned_alloc;
+struct _gc_owned_alloc {
+	void *ptr;
+	void *owner;
+	gc_owned_alloc *next;
+};
+static gc_owned_alloc *gc_owned_allocs = NULL;
+
 static gc_pheader *gc_alloc_page( int size, int kind, int block_count );
 static void gc_free_page( gc_pheader *page, int block_count );
 
 #ifndef GC_EXTERN_API
 #include "allocator.c"
 #endif
+
+static void gc_sweep_owned_allocs() {
+	gc_owned_alloc **cursor = &gc_owned_allocs;
+	while( *cursor ) {
+		gc_owned_alloc *owned = *cursor;
+		gc_pheader *page = GC_GET_PAGE(owned->ptr);
+		int bid = page == NULL ? -1 : gc_allocator_get_block_id(page,owned->ptr);
+		if( bid >= 0 && (page->bmp[bid>>3] & (1<<(bid&7))) != 0 ) {
+			cursor = &owned->next;
+			continue;
+		}
+		*cursor = owned->next;
+		free(owned);
+	}
+}
 
 static hl_threads_info gc_threads;
 
@@ -499,7 +522,7 @@ static void gc_free_page( gc_pheader *ph, int block_count ) {
 
 static void gc_check_mark();
 
-void *hl_gc_alloc_gen( hl_type *t, int size, int flags ) {
+void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 	void *ptr;
 	int time = 0;
 	int allocated = 0;
@@ -563,9 +586,21 @@ void *hl_gc_alloc_gen( hl_type *t, int size, int flags ) {
 #	ifdef GC_MEMCHK
 	memset((char*)ptr+(allocated - HL_WSIZE),0xEE,HL_WSIZE);
 #	endif
+	if( owner != NULL ) {
+		gc_owned_alloc *owned = (gc_owned_alloc*)malloc(sizeof(gc_owned_alloc));
+		if( owned == NULL ) out_of_memory("allocation owner");
+		owned->ptr = ptr;
+		owned->owner = owner;
+		owned->next = gc_owned_allocs;
+		gc_owned_allocs = owned;
+	}
 	gc_global_lock(false);
 	hl_track_call(HL_TRACK_ALLOC, on_alloc(t,size,flags,ptr));
 	return ptr;
+}
+
+void *hl_gc_alloc_gen( hl_type *t, int size, int flags ) {
+	return hl_gc_alloc_gen_owner(t,size,flags,t == NULL ? NULL : t->gc_owner);
 }
 
 // -------------------------  MARKING ----------------------------------------------------------
@@ -855,6 +890,7 @@ static void gc_mark() {
 				hl_fatal("assert");
 		}
 	}
+	gc_sweep_owned_allocs();
 	gc_allocator_after_mark();
 }
 
@@ -922,6 +958,17 @@ HL_API void hl_gc_major() {
 	gc_global_lock(true);
 	gc_major();
 	gc_global_lock(false);
+}
+
+HL_API int hl_gc_owner_live_count( void *owner ) {
+	int count = 0;
+	if( owner == NULL ) return 0;
+	gc_global_lock(true);
+	gc_major();
+	for(gc_owned_alloc *owned=gc_owned_allocs;owned;owned=owned->next)
+		if( owned->owner == owner ) count++;
+	gc_global_lock(false);
+	return count;
 }
 
 HL_API bool hl_is_gc_ptr( void *ptr ) {
