@@ -1145,6 +1145,7 @@ void hl_global_init() {
 void hl_global_free() {
 	if( hl_setup.stop_profiler ) hl_setup.stop_profiler();
 	hl_cache_free();
+	if( hl_setup.free_runtime_retirements ) hl_setup.free_runtime_retirements();
 	if( hl_setup.free_module_registry ) hl_setup.free_module_registry();
 	if( hl_setup.free_jit_support ) hl_setup.free_jit_support();
 	hl_gc_free();

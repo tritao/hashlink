@@ -396,7 +396,7 @@ hl_module *hl_module_alloc( hl_code *c ) {
 	m->code = c;
 	m->globals_indexes = (int*)malloc(sizeof(int)*c->nglobals);
 	if( m->globals_indexes == NULL ) {
-		hl_module_free(m);
+		hl_module_free_shutdown(m);
 		return NULL;
 	}
 	for(i=0;i<c->nglobals;i++) {
@@ -407,7 +407,7 @@ hl_module *hl_module_alloc( hl_code *c ) {
 	m->globals_size = gsize;
 	m->globals_data = (unsigned char*)malloc(gsize);
 	if( m->globals_data == NULL ) {
-		hl_module_free(m);
+		hl_module_free_shutdown(m);
 		return NULL;
 	}
 	memset(m->globals_data,0,gsize);
@@ -416,7 +416,7 @@ hl_module *hl_module_alloc( hl_code *c ) {
 	m->functions_indexes = (int*)malloc(sizeof(int)*(c->nfunctions + c->nnatives));
 	m->ctx.functions_types = (hl_type**)malloc(sizeof(void*)*(c->nfunctions + c->nnatives));
 	if( m->functions_ptrs == NULL || m->functions_indexes == NULL || m->ctx.functions_types == NULL || m->patch_owners == NULL ) {
-		hl_module_free(m);
+		hl_module_free_shutdown(m);
 		return NULL;
 	}
 	memset(m->functions_ptrs,0,sizeof(void*)*(c->nfunctions + c->nnatives));
@@ -1280,7 +1280,7 @@ h_bool hl_module_patch( hl_module *m1, hl_code *c ) {
 	return true;
 }
 
-void hl_module_free( hl_module *m ) {
+void hl_module_free_shutdown( hl_module *m ) {
 	hl_module_patch_release_all(m);
 	if( !m->roots_detached )
 		for(int i=0;i<m->code->nglobals;i++)
@@ -1357,20 +1357,10 @@ h_bool hl_module_retire_try( hl_module *m, hl_module_retirement_status *status )
 	hl_module_retirement_status_get(m,&current);
 	if( status != NULL ) *status = current;
 	if( current.live_managed_allocations > 0 || current.registry_readers > 0 ) return false;
-	hl_module_free(m);
+	hl_module_free_shutdown(m);
 	return true;
 }
 
 h_bool hl_module_unload( hl_module *m ) {
-	if( m == NULL ) return false;
-	hl_module_retire_prepare(m);
-	for(;;) {
-		hl_mutex_acquire(modules_lock);
-		int readers = m->registry_readers;
-		hl_mutex_release(modules_lock);
-		if( readers == 0 ) break;
-		hl_sys_sleep(0.001);
-	}
-	hl_module_free(m);
-	return true;
+	return hl_module_retire_try(m,NULL);
 }

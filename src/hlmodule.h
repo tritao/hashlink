@@ -269,8 +269,9 @@ HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch( hl_module *module, hl_patch 
 HL_EXTERN_C HL_EXPORT int hl_module_patch_allocation_count( hl_module *module );
 HL_EXTERN_C HL_EXPORT int hl_module_patch_retired_allocation_count( hl_module *module );
 void hl_module_patch_release_all( hl_module *module );
-HL_EXTERN_C HL_EXPORT void hl_module_free( hl_module *m );
-/** Remove an initialized module from runtime discovery and release its JIT data. */
+/** Force teardown during initialization failure or process shutdown only. */
+HL_EXTERN_C HL_EXPORT void hl_module_free_shutdown( hl_module *m );
+/** Retire an initialized module only when tracked borrowers have cleared. */
 HL_EXTERN_C HL_EXPORT h_bool hl_module_unload( hl_module *m );
 HL_EXTERN_C HL_EXPORT int hl_module_live_allocation_count( hl_module *m );
 HL_EXTERN_C HL_EXPORT int hl_module_native_root_count( hl_module *m );
@@ -326,6 +327,9 @@ HL_EXTERN_C HL_EXPORT void hl_runtime_module_retirement_status_get( hl_runtime_m
 /** Test hook: fail the next patch at a staging boundary (1..3), or disable with 0. */
 HL_EXTERN_C HL_EXPORT void hl_runtime_module_set_patch_failure_stage( hl_runtime_module *runtime, int stage );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_release( hl_runtime_module *runtime );
+/** Retry internally owned failed-load retirements and return the pending count. */
+HL_EXTERN_C HL_EXPORT int hl_runtime_failed_retirements_retry();
+HL_EXTERN_C HL_EXPORT int hl_runtime_failed_retirements_count();
 
 void hl_profile_setup( int sample_count );
 void hl_profile_end();

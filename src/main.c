@@ -310,7 +310,7 @@ int main(int argc, pchar *argv[]) {
 	hl_code_free(ctx.code);
 	if( dump ) {
 		// the code has been dumped while jitting, don't run it
-		hl_module_free(ctx.m);
+		hl_module_free_shutdown(ctx.m);
 		hl_free(&ctx.code->alloc);
 		hl_global_free();
 		return 0;
@@ -340,7 +340,7 @@ int main(int argc, pchar *argv[]) {
 	// other threads may still be running and crash if globals are freed, so only run a gc here
 	hl_gc_major();
 #else
-	hl_module_free(ctx.m);
+	hl_module_free_shutdown(ctx.m);
 	hl_free(&ctx.code->alloc);
 	hl_global_free();
 #endif

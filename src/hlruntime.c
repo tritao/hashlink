@@ -11,10 +11,94 @@ struct _hl_runtime_module {
 	int identity_count;
 	int *stable_ids;
 	int *slots;
+	struct _hl_runtime_module *retirement_next;
 };
+
+static hl_runtime_module *failed_retirements = NULL;
+static hl_mutex *failed_retirements_lock = NULL;
+
+static void runtime_wrapper_free( hl_runtime_module *runtime ) {
+	hl_remove_root(&runtime->lock);
+	hl_mutex_free(runtime->lock);
+	free(runtime->stable_ids);
+	free(runtime->slots);
+	free(runtime);
+}
+
+static void failed_retirements_free() {
+	hl_runtime_module *runtime;
+	if( failed_retirements_lock == NULL ) return;
+	hl_mutex_acquire(failed_retirements_lock);
+	runtime = failed_retirements;
+	failed_retirements = NULL;
+	hl_mutex_release(failed_retirements_lock);
+	while( runtime != NULL ) {
+		hl_runtime_module *next = runtime->retirement_next;
+		if( runtime->module != NULL ) hl_module_free_shutdown(runtime->module);
+		runtime_wrapper_free(runtime);
+		runtime = next;
+	}
+	hl_remove_root(&failed_retirements_lock);
+	hl_mutex_free(failed_retirements_lock);
+	failed_retirements_lock = NULL;
+}
+
+static void failed_retirement_add( hl_runtime_module *runtime ) {
+	if( failed_retirements_lock == NULL ) {
+		hl_global_lock(true);
+		if( failed_retirements_lock == NULL ) {
+			failed_retirements_lock = hl_mutex_alloc(false);
+			hl_add_root(&failed_retirements_lock);
+			hl_setup.free_runtime_retirements = failed_retirements_free;
+		}
+		hl_global_lock(false);
+	}
+	hl_mutex_acquire(failed_retirements_lock);
+	runtime->retirement_next = failed_retirements;
+	failed_retirements = runtime;
+	hl_mutex_release(failed_retirements_lock);
+}
+
+int hl_runtime_failed_retirements_retry() {
+	hl_runtime_module **cursor;
+	int pending = 0;
+	if( failed_retirements_lock == NULL ) return 0;
+	hl_mutex_acquire(failed_retirements_lock);
+	cursor = &failed_retirements;
+	while( *cursor != NULL ) {
+		hl_runtime_module *runtime = *cursor;
+		hl_runtime_module *next = runtime->retirement_next;
+		if( hl_runtime_module_release(runtime) == HL_RUNTIME_OK )
+			*cursor = next;
+		else {
+			pending++;
+			cursor = &runtime->retirement_next;
+		}
+	}
+	hl_mutex_release(failed_retirements_lock);
+	return pending;
+}
+
+int hl_runtime_failed_retirements_count() {
+	hl_runtime_module *runtime;
+	int count = 0;
+	if( failed_retirements_lock == NULL ) return 0;
+	hl_mutex_acquire(failed_retirements_lock);
+	for(runtime=failed_retirements;runtime;runtime=runtime->retirement_next) count++;
+	hl_mutex_release(failed_retirements_lock);
+	return count;
+}
 
 static int resolve_stable_id( hl_runtime_module *runtime, int stable_id );
 static hl_function *find_function( hl_module *module, int stable_id );
+
+static void runtime_clear_exception_state() {
+	hl_thread_info *thread = hl_get_thread();
+	if( thread == NULL ) return;
+	thread->exc_value = NULL;
+	thread->exc_stack_count = 0;
+	memset(thread->exc_stack_trace,0,sizeof(thread->exc_stack_trace));
+}
 
 hl_runtime_status hl_runtime_module_validate_call( hl_runtime_module *runtime, int stable_id, int shape ) {
 	hl_function *function;
@@ -52,6 +136,7 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 	hl_module *module;
 	hl_runtime_module *runtime;
 	int identity_count, revision, i, j;
+	hl_runtime_failed_retirements_retry();
 	if( out == NULL || bytes == NULL || length <= 0 || identity == NULL || identity_length < 28 ) return HL_RUNTIME_BAD_ARGUMENT;
 	*out = NULL;
 	if( memcmp(identity,"HLI",3) != 0 || identity[3] != 2 ) return HL_RUNTIME_BAD_FORMAT;
@@ -62,7 +147,7 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 	if( code == NULL ) return HL_RUNTIME_BAD_FORMAT;
 	module = hl_module_alloc(code);
 	if( module == NULL || !hl_module_init(module,HL_MODULE_PATCHABLE) ) {
-		if( module != NULL ) hl_module_free(module);
+		if( module != NULL ) hl_module_free_shutdown(module);
 		hl_code_free(code);
 		return HL_RUNTIME_JIT_FAILED;
 	}
@@ -78,6 +163,7 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 	runtime->identity_count = identity_count;
 	runtime->stable_ids = (int*)malloc(sizeof(int) * identity_count);
 	runtime->slots = (int*)malloc(sizeof(int) * identity_count);
+	runtime->retirement_next = NULL;
 	if( (identity_count > 0) && (runtime->stable_ids == NULL || runtime->slots == NULL) ) {
 		free(runtime->stable_ids);free(runtime->slots);free(runtime);hl_module_unload(module);return HL_RUNTIME_JIT_FAILED;
 	}
@@ -97,7 +183,10 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 		vdynamic *exception = NULL;
 		hl_runtime_status status = hl_runtime_module_call_void(runtime,HL_RUNTIME_INIT_STABLE_ID,&exception);
 		if( status != HL_RUNTIME_OK ) {
-			hl_runtime_module_release(runtime);
+			exception = NULL;
+			runtime_clear_exception_state();
+			if( hl_runtime_module_release(runtime) != HL_RUNTIME_OK )
+				failed_retirement_add(runtime);
 			return status;
 		}
 	}
@@ -377,10 +466,6 @@ hl_runtime_status hl_runtime_module_release( hl_runtime_module *runtime ) {
 	}
 	runtime->module = NULL;
 	hl_mutex_release(runtime->lock);
-	hl_remove_root(&runtime->lock);
-	hl_mutex_free(runtime->lock);
-	free(runtime->stable_ids);
-	free(runtime->slots);
-	free(runtime);
+	runtime_wrapper_free(runtime);
 	return HL_RUNTIME_OK;
 }

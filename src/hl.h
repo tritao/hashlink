@@ -632,6 +632,7 @@ typedef struct {
 	void (*before_exit)();
 	void (*stop_profiler)();
 	void (*free_jit_support)();
+	void (*free_runtime_retirements)();
 	void (*free_module_registry)();
 	void (*vtune_init)();
 	bool (*load_plugin)( pchar *file );
