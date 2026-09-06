@@ -114,9 +114,25 @@ static void function_name( hl_function *function, char *output, int capacity ) {
 		snprintf(output,capacity,"fun$%d",function->findex);
 }
 
-static void append_function( diag_buffer *buffer, hl_function *function, unsigned int start, unsigned int size ) {
+static unsigned int function_jit_offset( hl_debug_infos *debug, int opcode ) {
+	return debug->large ? (unsigned int)((int*)debug->offsets)[opcode] : (unsigned int)((unsigned short*)debug->offsets)[opcode];
+}
+
+static int function_line_count( hl_code *code, hl_function *function, hl_debug_infos *debug, unsigned int size ) {
+	int count = 0, previous_file = -1, previous_line = -1;
+	if( !code->hasdebug || function->debug == NULL ) return 0;
+	for(int i=0;i<function->nops;i++) {
+		int file = function->debug[i * 2] & 0x7FFFFFFF;
+		int line = function->debug[i * 2 + 1];
+		if( file < 0 || file >= code->ndebugfiles || line <= 0 || function_jit_offset(debug,i) >= size ) continue;
+		if( file != previous_file || line != previous_line ) { count++; previous_file = file; previous_line = line; }
+	}
+	return count;
+}
+
+static void append_function( diag_buffer *buffer, hl_code *code, hl_function *function, hl_debug_infos *debug, unsigned int start, unsigned int size ) {
 	char name[768];
-	unsigned int length;
+	unsigned int length, line_count;
 	function_name(function,name,sizeof(name));
 	length = (unsigned int)strlen(name);
 	buffer_u32(buffer,(unsigned int)function->findex);
@@ -124,9 +140,23 @@ static void append_function( diag_buffer *buffer, hl_function *function, unsigne
 	buffer_u32(buffer,size);
 	buffer_u32(buffer,length);
 	buffer_bytes(buffer,name,length);
+	line_count = (unsigned int)function_line_count(code,function,debug,size);
+	buffer_u32(buffer,line_count);
+	if( line_count ) {
+		int previous_file = -1, previous_line = -1;
+		for(int i=0;i<function->nops;i++) {
+			int file = function->debug[i * 2] & 0x7FFFFFFF;
+			int line = function->debug[i * 2 + 1];
+			if( file < 0 || file >= code->ndebugfiles || line <= 0 || function_jit_offset(debug,i) >= size || (file == previous_file && line == previous_line) ) continue;
+			buffer_u32(buffer,function_jit_offset(debug,i));
+			buffer_u32(buffer,(unsigned int)file);
+			buffer_u32(buffer,(unsigned int)line);
+			previous_file = file; previous_line = line;
+		}
+	}
 }
 
-static void append_region( diag_buffer *buffer, unsigned long long base, unsigned int size, unsigned int flags, hl_function *functions, hl_debug_infos *debug, int debug_count, int function_count ) {
+static void append_region( diag_buffer *buffer, hl_code *code, unsigned long long base, unsigned int size, unsigned int flags, hl_function *functions, hl_debug_infos *debug, int debug_count, int function_count ) {
 	int valid = 0;
 	for(int i=0;i<function_count;i++) if( debug && debug[i].offsets && debug[i].start >= 0 && (unsigned int)debug[i].start < size ) valid++;
 	buffer_u64(buffer,base);
@@ -135,14 +165,14 @@ static void append_region( diag_buffer *buffer, unsigned long long base, unsigne
 	buffer_u32(buffer,(unsigned int)valid);
 	for(int i=0;i<function_count;i++)
 		if( debug && debug[i].offsets && debug[i].start >= 0 && (unsigned int)debug[i].start < size )
-			append_function(buffer,functions + i,(unsigned int)debug[i].start,function_end(debug,debug_count,i,size) - (unsigned int)debug[i].start);
+			append_function(buffer,code,functions + i,debug + i,(unsigned int)debug[i].start,function_end(debug,debug_count,i,size) - (unsigned int)debug[i].start);
 }
 
 static bool send_metadata( hl_socket *socket, unsigned int request_id ) {
 	diag_buffer buffer = {0};
 	int count;
 	hl_module **modules = hl_module_registry_snapshot(&count);
-	buffer_u32(&buffer,1);
+	buffer_u32(&buffer,2);
 	buffer_u32(&buffer,(unsigned int)count);
 	for(int i=0;i<count;i++) {
 		hl_module *module = modules[i];
@@ -150,7 +180,12 @@ static bool send_metadata( hl_socket *socket, unsigned int request_id ) {
 		buffer_u64(&buffer,module->diagnostics_id);
 		buffer_u32(&buffer,(unsigned int)module->revision);
 		buffer_u32(&buffer,(unsigned int)(1 + patch_count));
-		append_region(&buffer,(unsigned long long)(uintptr_t)module->jit_code,(unsigned int)module->codesize,0,module->code->functions,module->jit_debug,module->code->nfunctions,module->code->nfunctions);
+		buffer_u32(&buffer,(unsigned int)module->code->ndebugfiles);
+		for(int file_index=0;file_index<module->code->ndebugfiles;file_index++) {
+			buffer_u32(&buffer,(unsigned int)module->code->debugfiles_lens[file_index]);
+			buffer_bytes(&buffer,module->code->debugfiles[file_index],(unsigned int)module->code->debugfiles_lens[file_index]);
+		}
+		append_region(&buffer,module->code,(unsigned long long)(uintptr_t)module->jit_code,(unsigned int)module->codesize,0,module->code->functions,module->jit_debug,module->code->nfunctions,module->code->nfunctions);
 		for(int region_index=0;region_index<patch_count;region_index++) {
 			hl_patch_debug_region region;
 			int valid = 0;
@@ -174,7 +209,7 @@ static bool send_metadata( hl_socket *socket, unsigned int request_id ) {
 					hl_debug_infos *other_debug;
 					if( hl_module_patch_debug_function_get(module,region_index,k,&other_index,&other_function,&other_debug) && other_debug->start > debug->start && (unsigned int)other_debug->start < end ) end = (unsigned int)other_debug->start;
 				}
-				append_function(&buffer,function,(unsigned int)debug->start,end - (unsigned int)debug->start);
+				append_function(&buffer,module->code,function,debug,(unsigned int)debug->start,end - (unsigned int)debug->start);
 				valid++;
 			}
 			if( !buffer.failed ) write_u32(buffer.data + count_at,(unsigned int)valid);

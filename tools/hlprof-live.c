@@ -25,7 +25,8 @@ typedef int socket_t;
 enum { SVC_PROFILE=2, P_STATUS=1, P_CONFIGURE=2, P_READ=3, P_METADATA=4 };
 enum { F_RESPONSE=1, F_ERROR=2, CAP_PROFILE=1, CAP_SYMBOLS=2 };
 
-typedef struct { uint64_t start,end,self,total; uint32_t function_id; char *name; } symbol;
+typedef struct { uint32_t offset,line; char *file; uint64_t self,total; } source_line;
+typedef struct { uint64_t start,end,self,total; uint32_t function_id; char *name; source_line *lines; uint32_t line_count; } symbol;
 typedef struct { symbol *items; size_t count,capacity; } symbols;
 typedef struct { const unsigned char *data; size_t length,pos; } reader;
 typedef struct { FILE *file; double started; int failed; } capture;
@@ -98,36 +99,41 @@ static int request( socket_t s,unsigned char type,uint32_t id,const void *body,u
 static int get32( reader *r,uint32_t *v ){if(r->length-r->pos<4)return 0;*v=u32(r->data+r->pos);r->pos+=4;return 1;}
 static int get64( reader *r,uint64_t *v ){if(r->length-r->pos<8)return 0;*v=u64(r->data+r->pos);r->pos+=8;return 1;}
 
-static void free_symbols( symbols *s ){for(size_t i=0;i<s->count;i++)free(s->items[i].name);free(s->items);memset(s,0,sizeof(*s));}
-static int add_symbol( symbols *s,uint64_t start,uint64_t end,uint32_t id,const unsigned char *name,uint32_t length ) {
-	if(s->count==s->capacity){size_t cap=s->capacity?s->capacity*2:1024;symbol *p=(symbol*)realloc(s->items,cap*sizeof(symbol));if(!p)return 0;s->items=p;s->capacity=cap;}
-	symbol *x=s->items+s->count++;memset(x,0,sizeof(*x));x->start=start;x->end=end;x->function_id=id;x->name=(char*)malloc((size_t)length+1);if(!x->name)return 0;memcpy(x->name,name,length);x->name[length]=0;return 1;
+static void free_symbols( symbols *s ){for(size_t i=0;i<s->count;i++){free(s->items[i].name);for(uint32_t j=0;j<s->items[i].line_count;j++)free(s->items[i].lines[j].file);free(s->items[i].lines);}free(s->items);memset(s,0,sizeof(*s));}
+static symbol *add_symbol( symbols *s,uint64_t start,uint64_t end,uint32_t id,const unsigned char *name,uint32_t length ) {
+	if(s->count==s->capacity){size_t cap=s->capacity?s->capacity*2:1024;symbol *p=(symbol*)realloc(s->items,cap*sizeof(symbol));if(!p)return NULL;s->items=p;s->capacity=cap;}
+	symbol *x=s->items+s->count++;memset(x,0,sizeof(*x));x->start=start;x->end=end;x->function_id=id;x->name=(char*)malloc((size_t)length+1);if(!x->name)return NULL;memcpy(x->name,name,length);x->name[length]=0;return x;
 }
 static int by_address( const void *a,const void *b ){const symbol *x=a,*y=b;return x->start<y->start?-1:x->start>y->start?1:0;}
 static symbol *resolve( symbols *s,uint64_t pc ){size_t lo=0,hi=s->count;while(lo<hi){size_t m=(lo+hi)>>1;if(s->items[m].start<=pc)lo=m+1;else hi=m;}return lo&&pc<s->items[lo-1].end?s->items+lo-1:NULL;}
+static source_line *resolve_line( symbol *s,uint64_t pc ){uint32_t offset=(uint32_t)(pc-s->start),lo=0,hi=s->line_count;while(lo<hi){uint32_t m=(lo+hi)>>1;if(s->lines[m].offset<=offset)lo=m+1;else hi=m;}return lo?s->lines+lo-1:NULL;}
 static int parse_symbols( const unsigned char *data,uint32_t size,symbols *current ) {
-	uint32_t schema,nmodules;reader r;symbols next={0};
+	uint32_t schema,nmodules;reader r;symbols next={0};char **files=NULL;uint32_t file_count=0;
 	r.data=data;r.length=size;r.pos=0;
-	if(!get32(&r,&schema)||schema!=1||!get32(&r,&nmodules))goto fail;
+	if(!get32(&r,&schema)||(schema!=1&&schema!=2)||!get32(&r,&nmodules))goto fail;
 	for(uint32_t m=0;m<nmodules;m++){
 		uint64_t module_id;uint32_t revision,nregions;if(!get64(&r,&module_id)||!get32(&r,&revision)||!get32(&r,&nregions))goto fail;
+		if(schema>=2){if(!get32(&r,&file_count))goto fail;files=(char**)calloc(file_count,sizeof(char*));if(file_count&&!files)goto fail;for(uint32_t i=0;i<file_count;i++){uint32_t length;if(!get32(&r,&length)||length>r.length-r.pos)goto fail;files[i]=(char*)malloc((size_t)length+1);if(!files[i])goto fail;memcpy(files[i],r.data+r.pos,length);files[i][length]=0;r.pos+=length;}}
 		for(uint32_t g=0;g<nregions;g++){
 			uint64_t base,region_size;uint32_t flags,nfunctions;if(!get64(&r,&base)||!get64(&r,&region_size)||!get32(&r,&flags)||!get32(&r,&nfunctions))goto fail;
 			for(uint32_t f=0;f<nfunctions;f++){
 				uint32_t fid,off,len,nlen;if(!get32(&r,&fid)||!get32(&r,&off)||!get32(&r,&len)||!get32(&r,&nlen)||nlen>r.length-r.pos||!len||(uint64_t)off+len>region_size)goto fail;
-				if(!add_symbol(&next,base+off,base+off+len,fid,r.data+r.pos,nlen))goto fail;
+				symbol *added=add_symbol(&next,base+off,base+off+len,fid,r.data+r.pos,nlen);if(!added)goto fail;
 				r.pos+=nlen;
+				if(schema>=2){uint32_t lines;if(!get32(&r,&lines))goto fail;added->lines=(source_line*)calloc(lines,sizeof(source_line));if(lines&&!added->lines)goto fail;added->line_count=lines;for(uint32_t i=0;i<lines;i++){uint32_t offset,file,line;if(!get32(&r,&offset)||!get32(&r,&file)||!get32(&r,&line)||offset>=len||file>=file_count||(i&&offset<added->lines[i-1].offset))goto fail;added->lines[i].offset=offset;added->lines[i].line=line;added->lines[i].file=(char*)malloc(strlen(files[file])+1);if(!added->lines[i].file)goto fail;strcpy(added->lines[i].file,files[file]);}}
 			}
 		}
+		for(uint32_t i=0;i<file_count;i++)free(files[i]);
+		free(files);files=NULL;file_count=0;
 	}
 	if(r.pos!=r.length)goto fail;
 	qsort(next.items,next.count,sizeof(symbol),by_address);
 	for(size_t i=0;i<next.count;i++){
 		symbol *old=resolve(current,next.items[i].start);
-		if(old&&old->start==next.items[i].start&&old->end==next.items[i].end&&!strcmp(old->name,next.items[i].name)){next.items[i].self=old->self;next.items[i].total=old->total;}
+		if(old&&old->start==next.items[i].start&&old->end==next.items[i].end&&!strcmp(old->name,next.items[i].name)){next.items[i].self=old->self;next.items[i].total=old->total;for(uint32_t j=0;j<next.items[i].line_count;j++){source_line *line=resolve_line(old,old->start+next.items[i].lines[j].offset);if(line&&!strcmp(line->file,next.items[i].lines[j].file)&&line->line==next.items[i].lines[j].line){next.items[i].lines[j].self=line->self;next.items[i].lines[j].total=line->total;}}}
 	}
 	free_symbols(current);*current=next;return 1;
-	fail: free_symbols(&next);return 0;
+	fail: if(files){for(uint32_t i=0;i<file_count;i++)free(files[i]);free(files);}free_symbols(&next);return 0;
 }
 static int fetch_symbols( socket_t sock,symbols *current,uint32_t id,capture *output ) {
 	unsigned char *data=NULL;uint32_t size;
@@ -137,13 +143,14 @@ static int fetch_symbols( socket_t sock,symbols *current,uint32_t id,capture *ou
 	free(data);return 1;
 }
 static int by_hot( const void *a,const void *b ){const symbol *x=*(symbol*const*)a,*y=*(symbol*const*)b;if(x->self!=y->self)return x->self<y->self?1:-1;return x->total<y->total?1:x->total>y->total?-1:0;}
-static void report( symbols *s,uint64_t samples,uint64_t unresolved,uint64_t dropped,int top ) {
+typedef struct { symbol *function; source_line *line; } hot_line;
+static int by_hot_line( const void *a,const void *b ){const hot_line *x=a,*y=b;if(x->line->self!=y->line->self)return x->line->self<y->line->self?1:-1;return x->line->total<y->line->total?1:x->line->total>y->line->total?-1:0;}
+static void report( symbols *s,uint64_t samples,uint64_t unresolved,uint64_t dropped,int top,int show_lines ) {
 	symbol **hot=(symbol**)malloc(s->count*sizeof(symbol*));size_t count=0;if(!hot)return;
-	for(size_t i=0;i<s->count;i++)if(s->items[i].total)hot[count++]=s->items+i;
-	qsort(hot,count,sizeof(symbol*),by_hot);
-	printf("\nsamples=%llu unresolved_frames=%llu dropped_records=%llu\n",(unsigned long long)samples,(unsigned long long)unresolved,(unsigned long long)dropped);printf("%8s %8s  %s\n","self","total","function");
-	for(size_t i=0;i<count&&i<(size_t)top;i++)printf("%7.2f%% %7.2f%%  %s\n",samples?hot[i]->self*100.0/samples:0.0,samples?hot[i]->total*100.0/samples:0.0,hot[i]->name);
-	fflush(stdout);for(size_t i=0;i<s->count;i++)s->items[i].self=s->items[i].total=0;free(hot);
+	printf("\nsamples=%llu unresolved_frames=%llu dropped_records=%llu\n",(unsigned long long)samples,(unsigned long long)unresolved,(unsigned long long)dropped);printf("%8s %8s  %s\n","self","total",show_lines?"location / function":"function");
+	if(show_lines){size_t line_capacity=0;for(size_t i=0;i<s->count;i++)line_capacity+=s->items[i].line_count;hot_line *lines=(hot_line*)malloc(line_capacity*sizeof(hot_line));if(!lines){free(hot);return;}for(size_t i=0;i<s->count;i++)for(uint32_t j=0;j<s->items[i].line_count;j++)if(s->items[i].lines[j].total){lines[count].function=s->items+i;lines[count++].line=s->items[i].lines+j;}qsort(lines,count,sizeof(hot_line),by_hot_line);for(size_t i=0;i<count&&i<(size_t)top;i++)printf("%7.2f%% %7.2f%%  %s:%u  %s\n",samples?lines[i].line->self*100.0/samples:0.0,samples?lines[i].line->total*100.0/samples:0.0,lines[i].line->file,lines[i].line->line,lines[i].function->name);free(lines);}
+	else{for(size_t i=0;i<s->count;i++)if(s->items[i].total)hot[count++]=s->items+i;qsort(hot,count,sizeof(symbol*),by_hot);for(size_t i=0;i<count&&i<(size_t)top;i++)printf("%7.2f%% %7.2f%%  %s\n",samples?hot[i]->self*100.0/samples:0.0,samples?hot[i]->total*100.0/samples:0.0,hot[i]->name);}
+	fflush(stdout);for(size_t i=0;i<s->count;i++){s->items[i].self=s->items[i].total=0;for(uint32_t j=0;j<s->items[i].line_count;j++)s->items[i].lines[j].self=s->items[i].lines[j].total=0;}free(hot);
 }
 static uint32_t stack_hash( const char *text ){uint32_t h=2166136261U;while(*text){h^=(unsigned char)*text++;h*=16777619U;}return h;}
 static int folded_add( folded_table *table,const char *stack ) {
@@ -153,20 +160,22 @@ static int folded_add( folded_table *table,const char *stack ) {
 }
 static void folded_write( folded_table *table ) {for(int i=0;i<4096;i++)for(folded *e=table->buckets[i];e;e=e->next)printf("%s %llu\n",e->stack,(unsigned long long)e->count);}
 static void folded_free( folded_table *table ){for(int i=0;i<4096;i++){folded *e=table->buckets[i];while(e){folded *next=e->next;free(e->stack);free(e);e=next;}}}
-static int consume( symbols *s,unsigned char *pending,size_t *length,uint64_t *samples,uint64_t *unresolved,folded_table *folded_stacks ) {
+static int consume( symbols *s,unsigned char *pending,size_t *length,uint64_t *samples,uint64_t *unresolved,folded_table *folded_stacks,int show_lines ) {
 	size_t pos=0;while(*length-pos>=4){uint32_t body=u32(pending+pos);if(body<20||body>(8U<<20))return 0;if(*length-pos<(size_t)body+4)break;
-		if(pending[pos+4]==1){uint32_t frames=u32(pending+pos+20);if(body!=20+frames*8U)return 0;symbol *leaf=NULL;char *stack=NULL;size_t stack_len=0,stack_cap=0;(*samples)++;for(uint32_t i=0;i<frames;i++){symbol *x=resolve(s,u64(pending+pos+24+i*8));if(x){x->total++;if(!leaf)leaf=x;}else(*unresolved)++;}
+		if(pending[pos+4]==1){uint32_t frames=u32(pending+pos+20);if(body!=20+frames*8U)return 0;symbol *leaf=NULL;source_line *leaf_line=NULL;char *stack=NULL;size_t stack_len=0,stack_cap=0;(*samples)++;for(uint32_t i=0;i<frames;i++){uint64_t pc=u64(pending+pos+24+i*8);symbol *x=resolve(s,pc);if(x){source_line *line=resolve_line(x,pc);x->total++;if(line)line->total++;if(!leaf){leaf=x;leaf_line=line;}}else(*unresolved)++;}
 			if(leaf)leaf->self++;
-			if(folded_stacks){for(uint32_t i=frames;i>0;i--){symbol *x=resolve(s,u64(pending+pos+24+(i-1)*8));const char *name=x?x->name:"[unknown]";size_t n=strlen(name),need=stack_len+n+(stack_len?1:0)+1;if(need>stack_cap){size_t cap=stack_cap?stack_cap*2:256;while(cap<need)cap*=2;char *next=(char*)realloc(stack,cap);if(!next){free(stack);return 0;}stack=next;stack_cap=cap;}if(stack_len)stack[stack_len++]=';';memcpy(stack+stack_len,name,n);stack_len+=n;stack[stack_len]=0;}if(stack&&!folded_add(folded_stacks,stack)){free(stack);return 0;}free(stack);}
+			if(leaf_line)leaf_line->self++;
+			if(folded_stacks){for(uint32_t i=frames;i>0;i--){uint64_t pc=u64(pending+pos+24+(i-1)*8);symbol *x=resolve(s,pc);source_line *line=x?resolve_line(x,pc):NULL;char label[1536];const char *name;if(show_lines&&line){snprintf(label,sizeof(label),"%s (%s:%u)",x->name,line->file,line->line);name=label;}else name=x?x->name:"[unknown]";size_t n=strlen(name),need=stack_len+n+(stack_len?1:0)+1;if(need>stack_cap){size_t cap=stack_cap?stack_cap*2:256;while(cap<need)cap*=2;char *next=(char*)realloc(stack,cap);if(!next){free(stack);return 0;}stack=next;stack_cap=cap;}if(stack_len)stack[stack_len++]=';';memcpy(stack+stack_len,name,n);stack_len+=n;stack[stack_len]=0;}if(stack&&!folded_add(folded_stacks,stack)){free(stack);return 0;}free(stack);}
 		}pos+=body+4;}
 	if(pos){memmove(pending,pending+pos,*length-pos);*length-=pos;}return 1;
 }
-static void usage( const char *p ){fprintf(stderr,"Usage:\n  %s [--host HOST] [--rate HZ] [--interval MS] [--duration SEC] [--top N] [--output FILE] PORT\n  %s report [--top N] CAPTURE\n  %s export --format folded CAPTURE\n",p,p,p);}
+static void usage( const char *p ){fprintf(stderr,"Usage:\n  %s [--host HOST] [--rate HZ] [--interval MS] [--duration SEC] [--top N] [--lines] [--output FILE] PORT\n  %s report [--top N] [--lines] CAPTURE\n  %s export --format folded [--lines] CAPTURE\n",p,p,p);}
 
 static int offline( int argc,char **argv,int export_folded ) {
-	const char *path=NULL;int top=15,code=1,complete=0,format_seen=0;FILE *file=NULL;symbols table={0};folded_table folded_stacks={0};unsigned char header[24],record_header[16],*payload=NULL,*pending=NULL;size_t pending_len=0,pending_cap=512*1024;uint64_t samples=0,unresolved=0,dropped=0,cursor=0,last_time=0;int have_cursor=0;
+	const char *path=NULL;int top=15,code=1,complete=0,format_seen=0,show_lines=0;FILE *file=NULL;symbols table={0};folded_table folded_stacks={0};unsigned char header[24],record_header[16],*payload=NULL,*pending=NULL;size_t pending_len=0,pending_cap=512*1024;uint64_t samples=0,unresolved=0,dropped=0,cursor=0,last_time=0;int have_cursor=0;
 	for(int i=2;i<argc;i++){
 		if(!strcmp(argv[i],"--top")&&++i<argc&&!export_folded)top=atoi(argv[i]);
+		else if(!strcmp(argv[i],"--lines"))show_lines=1;
 		else if(!strcmp(argv[i],"--format")&&++i<argc&&export_folded){if(strcmp(argv[i],"folded")){fprintf(stderr,"Only folded export is supported\n");goto done;}format_seen=1;}
 		else if(argv[i][0]=='-'||path){usage(argv[0]);goto done;}else path=argv[i];
 	}
@@ -183,24 +192,24 @@ static int offline( int argc,char **argv,int export_folded ) {
 		if(type==1){if(!parse_symbols(payload,size,&table)){fprintf(stderr,"Malformed symbol metadata\n");goto done;}}
 		else if(type==2){uint64_t requested,next;if(size<24||!table.count){fprintf(stderr,"Malformed sample chunk\n");goto done;}requested=u64(payload);next=u64(payload+8);dropped=u64(payload+16);if((have_cursor&&requested!=cursor)||next<requested){fprintf(stderr,"Non-contiguous capture cursor\n");goto done;}cursor=next;have_cursor=1;
 			if(pending_len+size-24>pending_cap){size_t cap=pending_cap;while(cap<pending_len+size-24)cap*=2;unsigned char *next_buffer=(unsigned char*)realloc(pending,cap);if(!next_buffer){goto done;}pending=next_buffer;pending_cap=cap;}memcpy(pending+pending_len,payload+24,size-24);pending_len+=size-24;
-			if(!consume(&table,pending,&pending_len,&samples,&unresolved,export_folded?&folded_stacks:NULL)){fprintf(stderr,"Malformed profiler stream\n");goto done;}
+			if(!consume(&table,pending,&pending_len,&samples,&unresolved,export_folded?&folded_stacks:NULL,show_lines)){fprintf(stderr,"Malformed profiler stream\n");goto done;}
 		}else if(type==3){if(size!=16||!have_cursor||u64(payload)!=cursor){fprintf(stderr,"Malformed completion record\n");goto done;}dropped=u64(payload+8);complete=1;}
 		free(payload);payload=NULL;
 	}
 	if(!complete)fprintf(stderr,"warning: partial capture; reporting complete records only\n");
 	if(pending_len)fprintf(stderr,"warning: ignored %zu trailing profiler bytes\n",pending_len);
-	if(export_folded)folded_write(&folded_stacks);else report(&table,samples,unresolved,dropped,top);
+	if(export_folded)folded_write(&folded_stacks);else report(&table,samples,unresolved,dropped,top,show_lines);
 	code=0;
 done:
 	free(payload);free(pending);if(file)fclose(file);folded_free(&folded_stacks);free_symbols(&table);return code;
 }
 
 int main( int argc,char **argv ) {
-	const char *host="127.0.0.1",*port=NULL,*output_path=NULL;int rate=1000,interval=1000,duration=0,top=15,code=1;socket_t sock=INVALID_SOCKET;symbols table={0};capture output={0};
+	const char *host="127.0.0.1",*port=NULL,*output_path=NULL;int rate=1000,interval=1000,duration=0,top=15,code=1,show_lines=0;socket_t sock=INVALID_SOCKET;symbols table={0};capture output={0};
 	unsigned char hello[16],config[8],read_body[12],*reply=NULL,*pending=NULL;uint32_t reply_size,id=1;uint64_t cursor=0,dropped=0,samples=0,unresolved=0;size_t pending_len=0;double started,next_report,next_metadata;
 	if(argc>1&&!strcmp(argv[1],"report"))return offline(argc,argv,0);
 	if(argc>1&&!strcmp(argv[1],"export"))return offline(argc,argv,1);
-	for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")){usage(argv[0]);return 0;}else if(!strcmp(argv[i],"--host")&&++i<argc)host=argv[i];else if(!strcmp(argv[i],"--rate")&&++i<argc)rate=atoi(argv[i]);else if(!strcmp(argv[i],"--interval")&&++i<argc)interval=atoi(argv[i]);else if(!strcmp(argv[i],"--duration")&&++i<argc)duration=atoi(argv[i]);else if(!strcmp(argv[i],"--top")&&++i<argc)top=atoi(argv[i]);else if(!strcmp(argv[i],"--output")&&++i<argc)output_path=argv[i];else if(argv[i][0]=='-'||port){usage(argv[0]);return 2;}else port=argv[i];}
+	for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")){usage(argv[0]);return 0;}else if(!strcmp(argv[i],"--host")&&++i<argc)host=argv[i];else if(!strcmp(argv[i],"--rate")&&++i<argc)rate=atoi(argv[i]);else if(!strcmp(argv[i],"--interval")&&++i<argc)interval=atoi(argv[i]);else if(!strcmp(argv[i],"--duration")&&++i<argc)duration=atoi(argv[i]);else if(!strcmp(argv[i],"--top")&&++i<argc)top=atoi(argv[i]);else if(!strcmp(argv[i],"--lines"))show_lines=1;else if(!strcmp(argv[i],"--output")&&++i<argc)output_path=argv[i];else if(argv[i][0]=='-'||port){usage(argv[0]);return 2;}else port=argv[i];}
 	if(!port||rate<=0||interval<=0||duration<0||top<=0){usage(argv[0]);return 2;}
 #ifdef _WIN32
 	{WSADATA w;if(WSAStartup(MAKEWORD(2,2),&w)){fprintf(stderr,"Winsock initialization failed\n");return 1;}}
@@ -219,11 +228,11 @@ int main( int argc,char **argv ) {
 	while(!interrupted&&(!duration||monotime()-started<duration)){
 		put64(read_body,cursor);put32(read_body+8,256*1024);if(!request(sock,P_READ,id++,read_body,12,&reply,&reply_size)||reply_size<16){fprintf(stderr,"Profiler connection closed\n");goto done;}
 		if(!capture_record_parts(&output,2,read_body,8,reply,reply_size)){fprintf(stderr,"Capture write failed\n");goto done;}cursor=u64(reply);dropped=u64(reply+8);if(pending_len+reply_size-16>512*1024){fprintf(stderr,"Local buffer overflow\n");goto done;}memcpy(pending+pending_len,reply+16,reply_size-16);pending_len+=reply_size-16;free(reply);reply=NULL;
-		if(!consume(&table,pending,&pending_len,&samples,&unresolved,NULL)){fprintf(stderr,"Malformed profile record\n");goto done;}
+		if(!consume(&table,pending,&pending_len,&samples,&unresolved,NULL,show_lines)){fprintf(stderr,"Malformed profile record\n");goto done;}
 		if(monotime()>=next_metadata){if(!fetch_symbols(sock,&table,id++,&output)){fprintf(stderr,"Metadata refresh failed\n");goto done;}next_metadata=monotime()+5;}
-		if(monotime()>=next_report){report(&table,samples,unresolved,dropped,top);samples=unresolved=0;next_report=monotime()+interval/1000.0;}sleep_ms(interval<100?interval:100);
+		if(monotime()>=next_report){report(&table,samples,unresolved,dropped,top,show_lines);samples=unresolved=0;next_report=monotime()+interval/1000.0;}sleep_ms(interval<100?interval:100);
 	}
-	if(samples)report(&table,samples,unresolved,dropped,top);
+	if(samples)report(&table,samples,unresolved,dropped,top,show_lines);
 	code=0;
 done:
 	if(sock!=INVALID_SOCKET){if(code==0){put32(config,(uint32_t)rate);put32(config+4,0);request(sock,P_CONFIGURE,id++,config,8,&reply,&reply_size);free(reply);}CLOSE_SOCKET(sock);}free(pending);free_symbols(&table);

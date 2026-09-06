@@ -53,7 +53,7 @@ Service 2 is the profiler:
 
 ## Symbol metadata
 
-The metadata payload starts with `schemaVersion:u32` (currently 1) and
+The metadata payload starts with `schemaVersion:u32` (currently 2) and
 `moduleCount:u32`. Each module then contains:
 
 | Field | Size |
@@ -61,15 +61,23 @@ The metadata payload starts with `schemaVersion:u32` (currently 1) and
 | Stable process-local module ID | 8 |
 | Module revision | 4 |
 | Region count | 4 |
+| Debug-file count | 4 |
+
+The debug-file count is followed by `length:u32` and UTF-8 path bytes for each
+file. Schema 1 omitted this field and remains supported by `hlprof-live`.
 
 Each region contains `baseAddress:u64`, `size:u64`, `flags:u32`, and
 `functionCount:u32`. Flag bit 0 identifies patch code and bit 1 identifies a
 retired patch region retained for stacks captured before publication.
 
 Each function contains `functionID:u32`, `offset:u32`, `size:u32`, followed by
-`nameLength:u32` and that many UTF-8 name bytes. The function ID is the stable
-HashLink function index. A sample address belongs to a function when it falls
-within the region base plus the function's relative range.
+`nameLength:u32` and that many UTF-8 name bytes. Schema 2 then adds
+`lineEntryCount:u32`; each line entry is `jitOffset:u32`, `fileID:u32`, and
+`line:u32`. Entries are ordered by JIT offset and emitted only when the source
+location changes. The function ID is the stable HashLink function index. A
+sample address belongs to a function when it falls within the region base plus
+the function's relative range; its location is the last line entry whose JIT
+offset does not exceed the function-relative program counter.
 
 ## Profiler records
 
@@ -141,10 +149,14 @@ The reference client can read captures without a running HashLink process:
 
 ```sh
 hlprof-live report --top 30 capture.hlprof
+hlprof-live report --lines --top 30 capture.hlprof
 hlprof-live export --format folded capture.hlprof > stacks.folded
+hlprof-live export --format folded --lines capture.hlprof > stacks.folded
 ```
 
 `report` reconstructs metadata revisions and prints aggregate self/inclusive
 costs. Folded export emits root-to-leaf stack keys and occurrence counts for
 FlameGraph-compatible tools. Both modes validate cursor continuity and recover
 all complete records from partial captures, reporting truncation on stderr.
+With `--lines`, reports aggregate source locations and folded frames include
+`file:line` annotations.
