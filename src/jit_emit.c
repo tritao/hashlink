@@ -2048,8 +2048,6 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 		break;
 	case OGetArray:
 		{
-			ereg check_args[2] = { LOAD(ra), LOAD(rb) };
-			emit_native_call(ctx, hl_array_check, check_args, 2, NULL);
 			if( ra->t->kind == HABSTRACT ) {
 				int osize;
 				bool isPtr = dst->t->kind != HOBJ && dst->t->kind != HSTRUCT;
@@ -2063,6 +2061,8 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 				ereg val = isPtr ? LOAD_MEM_PTR(pos,0) : pos;
 				STORE(dst, val);
 			} else {
+				ereg check_args[2] = { LOAD(ra), LOAD(rb) };
+				emit_native_call(ctx, hl_array_check, check_args, 2, &hlt_void);
 				ereg data = OFFSET(LOAD_MEM_PTR(LOAD(ra), offsetof(varray,data)), UNUSED, 0, HL_WSIZE);
 				ereg pos = OFFSET(data, LOAD(rb), hl_type_size(dst->t), 0);
 				STORE(dst, LOAD_MEM(pos,0,dst->t));
@@ -2071,8 +2071,6 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 		break;
 	case OSetArray:
 		{
-			ereg check_args[2] = { LOAD(dst), LOAD(ra) };
-			emit_native_call(ctx, hl_array_check, check_args, 2, NULL);
 			if( dst->t->kind == HABSTRACT ) {
 				int osize;
 				bool isPtr = rb->t->kind != HOBJ && rb->t->kind != HSTRUCT;
@@ -2085,6 +2083,8 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 				ereg pos = (osize <= 8 && ((osize - 1) & osize) == 0) ? OFFSET(LOAD(dst), LOAD(ra), osize, 0) : OFFSET(LOAD(dst), emit_gen_ext(ctx,BINOP,LOAD(ra),MK_CONST(osize),M_I32,OMul),1,0);
 				emit_store_size(ctx, pos, 0, LOAD(rb), 0, osize);
 			} else  {
+				ereg ensure_args[2] = { LOAD(dst), LOAD(ra) };
+				emit_native_call(ctx, hl_array_ensure, ensure_args, 2, &hlt_void);
 				ereg data = OFFSET(LOAD_MEM_PTR(LOAD(dst), offsetof(varray,data)), UNUSED, 0, HL_WSIZE);
 				ereg pos = OFFSET(data, LOAD(ra), hl_type_size(rb->t), 0);
 				STORE_MEM(pos, 0, LOAD(rb));
