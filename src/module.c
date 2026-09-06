@@ -919,6 +919,21 @@ int hl_module_native_root_count( hl_module *m ) {
 	return m == NULL ? 0 : hl_gc_owner_root_count(m);
 }
 
+void hl_module_retirement_status_get( hl_module *m, hl_module_retirement_status *out ) {
+	if( out == NULL ) return;
+	memset(out,0,sizeof(*out));
+	if( m == NULL ) return;
+	out->live_managed_allocations = hl_module_live_allocation_count(m);
+	out->owned_native_roots = hl_module_native_root_count(m);
+	module_registry_init();
+	hl_mutex_acquire(modules_lock);
+	out->registry_readers = m->registry_readers;
+	hl_mutex_release(modules_lock);
+	if( out->live_managed_allocations > 0 ) out->flags |= HL_MODULE_RETIRE_LIVE_MANAGED;
+	if( out->owned_native_roots > 0 ) out->flags |= HL_MODULE_RETIRE_OWNED_ROOTS;
+	if( out->registry_readers > 0 ) out->flags |= HL_MODULE_RETIRE_REGISTRY_READERS;
+}
+
 static bool check_same_type( hl_type *t1, hl_type *t2 ) {
 	if( hl_safe_cast(t1,t2) )
 		return true;

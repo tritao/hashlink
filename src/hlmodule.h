@@ -272,6 +272,19 @@ HL_EXTERN_C HL_EXPORT void hl_module_free( hl_module *m );
 HL_EXTERN_C HL_EXPORT h_bool hl_module_unload( hl_module *m );
 HL_EXTERN_C HL_EXPORT int hl_module_live_allocation_count( hl_module *m );
 HL_EXTERN_C HL_EXPORT int hl_module_native_root_count( hl_module *m );
+typedef enum {
+	HL_MODULE_RETIRE_LIVE_MANAGED = 1,
+	HL_MODULE_RETIRE_OWNED_ROOTS = 2,
+	HL_MODULE_RETIRE_REGISTRY_READERS = 4
+} hl_module_retirement_flags;
+typedef struct {
+	int live_managed_allocations;
+	int owned_native_roots;
+	int registry_readers;
+	int flags;
+} hl_module_retirement_status;
+/** Snapshot known module-owned resources and borrowers. The caller must quiesce calls. */
+HL_EXTERN_C HL_EXPORT void hl_module_retirement_status_get( hl_module *m, hl_module_retirement_status *out );
 h_bool hl_module_debug( hl_module *m, int port, h_bool wait );
 hl_type *hl_module_resolve_type( hl_module *m, hl_type *t, bool err );
 HL_EXTERN_C HL_EXPORT hl_module **hl_module_registry_snapshot( int *count );
@@ -303,6 +316,7 @@ HL_EXTERN_C HL_EXPORT int hl_runtime_module_type_count( hl_runtime_module *runti
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_type_capacity( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_live_allocation_count( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_native_root_count( hl_runtime_module *runtime );
+HL_EXTERN_C HL_EXPORT void hl_runtime_module_retirement_status_get( hl_runtime_module *runtime, hl_module_retirement_status *out );
 /** Test hook: fail the next patch at a staging boundary (1..3), or disable with 0. */
 HL_EXTERN_C HL_EXPORT void hl_runtime_module_set_patch_failure_stage( hl_runtime_module *runtime, int stage );
 HL_EXTERN_C HL_EXPORT void hl_runtime_module_release( hl_runtime_module *runtime );

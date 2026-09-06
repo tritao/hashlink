@@ -352,6 +352,15 @@ int hl_runtime_module_native_root_count( hl_runtime_module *runtime ) {
 	return result;
 }
 
+void hl_runtime_module_retirement_status_get( hl_runtime_module *runtime, hl_module_retirement_status *out ) {
+	if( out == NULL ) return;
+	memset(out,0,sizeof(*out));
+	if( runtime == NULL ) return;
+	hl_mutex_acquire(runtime->lock);
+	hl_module_retirement_status_get(runtime->module,out);
+	hl_mutex_release(runtime->lock);
+}
+
 void hl_runtime_module_set_patch_failure_stage( hl_runtime_module *runtime, int stage ) {
 	if( runtime == NULL ) return;
 	hl_mutex_acquire(runtime->lock);
