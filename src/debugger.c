@@ -21,6 +21,7 @@
  */
 #include <hl.h>
 #include <hlmodule.h>
+#include <stdlib.h>
 
 struct _hl_socket;
 typedef struct _hl_socket hl_socket;
@@ -45,12 +46,67 @@ static void send( void *ptr, int size ) {
 	hl_socket_send(client_socket, ptr, 0, size);
 }
 
+static void send_debug_function( hl_function *f, hl_debug_infos *d, int function_index, bool indexed ) {
+	struct {
+		int nops;
+		int start;
+		int vars_size;
+		unsigned char large;
+	} fdata;
+	if( indexed ) send(&function_index,4);
+	fdata.nops = f->nops;
+	fdata.start = d->start;
+	fdata.vars_size = d->vars_size;
+	fdata.large = (unsigned char)d->large;
+	send(&fdata,13);
+	send(d->offsets,(d->large ? sizeof(int) : sizeof(unsigned short)) * (f->nops + 1));
+	send(d->vars,d->vars_size);
+}
+
+static void send_patch_regions( hl_module *m ) {
+	int count = hl_module_patch_debug_region_count(m);
+	send(&m->revision,4);
+	send(&count,4);
+	for(int i=0;i<count;i++) {
+		hl_patch_debug_region region;
+		unsigned char retired;
+		hl_module_patch_debug_region_get(m,i,&region);
+		retired = region.retired ? 1 : 0;
+		send(&region.code,sizeof(void*));
+		send(&region.code_size,4);
+		send(&retired,1);
+		send(&region.function_count,4);
+		for(int j=0;j<region.function_count;j++) {
+			int function_index;
+			hl_function *function;
+			hl_debug_infos *debug;
+			if( !hl_module_patch_debug_function_get(m,i,j,&function_index,&function,&debug) ) return;
+			send_debug_function(function,debug,function_index,true);
+		}
+	}
+}
+
+static void send_patch_refresh() {
+	int count;
+	hl_module **modules = hl_module_registry_snapshot(&count);
+	send("MAP3",4);
+	send(&count,4);
+	for(int i=0;i<count;i++) {
+		send(&modules[i],sizeof(void*));
+		send_patch_regions(modules[i]);
+	}
+	hl_module_registry_snapshot_free(modules,count);
+}
+
 static void hl_debug_loop() {
 	void *inf_addr = hl_gc_threads_info();
 	int flags = 0;
 	int hl_ver = HL_VERSION;
 	bool loop = false;
 	int pid = hl_sys_getpid();
+	bool protocol3 = false;
+	const char *protocol = getenv("HL_DEBUG_PROTOCOL");
+	if( protocol && protocol[0] == '3' && protocol[1] == 0 ) protocol3 = true;
 #	ifdef HL_64
 	flags |= 1;
 #	endif
@@ -68,7 +124,7 @@ static void hl_debug_loop() {
 		hl_socket *s = hl_socket_accept(debug_socket);
 		if( s == NULL ) break;
 		client_socket = s;
-		send("HLD2",4);
+		send(protocol3 ? "HLD3" : "HLD2",4);
 		send(&flags,4);
 		send(&hl_ver, 4);
 		send(&pid,4);
@@ -93,23 +149,9 @@ static void hl_debug_loop() {
 			send(&m->codesize,4);
 			send(&m->code->types,sizeof(void*));
 			send(&m->code->nfunctions,4);
-			for(int j=0;j<m->code->nfunctions;j++) {
-				hl_function *f = m->code->functions + j;
-				hl_debug_infos *d = m->jit_debug + j;
-				struct {
-					int nops;
-					int start;
-					int vars_size;
-					unsigned char large;
-				} fdata;
-				fdata.nops = f->nops;
-				fdata.start = d->start;
-				fdata.vars_size = d->vars_size;
-				fdata.large = (unsigned char)d->large;
-				send(&fdata,13);
-				send(d->offsets,(d->large ? sizeof(int) : sizeof(unsigned short)) * (f->nops + 1));
-				send(d->vars,d->vars_size);
-			}
+			for(int j=0;j<m->code->nfunctions;j++)
+				send_debug_function(m->code->functions+j,m->jit_debug+j,j,false);
+			if( protocol3 ) send_patch_regions(m);
 		}
 		hl_module_registry_snapshot_free(mods,nmodules);
 
@@ -119,6 +161,11 @@ static void hl_debug_loop() {
 		// wait answer
 		// for some reason, this is not working on windows (recv returns 0 ?)
 		hl_socket_recv(s,&cmd,0,1);
+		if( protocol3 ) debugger_connected = true;
+		while( protocol3 && cmd == 'R' ) {
+			send_patch_refresh();
+			if( hl_socket_recv(s,&cmd,0,1) <= 0 ) break;
+		}
 		hl_socket_close(s);
 		debugger_connected = true;
 		client_socket = NULL;

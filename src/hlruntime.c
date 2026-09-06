@@ -210,6 +210,10 @@ const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, 
 	return hl_module_resolve_jit_location(address);
 }
 
+int hl_runtime_module_debug_region_count( hl_runtime_module *runtime ) {
+	return runtime == NULL ? 0 : hl_module_patch_debug_region_count(runtime->module);
+}
+
 hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int stable_id, int *out, vdynamic **exception ) {
 	hl_function *function;
 	vclosure closure;

@@ -283,6 +283,15 @@ HL_EXTERN_C HL_EXPORT int hl_module_patch_retired_allocation_count( hl_module *m
 bool hl_module_patch_resolve_pos( hl_module *module, void *addr, hl_function **function, int *opcode );
 /** Test whether a program counter belongs to a live or retained hot-reload JIT block. */
 bool hl_module_patch_contains_address( hl_module *module, void *addr );
+typedef struct {
+	void *code;
+	int code_size;
+	int function_count;
+	bool retired;
+} hl_patch_debug_region;
+int hl_module_patch_debug_region_count( hl_module *module );
+bool hl_module_patch_debug_region_get( hl_module *module, int region, hl_patch_debug_region *out );
+bool hl_module_patch_debug_function_get( hl_module *module, int region, int function, int *function_index, hl_function **bytecode, hl_debug_infos **debug );
 void hl_module_patch_release_all( hl_module *module );
 /** Force teardown during initialization failure or process shutdown only. */
 HL_EXTERN_C HL_EXPORT void hl_module_free_shutdown( hl_module *m );
@@ -332,6 +341,7 @@ HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32_object( hl_ru
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_validate_call( hl_runtime_module *runtime, int stable_id, int shape );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const unsigned char *bytes, int length );
 HL_EXTERN_C HL_EXPORT const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id );
+HL_EXTERN_C HL_EXPORT int hl_runtime_module_debug_region_count( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_hlp_summary( const unsigned char *bytes, int length, int *base_revision, int *revision, int *function_count );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_revision( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_jit_count( hl_runtime_module *runtime );

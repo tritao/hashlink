@@ -121,6 +121,50 @@ bool hl_module_patch_contains_address( hl_module *m, void *addr ) {
 	return hl_module_patch_resolve_pos(m,addr,&function,&opcode);
 }
 
+int hl_module_patch_debug_region_count( hl_module *m ) {
+	return hl_module_patch_allocation_count(m) + hl_module_patch_retired_allocation_count(m);
+}
+
+static hl_patch_code *patch_debug_region_at( hl_module *m, int region, bool *retired ) {
+	int current = 0;
+	if( m == NULL || region < 0 ) return NULL;
+	for(int i=0;m->patch_owners && i<m->code->nfunctions+m->code->nnatives;i++) {
+		hl_patch_code *owner = m->patch_owners[i];
+		if( owner == NULL ) continue;
+		for(int j=0;j<i;j++) if( m->patch_owners[j] == owner ) { owner = NULL; break; }
+		if( owner != NULL && current++ == region ) { *retired = false; return owner; }
+	}
+	for(hl_patch_code *owner=m->retired_patch_code;owner;owner=owner->next_retired)
+		if( current++ == region ) { *retired = true; return owner; }
+	return NULL;
+}
+
+bool hl_module_patch_debug_region_get( hl_module *m, int region, hl_patch_debug_region *out ) {
+	bool retired;
+	hl_patch_code *owner;
+	if( out == NULL ) return false;
+	owner = patch_debug_region_at(m,region,&retired);
+	if( owner == NULL ) return false;
+	out->code = owner->code;
+	out->code_size = owner->code_size;
+	out->function_count = owner->function_count;
+	out->retired = retired;
+	return true;
+}
+
+bool hl_module_patch_debug_function_get( hl_module *m, int region, int function, int *function_index, hl_function **bytecode, hl_debug_infos **debug ) {
+	bool retired;
+	hl_patch_code *owner = patch_debug_region_at(m,region,&retired);
+	int index;
+	if( owner == NULL || function < 0 || function >= owner->function_count || function_index == NULL || bytecode == NULL || debug == NULL ) return false;
+	*bytecode = owner->functions + function;
+	index = m->functions_indexes[(*bytecode)->findex];
+	if( index < 0 || index >= owner->jit_debug_count ) return false;
+	*function_index = index;
+	*debug = owner->jit_debug + index;
+	return (*debug)->offsets != NULL;
+}
+
 static bool take( patch_reader *r, int count, const unsigned char **out ) {
 	if( count < 0 || r->end - r->p < count ) { r->error = "Truncated HLP data"; return false; }
 	*out = r->p; r->p += count; return true;
