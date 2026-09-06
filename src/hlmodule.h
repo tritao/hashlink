@@ -209,6 +209,9 @@ typedef struct {
 	int patch_jit_count;
 	hl_patch_code **patch_owners;
 	hl_patch_code *retired_patch_code;
+	void **patch_targets;
+	void *patch_entry_code;
+	int patch_entry_code_size;
 	int *patch_ints;
 	double *patch_floats;
 	char **patch_strings;

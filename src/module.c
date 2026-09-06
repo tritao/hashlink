@@ -366,6 +366,25 @@ static void null_function() {
 	hl_error("Null function ptr");
 }
 
+static bool module_init_patch_entries( hl_module *m ) {
+	int count = m->code->nfunctions + m->code->nnatives;
+	int stride = 16;
+	m->patch_targets = (void**)calloc(count,sizeof(void*));
+	m->patch_entry_code_size = count * stride;
+	m->patch_entry_code = hl_alloc_executable_memory(m->patch_entry_code_size);
+	if( m->patch_targets == NULL || m->patch_entry_code == NULL ) return false;
+	memset(m->patch_entry_code,0xCC,m->patch_entry_code_size);
+	for(int i=0;i<m->code->nfunctions;i++) {
+		int slot = m->code->functions[i].findex;
+		void *target = m->functions_ptrs[slot];
+		void *entry = (unsigned char*)m->patch_entry_code + slot * stride;
+		m->patch_targets[slot] = target;
+		hl_jit_patch_method(entry,m->patch_targets + slot);
+		m->functions_ptrs[slot] = entry;
+	}
+	return true;
+}
+
 static void append_fields( char **p, hl_type *t );
 
 static void append_type( char **p, hl_type *t ) {
@@ -778,6 +797,7 @@ int hl_module_init( hl_module *m, int flags ) {
 		hl_function *f = m->code->functions + i;
 		m->functions_ptrs[f->findex] = ((unsigned char*)m->jit_code) + ((int_val)m->functions_ptrs[f->findex]);
 	}
+	if( m->patchable && !module_init_patch_entries(m) ) return 0;
 	// INIT constants
 	for(i=0;i<m->code->nconstants;i++) {
 		hl_constant *c = m->code->constants + i;
@@ -1152,6 +1172,8 @@ void hl_module_free( hl_module *m ) {
 			hl_remove_root(m->globals_data+m->globals_indexes[i]);
 	}
 	hl_free(&m->ctx.alloc);
+	if( m->patch_entry_code ) hl_free_executable_memory(m->patch_entry_code,m->patch_entry_code_size);
+	free(m->patch_targets);
 	hl_free_executable_memory(m->code, m->codesize);
 #ifdef WIN64_UNWIND_TABLES
 	RtlDeleteFunctionTable(m->unwind_table);

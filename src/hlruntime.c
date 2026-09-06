@@ -250,27 +250,51 @@ hl_runtime_status hl_runtime_hlp_summary( const unsigned char *bytes, int length
 }
 
 int hl_runtime_module_revision( hl_runtime_module *runtime ) {
-	return runtime == NULL ? 0 : runtime->module->revision;
+	if( runtime == NULL ) return 0;
+	hl_mutex_acquire(runtime->lock);
+	int result = runtime->module->revision;
+	hl_mutex_release(runtime->lock);
+	return result;
 }
 
 int hl_runtime_module_jit_count( hl_runtime_module *runtime ) {
-	return runtime == NULL ? 0 : runtime->module->patch_jit_count;
+	if( runtime == NULL ) return 0;
+	hl_mutex_acquire(runtime->lock);
+	int result = runtime->module->patch_jit_count;
+	hl_mutex_release(runtime->lock);
+	return result;
 }
 
 int hl_runtime_module_allocation_count( hl_runtime_module *runtime ) {
-	return runtime == NULL ? 0 : 1 + hl_module_patch_allocation_count(runtime->module);
+	if( runtime == NULL ) return 0;
+	hl_mutex_acquire(runtime->lock);
+	int result = 1 + hl_module_patch_allocation_count(runtime->module);
+	hl_mutex_release(runtime->lock);
+	return result;
 }
 
 int hl_runtime_module_retired_allocation_count( hl_runtime_module *runtime ) {
-	return runtime == NULL ? 0 : hl_module_patch_retired_allocation_count(runtime->module);
+	if( runtime == NULL ) return 0;
+	hl_mutex_acquire(runtime->lock);
+	int result = hl_module_patch_retired_allocation_count(runtime->module);
+	hl_mutex_release(runtime->lock);
+	return result;
 }
 
 int hl_runtime_module_type_count( hl_runtime_module *runtime ) {
-	return runtime == NULL ? 0 : runtime->module->code->ntypes;
+	if( runtime == NULL ) return 0;
+	hl_mutex_acquire(runtime->lock);
+	int result = runtime->module->code->ntypes;
+	hl_mutex_release(runtime->lock);
+	return result;
 }
 
 int hl_runtime_module_type_capacity( hl_runtime_module *runtime ) {
-	return runtime == NULL ? 0 : runtime->module->code->types_capacity;
+	if( runtime == NULL ) return 0;
+	hl_mutex_acquire(runtime->lock);
+	int result = runtime->module->code->types_capacity;
+	hl_mutex_release(runtime->lock);
+	return result;
 }
 
 void hl_runtime_module_set_patch_failure_stage( hl_runtime_module *runtime, int stage ) {
