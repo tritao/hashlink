@@ -37,7 +37,7 @@ static void patch_code_free( hl_patch_code *code ) {
 		free(code->functions[i].ops);
 		free(code->functions[i].debug);
 	}
-	for(int i=0;i<code->jit_debug_count;i++){free(code->jit_debug[i].offsets);free(code->jit_debug[i].vars);}
+	for(int i=0;i<code->jit_debug_count;i++){free(code->jit_debug[i].offsets);free(code->jit_debug[i].vars);free(code->jit_debug[i].opcodes);}
 	free(code->jit_debug);
 	if(code->code) hl_free_executable_memory(code->code,code->code_size);
 	free(code->functions);

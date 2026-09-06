@@ -195,6 +195,8 @@ int hl_jit_function( jit_ctx *ctx, hl_module *m, hl_function *f ) {
 		hl_debug_infos *dbg = &m->jit_debug[fid];
 		dbg->start = pos;
 		dbg->offsets = debug;
+		dbg->opcodes = (unsigned char*)malloc(f->nops);
+		for(int i=0;i<f->nops;i++) dbg->opcodes[i] = (unsigned char)f->ops[i].op;
 		dbg->large = !compact;
 		dbg->vars_size = ctx->regs_track_count * sizeof(int);
 		dbg->vars = malloc(dbg->vars_size);

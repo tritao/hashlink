@@ -176,6 +176,7 @@ HL_EXTERN_C HL_EXPORT void hl_patch_free( hl_patch *patch );
 typedef struct {
 	void *offsets;
 	void *vars;
+	unsigned char *opcodes;
 	int start;
 	int vars_size;
 	bool large;

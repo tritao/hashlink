@@ -223,13 +223,16 @@ const char *hl_module_resolve_jit_location( void *addr ) {
 		{
 			hl_function *fun = NULL;
 			if( module_resolve_address(m,addr,&fun,&fpos) ) {
+				int opcode = fpos >= 0 && fpos < fun->nops && m->jit_debug && m->jit_debug[fun-m->code->functions].opcodes
+					? m->jit_debug[fun-m->code->functions].opcodes[fpos] : -1;
+				const char *opcode_name = opcode >= 0 ? hl_op_name(opcode) : "unknown";
 				if( fun->obj ) {
 					char object_name[192], field_name[192];
 					snprintf(object_name,sizeof(object_name),"%s",hl_to_utf8(fun->obj->name));
 					snprintf(field_name,sizeof(field_name),"%s",hl_to_utf8(fun->field.name));
-					snprintf(result,sizeof(result),"%s.%s [function=%d opcode=%d]",object_name,field_name,fun->findex,fpos);
+					snprintf(result,sizeof(result),"%s.%s [function=%d opcode=%d instruction=%s(%d)]",object_name,field_name,fun->findex,fpos,opcode_name,opcode);
 				} else
-					snprintf(result,sizeof(result),"fun$%d [function=%d opcode=%d]",fun->findex,fun->findex,fpos);
+					snprintf(result,sizeof(result),"fun$%d [function=%d opcode=%d instruction=%s(%d)]",fun->findex,fun->findex,fpos,opcode_name,opcode);
 				hl_module_registry_snapshot_free(modules,count);
 				return result;
 			}
@@ -1366,8 +1369,10 @@ void hl_module_free_shutdown( hl_module *m ) {
 	free(m->debug_hlb);
 	if( m->jit_debug ) {
 		int i;
-		for(i=0;i<m->code->nfunctions;i++)
+		for(i=0;i<m->code->nfunctions;i++) {
 			free(m->jit_debug[i].offsets);
+			free(m->jit_debug[i].opcodes);
+		}
 		free(m->jit_debug);
 	}
 	if( m->jit_ctx )
