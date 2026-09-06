@@ -14,6 +14,25 @@ struct _hl_runtime_module {
 };
 
 static int resolve_stable_id( hl_runtime_module *runtime, int stable_id );
+static hl_function *find_function( hl_module *module, int stable_id );
+
+hl_runtime_status hl_runtime_module_validate_call( hl_runtime_module *runtime, int stable_id, int shape ) {
+	hl_function *function;
+	int nargs;
+	hl_type_kind result_kind;
+	if( runtime == NULL || shape < 0 || shape > 6 ) return HL_RUNTIME_BAD_ARGUMENT;
+	nargs = shape == 3 || shape == 6 ? 1 : 0;
+	result_kind = shape == 0 || shape == 6 ? HI32 : shape == 1 || shape == 3 ? HVOID : shape == 2 ? HBYTES : shape == 4 ? HFUN : (hl_type_kind)-1;
+	hl_mutex_acquire(runtime->lock);
+	stable_id = resolve_stable_id(runtime,stable_id);
+	function = find_function(runtime->module,stable_id);
+	if( function == NULL || function->type->kind != HFUN || function->type->fun->nargs != nargs || (result_kind != (hl_type_kind)-1 && function->type->fun->ret->kind != result_kind) ) {
+		hl_mutex_release(runtime->lock);
+		return HL_RUNTIME_BAD_FUNCTION;
+	}
+	hl_mutex_release(runtime->lock);
+	return HL_RUNTIME_OK;
+}
 
 static hl_function *find_function( hl_module *module, int stable_id ) {
 	int i;
