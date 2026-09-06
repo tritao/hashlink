@@ -50,6 +50,7 @@ typedef struct {
 	int last_read;
 	int tot_reads;
 	int tracked;
+	bool debug_loop;
 	int overwrite;
 	emit_mode mode;
 	ereg pref_reg;
@@ -301,6 +302,14 @@ static void regs_alloc_reg( regs_ctx *ctx, value_info *v, bool across_call ) {
 
 static void regs_assign( regs_ctx *ctx, value_info *v ) {
 	if( v->reg != UNUSED ) jit_assert();
+	// Debugger-visible loop phis need one stable location on every incoming edge.
+	// Keeping them in a stack slot avoids exposing an edge-specific native
+	// register as the merged source variable's location.
+	if( v->id < 0 && v->tracked && v->debug_loop ) {
+		if( v->stack_pos == INVALID ) v->stack_pos = regs_alloc_stack(ctx, hl_emit_mode_sizes[v->mode]);
+		v->reg = MK_STACK_REG(v->stack_pos);
+		return;
+	}
 	regs_alloc_reg(ctx, v, live_across_call(ctx, v, ctx->cur_op));
 	regs_debug("REG ASSIGN %s @%X-@%X\n",value_str(v),ctx->cur_op,v->last_read);
 }
@@ -1001,6 +1010,7 @@ void hl_regs_function( jit_ctx *jit ) {
 			v->start = bl->start_pos;
 			v->mode = ph->mode;
 			for(int k=0;k<ph->nvalues;k++) {
+				if( ph->blocks[k] >= b ) v->debug_loop = true;
 				int t = VAL_REG(ph->values[k])->tracked;
 				if( t && (!v->tracked || t < v->tracked) ) v->tracked = t;
 			}
