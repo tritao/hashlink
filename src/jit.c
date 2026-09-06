@@ -149,6 +149,7 @@ void hl_jit_init( jit_ctx *ctx, hl_module *m ) {
 #endif
 	hl_codegen_init(ctx);
 	jit_code_append(ctx);
+	ctx->special_code_size = ctx->out_pos;
 	if( m->code->hasdebug ) {
 		m->jit_debug = (hl_debug_infos*)malloc(sizeof(hl_debug_infos) * m->code->nfunctions);
 		memset(m->jit_debug, 0, sizeof(hl_debug_infos) * m->code->nfunctions);
@@ -212,8 +213,19 @@ int hl_jit_function( jit_ctx *ctx, hl_module *m, hl_function *f ) {
 
 static void *call_jit_c2hl = hl_jit_assert;
 static void *call_jit_hl2c = hl_jit_assert;
+static void *jit_support_code = NULL;
+static int jit_support_code_size = 0;
 static int arg_reg_count = 0;
 static int arg_fp_count = 0;
+
+static void hl_jit_free_support() {
+	if( jit_support_code == NULL ) return;
+	hl_free_executable_memory(jit_support_code,jit_support_code_size);
+	jit_support_code = NULL;
+	jit_support_code_size = 0;
+	call_jit_c2hl = hl_jit_assert;
+	call_jit_hl2c = hl_jit_assert;
+}
 
 static int get_next_reg( hl_type *t, int *rp, int *fp ) {
 	if( t->kind == HF32 || t->kind == HF64 ) {
@@ -358,10 +370,17 @@ static void *hl_jit_code_finalize( jit_ctx *ctx, hl_module *m, int *codesize, hl
 	hl_emit_final(ctx);
 	hl_codegen_final(ctx);
 	if( publish_wrappers ) {
-		arg_reg_count = ctx->cfg.regs.nargs;
-		arg_fp_count = ctx->cfg.floats.nargs;
-		call_jit_c2hl = ctx->final_code + ctx->code_funs.c2hl;
-		call_jit_hl2c = ctx->final_code + ctx->code_funs.hl2c;
+		if( jit_support_code == NULL ) {
+			jit_support_code_size = (ctx->special_code_size + 4095) & ~4095;
+			jit_support_code = hl_alloc_executable_memory(jit_support_code_size);
+			if( jit_support_code == NULL ) return NULL;
+			memcpy(jit_support_code,ctx->final_code,ctx->special_code_size);
+			arg_reg_count = ctx->cfg.regs.nargs;
+			arg_fp_count = ctx->cfg.floats.nargs;
+			call_jit_c2hl = (unsigned char*)jit_support_code + ctx->code_funs.c2hl;
+			call_jit_hl2c = (unsigned char*)jit_support_code + ctx->code_funs.hl2c;
+			hl_setup.free_jit_support = hl_jit_free_support;
+		}
 	}
 #	ifdef WIN64_UNWIND_TABLES
 	ctx->mod->unwind_table_size = ctx->fdef_index;

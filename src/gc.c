@@ -1144,6 +1144,7 @@ void hl_global_init() {
 
 void hl_global_free() {
 	hl_cache_free();
+	if( hl_setup.free_jit_support ) hl_setup.free_jit_support();
 	hl_gc_free();
 }
 

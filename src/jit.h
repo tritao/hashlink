@@ -249,6 +249,7 @@ struct _jit_ctx {
 	unsigned char *code_instrs;
 	int *code_pos_map;
 	jit_special_funs code_funs;
+	int special_code_size;
 	// accum output
 	int fdef_index;
 	int out_pos;
