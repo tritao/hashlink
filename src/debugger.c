@@ -81,7 +81,7 @@ static void hl_debug_loop() {
 		}
 
 		int nmodules;
-		hl_module **mods = hl_get_modules(&nmodules);
+		hl_module **mods = hl_module_registry_snapshot(&nmodules);
 
 		send(&hl_jit_trampoline,4);
 
@@ -111,6 +111,7 @@ static void hl_debug_loop() {
 				send(d->vars,d->vars_size);
 			}
 		}
+		hl_module_registry_snapshot_free(mods,nmodules);
 
 		hl_setup.closure_stack_capture = 8;
 		hl_setup.is_debugger_attached = true;

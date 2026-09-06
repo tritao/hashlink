@@ -223,6 +223,7 @@ typedef struct {
 	int patch_type_allocation_count;
 	int patch_type_allocation_capacity;
 	int patch_failure_stage;
+	int registry_readers;
 	hl_module_context ctx;
 #ifdef WIN64_UNWIND_TABLES
 	int unwind_table_size;
@@ -270,7 +271,8 @@ HL_EXTERN_C HL_EXPORT int hl_module_live_allocation_count( hl_module *m );
 HL_EXTERN_C HL_EXPORT int hl_module_native_root_count( hl_module *m );
 h_bool hl_module_debug( hl_module *m, int port, h_bool wait );
 hl_type *hl_module_resolve_type( hl_module *m, hl_type *t, bool err );
-hl_module **hl_get_modules( int *count );
+HL_EXTERN_C HL_EXPORT hl_module **hl_module_registry_snapshot( int *count );
+HL_EXTERN_C HL_EXPORT void hl_module_registry_snapshot_free( hl_module **modules, int count );
 
 typedef struct _hl_runtime_module hl_runtime_module;
 typedef enum {

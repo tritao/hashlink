@@ -36,9 +36,29 @@ EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 #define HOT_RELOAD_EXTRA_GLOBALS	4096
 
 HL_API void hl_prim_not_loaded( const uchar *err );
+HL_API void hl_sys_sleep( double t );
 
 static hl_module **cur_modules = NULL;
 static int modules_count = 0;
+static hl_mutex *modules_lock = NULL;
+
+static void module_registry_free() {
+	if( modules_lock == NULL ) return;
+	hl_remove_root(&modules_lock);
+	hl_mutex_free(modules_lock);
+	modules_lock = NULL;
+}
+
+static void module_registry_init() {
+	if( modules_lock != NULL ) return;
+	hl_global_lock(true);
+	if( modules_lock == NULL ) {
+		modules_lock = hl_mutex_alloc(false);
+		hl_add_root(&modules_lock);
+		hl_setup.free_module_registry = module_registry_free;
+	}
+	hl_global_lock(false);
+}
 
 static bool module_resolve_pos( hl_module *m, void *addr, int *fidx, int *fpos ) {
 	int code_pos = ((int)(int_val)((unsigned char*)addr - (unsigned char*)m->jit_code));
@@ -84,12 +104,35 @@ static bool module_resolve_pos( hl_module *m, void *addr, int *fidx, int *fpos )
 	return true;
 }
 
-hl_module **hl_get_modules( int *count ) {
+hl_module **hl_module_registry_snapshot( int *count ) {
+	hl_module **modules;
+	if( count == NULL ) return NULL;
+	module_registry_init();
+	hl_mutex_acquire(modules_lock);
 	*count = modules_count;
-	return cur_modules;
+	modules = modules_count == 0 ? NULL : (hl_module**)malloc(sizeof(hl_module*) * modules_count);
+	if( modules_count > 0 && modules == NULL ) {
+		hl_mutex_release(modules_lock);
+		*count = 0;
+		return NULL;
+	}
+	for(int i=0;i<modules_count;i++) {
+		modules[i] = cur_modules[i];
+		modules[i]->registry_readers++;
+	}
+	hl_mutex_release(modules_lock);
+	return modules;
 }
 
-uchar *hl_module_resolve_symbol_full( void *addr, uchar *out, int *outSize, int **r_debug_addr ) {
+void hl_module_registry_snapshot_free( hl_module **modules, int count ) {
+	if( modules == NULL ) return;
+	hl_mutex_acquire(modules_lock);
+	for(int i=0;i<count;i++) modules[i]->registry_readers--;
+	hl_mutex_release(modules_lock);
+	free(modules);
+}
+
+static uchar *module_resolve_symbol_snapshot( hl_module **modules, int module_count, void *addr, uchar *out, int *outSize, int **r_debug_addr ) {
 	int *debug_addr;
 	int file, line;
 	int pos = 0;
@@ -97,11 +140,11 @@ uchar *hl_module_resolve_symbol_full( void *addr, uchar *out, int *outSize, int 
 	hl_function *fdebug;
 	int i;
 	hl_module *m = NULL;
-	for(i=0;i<modules_count;i++) {
-		m = cur_modules[i];
+	for(i=0;i<module_count;i++) {
+		m = modules[i];
 		if( addr >= m->jit_code && addr <= (void*)((char*)m->jit_code + m->codesize) ) break;
 	}
-	if( i == modules_count )
+	if( i == module_count )
 		return NULL;
 	if( !module_resolve_pos(m,addr,&fidx,&fpos) )
 		return NULL;
@@ -129,6 +172,14 @@ uchar *hl_module_resolve_symbol_full( void *addr, uchar *out, int *outSize, int 
 	return out;
 }
 
+uchar *hl_module_resolve_symbol_full( void *addr, uchar *out, int *outSize, int **r_debug_addr ) {
+	int count;
+	hl_module **modules = hl_module_registry_snapshot(&count);
+	uchar *result = module_resolve_symbol_snapshot(modules,count,addr,out,outSize,r_debug_addr);
+	hl_module_registry_snapshot_free(modules,count);
+	return result;
+}
+
 static uchar *module_resolve_symbol( void *addr, uchar *out, int *outSize ) {
 	return hl_module_resolve_symbol_full(addr,out,outSize,NULL);
 }
@@ -139,8 +190,10 @@ int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out
 	void *stack_bottom = stack_ptr;
 #endif
 	int count = 0;
-	if( modules_count == 1 ) {
-		hl_module *m = cur_modules[0];
+	int module_count;
+	hl_module **modules = hl_module_registry_snapshot(&module_count);
+	if( module_count == 1 ) {
+		hl_module *m = modules[0];
 		unsigned char *code = m->jit_code;
 		int code_size = m->codesize;
 		if( m->jit_debug ) {
@@ -184,8 +237,8 @@ int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out
 				void *module_addr = *stack_ptr; // EIP
 #endif
 				int i;
-				for(i=0;i<modules_count;i++) {
-					hl_module *m = cur_modules[i];
+				for(i=0;i<module_count;i++) {
+					hl_module *m = modules[i];
 					unsigned char *code = m->jit_code;
 					int code_size = m->codesize;
 					if( module_addr >= (void*)code && module_addr < (void*)(code + code_size) ) {
@@ -209,12 +262,15 @@ int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out
 			}
 		}
 	}
+	hl_module_registry_snapshot_free(modules,module_count);
 	return count;
 }
 
 static int module_capture_stack( void **stack, int size ) {
 #ifdef WIN64_UNWIND_TABLES
 	CONTEXT context;
+	int module_count;
+	hl_module **modules = hl_module_registry_snapshot(&module_count);
 	RtlCaptureContext(&context);
 	int count = 0;
 	while(true) {
@@ -225,8 +281,8 @@ static int module_capture_stack( void **stack, int size ) {
 			break;
 		}
 		void *module_addr = (void*)ip;
-		for(int i=0;i<modules_count;i++) {
-			hl_module *m = cur_modules[i];
+		for(int i=0;i<module_count;i++) {
+			hl_module *m = modules[i];
 			unsigned char *code = m->jit_code;
 			int code_size = m->codesize;
 			if( module_addr >= (void*)code && module_addr < (void*)(code + code_size) ) {
@@ -251,6 +307,7 @@ static int module_capture_stack( void **stack, int size ) {
 			break;
 		}
 	}
+	hl_module_registry_snapshot_free(modules,module_count);
 	return count;
 #else
 	return hl_module_capture_stack_range(hl_get_thread()->stack_top, (void**)&stack, stack, size);
@@ -258,13 +315,19 @@ static int module_capture_stack( void **stack, int size ) {
 }
 
 static bool module_is_jit_code( void *addr ) {
-	for(int i=0;i<modules_count;i++) {
-		hl_module *m = cur_modules[i];
+	int module_count;
+	hl_module **modules = hl_module_registry_snapshot(&module_count);
+	bool found = false;
+	for(int i=0;i<module_count;i++) {
+		hl_module *m = modules[i];
 		unsigned char *code = m->jit_code;
-		if( addr >= (void*)code && addr < (void*)(code + m->codesize) )
-			return true;
+		if( addr >= (void*)code && addr < (void*)(code + m->codesize) ) {
+			found = true;
+			break;
+		}
 	}
-	return false;
+	hl_module_registry_snapshot_free(modules,module_count);
+	return found;
 }
 
 static bool module_capture_break_context( void **rip, void **regs ) {
@@ -296,11 +359,13 @@ static bool module_capture_break_context( void **rip, void **regs ) {
 static void hl_module_types_dump( void (*fdump)( void *, int) ) {
 	int ntypes = 0;
 	int i, j, fcount = 0;
-	for(i=0;i<modules_count;i++)
-		ntypes += cur_modules[i]->code->ntypes;
+	int module_count;
+	hl_module **modules = hl_module_registry_snapshot(&module_count);
+	for(i=0;i<module_count;i++)
+		ntypes += modules[i]->code->ntypes;
 	fdump(&ntypes,4);
-	for(i=0;i<modules_count;i++) {
-		hl_module *m = cur_modules[i];
+	for(i=0;i<module_count;i++) {
+		hl_module *m = modules[i];
 		for(j=0;j<m->code->ntypes;j++) {
 			hl_type *t = m->code->types + j;
 			fdump(&t,sizeof(void*));
@@ -308,8 +373,8 @@ static void hl_module_types_dump( void (*fdump)( void *, int) ) {
 		}
 	}
 	fdump(&fcount,4);
-	for(i=0;i<modules_count;i++) {
-		hl_module *m = cur_modules[i];
+	for(i=0;i<module_count;i++) {
+		hl_module *m = modules[i];
 		for(j=0;j<m->code->ntypes;j++) {
 			hl_type *t = m->code->types + j;
 			if( t->kind == HFUN ) {
@@ -318,6 +383,7 @@ static void hl_module_types_dump( void (*fdump)( void *, int) ) {
 			}
 		}
 	}
+	hl_module_registry_snapshot_free(modules,module_count);
 }
 
 hl_module *hl_module_alloc( hl_code *c ) {
@@ -632,9 +698,10 @@ h_bool hl_module_init_vtune( hl_module *m ) {
 	return true;
 }
 static void modules_init_vtune() {
-	int i;
-	for(i=0;i<modules_count;i++)
-		hl_module_init_vtune(cur_modules[i]);
+	int count;
+	hl_module **modules = hl_module_registry_snapshot(&count);
+	for(int i=0;i<count;i++) hl_module_init_vtune(modules[i]);
+	hl_module_registry_snapshot_free(modules,count);
 }
 #endif
 
@@ -732,6 +799,8 @@ static void hl_module_init_constant( hl_module *m, hl_constant *c ) {
 }
 
 static void hl_module_add( hl_module *m ) {
+	module_registry_init();
+	hl_mutex_acquire(modules_lock);
 	hl_module **old_modules = cur_modules;
 	hl_module **new_modules = (hl_module**)malloc(sizeof(void*)*(modules_count + 1));
 	memcpy(new_modules, old_modules, sizeof(void*)*modules_count);
@@ -739,6 +808,7 @@ static void hl_module_add( hl_module *m ) {
 	cur_modules = new_modules;
 	modules_count++;
 	free(old_modules);
+	hl_mutex_release(modules_lock);
 }
 
 int hl_module_init( hl_module *m, int flags ) {
@@ -1159,8 +1229,10 @@ h_bool hl_module_patch( hl_module *m1, hl_code *c ) {
 	hl_module_add(m2);
 
 	// call entry point (will only update types)
-	for(i=modules_count-1;i>=0;i--) {
-		hl_module *m = cur_modules[i];
+	int module_count;
+	hl_module **modules = hl_module_registry_snapshot(&module_count);
+	for(i=module_count-1;i>=0;i--) {
+		hl_module *m = modules[i];
 		if( m->functions_ptrs[m->code->entrypoint] ) {
 			vclosure cl;
 			cl.t = m->code->functions[m->functions_indexes[m->code->entrypoint]].type;
@@ -1170,6 +1242,7 @@ h_bool hl_module_patch( hl_module *m1, hl_code *c ) {
 			break;
 		}
 	}
+	hl_module_registry_snapshot_free(modules,module_count);
 
 	return true;
 }
@@ -1218,9 +1291,14 @@ void hl_module_free( hl_module *m ) {
 h_bool hl_module_unload( hl_module *m ) {
 	int i;
 	if( m == NULL ) return false;
+	module_registry_init();
+	hl_mutex_acquire(modules_lock);
 	for(i=0;i<modules_count;i++)
 		if( cur_modules[i] == m ) break;
-	if( i == modules_count ) return false;
+	if( i == modules_count ) {
+		hl_mutex_release(modules_lock);
+		return false;
+	}
 	for(;i<modules_count-1;i++) cur_modules[i] = cur_modules[i+1];
 	modules_count--;
 	if( modules_count == 0 ) {
@@ -1229,6 +1307,14 @@ h_bool hl_module_unload( hl_module *m ) {
 	} else {
 		hl_module **resized = (hl_module**)realloc(cur_modules,sizeof(hl_module*) * modules_count);
 		if( resized != NULL ) cur_modules = resized;
+	}
+	hl_mutex_release(modules_lock);
+	for(;;) {
+		hl_mutex_acquire(modules_lock);
+		int readers = m->registry_readers;
+		hl_mutex_release(modules_lock);
+		if( readers == 0 ) break;
+		hl_sys_sleep(0.001);
 	}
 	hl_module_free(m);
 	return true;

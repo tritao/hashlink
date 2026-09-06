@@ -631,6 +631,7 @@ typedef struct {
 	void (*profile_event)(int code, vbyte *data, int len);
 	void (*before_exit)();
 	void (*free_jit_support)();
+	void (*free_module_registry)();
 	void (*vtune_init)();
 	bool (*load_plugin)( pchar *file );
 	vdynamic* (*resolve_type)( hl_type *t, hl_type *gt );
