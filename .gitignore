@@ -26,6 +26,7 @@ x64
 .cache
 .vs
 /hl
+/hlprof-live
 /include/sdl
 /include/openal
 /include/aftermath

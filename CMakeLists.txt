@@ -258,6 +258,11 @@ if (WITH_VM)
     endif()
 endif()
 
+add_executable(hlprof-live tools/hlprof-live.c)
+if(WIN32)
+    target_link_libraries(hlprof-live PRIVATE ws2_32)
+endif()
+
 if(BUILD_TESTING)
 
     find_program(
@@ -453,7 +458,7 @@ set(HDLL_DESTINATION
     ${CMAKE_INSTALL_LIBDIR}
 )
 
-set(INSTALL_TARGETS libhl)
+set(INSTALL_TARGETS libhl hlprof-live)
 if (WITH_VM)
     list(APPEND INSTALL_TARGETS hl)
 endif()

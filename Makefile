@@ -42,6 +42,10 @@ STD = src/std/array.o src/std/buffer.o src/std/bytes.o src/std/cast.o src/std/da
 	src/std/track.o
 
 HL_OBJ = src/code.o src/hlpatch.o src/hlruntime.o src/jit.o src/jit_emit.o src/jit_regs.o src/jit_x86_64.o src/jit_dump.o src/main.o src/module.o src/debugger.o src/diagnostics.o src/diagnostics_transport.o src/profile.o
+HLPROF_LIVE = hlprof-live$(EXE_SUFFIX)
+ifeq ($(OS),Windows_NT)
+HLPROF_LIVE_LDLIBS = -lws2_32
+endif
 
 FMT_CPPFLAGS = -I include/mikktspace -I include/minimp3
 
@@ -242,7 +246,7 @@ LIBHL = libhl.$(LIBEXT)
 HL = hl$(EXE_SUFFIX)
 HLC = hlc$(EXE_SUFFIX)
 
-all: $(LIBHL) libs
+all: $(LIBHL) libs $(HLPROF_LIVE)
 ifeq ($(ARCH),arm64)
 	$(warning HashLink vm is not supported on arm64, skipping)
 else
@@ -251,10 +255,11 @@ endif
 
 install:
 	$(UNAME)==Darwin && ${MAKE} uninstall
-ifneq ($(ARCH),arm64)
 	mkdir -p $(INSTALL_BIN_DIR)
+ifneq ($(ARCH),arm64)
 	cp $(HL) $(INSTALL_BIN_DIR)
 endif
+	cp $(HLPROF_LIVE) $(INSTALL_BIN_DIR)
 	mkdir -p $(INSTALL_LIB_DIR)
 	cp *.hdll $(INSTALL_LIB_DIR)
 	cp $(LIBHL) $(INSTALL_LIB_DIR)
@@ -262,7 +267,7 @@ endif
 	cp src/hl.h src/hl_ffi.h src/hlc.h src/hlc_main.c $(INSTALL_INCLUDE_DIR)
 
 uninstall:
-	rm -f $(INSTALL_BIN_DIR)/$(HL) $(INSTALL_LIB_DIR)/$(LIBHL) $(INSTALL_LIB_DIR)/*.hdll
+	rm -f $(INSTALL_BIN_DIR)/$(HL) $(INSTALL_BIN_DIR)/$(HLPROF_LIVE) $(INSTALL_LIB_DIR)/$(LIBHL) $(INSTALL_LIB_DIR)/*.hdll
 	rm -f $(INSTALL_INCLUDE_DIR)/hl.h $(INSTALL_INCLUDE_DIR)/hl_ffi.h $(INSTALL_INCLUDE_DIR)/hlc.h $(INSTALL_INCLUDE_DIR)/hlc_main.c
 
 libs: $(LIBS)
@@ -276,6 +281,9 @@ $(HL): $(HL_OBJ) $(LIBHL)
 $(HLC): $(BOOT) $(LIBHL)
 $(HL) $(HLC):
 	$(CC) $(LDFLAGS) $(USE_LIBHL_LDFLAGS) $^ $($@_LDLIBS) -o $@
+
+$(HLPROF_LIVE): tools/hlprof-live.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(HLPROF_LIVE_LDLIBS) -o $@
 
 %.hdll: HDLL_LINK = $(CC) $(LDFLAGS)
 %.hdll:
@@ -392,7 +400,7 @@ clean_o:
 	rm -f ${STD} ${BOOT} ${RUNTIME} ${PCRE} ${HL_OBJ} ${FMT} ${SDL} ${SSL} ${OPENAL} ${UI} ${UV} ${MYSQL} ${SQLITE} ${HEAPS} ${HL_DEBUG} ${DEPS}
 
 clean: clean_o
-	rm -f $(HL) $(HLC) $(LIBHL) *.hdll
+	rm -f $(HL) $(HLC) $(HLPROF_LIVE) $(LIBHL) *.hdll
 
 .PHONY: libs release
 

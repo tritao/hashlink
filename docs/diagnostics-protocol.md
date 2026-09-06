@@ -88,5 +88,19 @@ Each record begins with its body length:
 | Payload | body length - 20 |
 
 Sample payloads contain `frame count` unsigned 64-bit program counters. Event
-payloads contain the bytes supplied to `hl.Profile.event()`. Symbol and module
-metadata are intentionally deferred to a later protocol capability.
+payloads contain the bytes supplied to `hl.Profile.event()`. Clients resolve
+program counters using the separate symbol-metadata snapshot.
+
+## Native client
+
+`hlprof-live` is the reference HLDI client. For example:
+
+```sh
+hl --diagnostics 7000 program.hl
+hlprof-live --rate 500 --interval 1000 --top 20 7000
+```
+
+The client fetches and periodically refreshes symbol metadata, reads samples by
+cursor, and prints self and inclusive percentages. Use `--duration SEC` for a
+bounded capture or Ctrl-C to stop; either path pauses the remotely controlled
+sampler before disconnecting.
