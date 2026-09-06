@@ -28,6 +28,7 @@ enum { F_RESPONSE=1, F_ERROR=2, CAP_PROFILE=1, CAP_SYMBOLS=2 };
 typedef struct { uint64_t start,end,self,total; uint32_t function_id; char *name; } symbol;
 typedef struct { symbol *items; size_t count,capacity; } symbols;
 typedef struct { const unsigned char *data; size_t length,pos; } reader;
+typedef struct { FILE *file; double started; int failed; } capture;
 static volatile sig_atomic_t interrupted;
 
 static uint16_t u16( const unsigned char *p ) { return (uint16_t)(p[0]|((uint16_t)p[1]<<8)); }
@@ -50,6 +51,25 @@ static void sleep_ms( int ms ) {
 #else
 	struct timespec t={ms/1000,(ms%1000)*1000000L}; nanosleep(&t,NULL);
 #endif
+}
+static int capture_record_parts( capture *c,uint32_t type,const void *prefix,uint32_t prefix_size,const void *body,uint32_t body_size ) {
+	unsigned char header[16];uint64_t nanos;
+	if(!c->file)return 1;
+	if(c->failed)return 0;
+	nanos=(uint64_t)((monotime()-c->started)*1000000000.0);put32(header,type);put32(header+4,prefix_size+body_size);put64(header+8,nanos);
+	if(fwrite(header,1,16,c->file)!=16||(prefix_size&&fwrite(prefix,1,prefix_size,c->file)!=prefix_size)||(body_size&&fwrite(body,1,body_size,c->file)!=body_size))c->failed=1;
+	return !c->failed;
+}
+static int capture_open( capture *c,const char *path,uint32_t pid,uint32_t rate ) {
+	unsigned char header[24];
+	if(!path)return 1;
+	c->file=fopen(path,"wb");if(!c->file)return 0;c->started=monotime();
+	memcpy(header,"HLPC",4);header[4]=1;header[5]=0;header[6]=24;header[7]=0;put32(header+8,0);put32(header+12,pid);put32(header+16,rate);put32(header+20,0);
+	if(fwrite(header,1,24,c->file)!=24)c->failed=1;
+	return !c->failed;
+}
+static void capture_close( capture *c,uint64_t cursor,uint64_t dropped,int completed ) {
+	unsigned char end[16];if(!c->file)return;if(completed){put64(end,cursor);put64(end+8,dropped);capture_record_parts(c,3,end,16,NULL,0);}if(fclose(c->file)!=0)c->failed=1;c->file=NULL;
 }
 static int send_all( socket_t s,const void *data,size_t size ) {
 	const char *p=(const char*)data; while(size){int n=(int)send(s,p,(int)size,0);if(n<=0)return 0;p+=n;size-=n;}return 1;
@@ -82,7 +102,7 @@ static int add_symbol( symbols *s,uint64_t start,uint64_t end,uint32_t id,const 
 }
 static int by_address( const void *a,const void *b ){const symbol *x=a,*y=b;return x->start<y->start?-1:x->start>y->start?1:0;}
 static symbol *resolve( symbols *s,uint64_t pc ){size_t lo=0,hi=s->count;while(lo<hi){size_t m=(lo+hi)>>1;if(s->items[m].start<=pc)lo=m+1;else hi=m;}return lo&&pc<s->items[lo-1].end?s->items+lo-1:NULL;}
-static int fetch_symbols( socket_t sock,symbols *current,uint32_t id ) {
+static int fetch_symbols( socket_t sock,symbols *current,uint32_t id,capture *output ) {
 	unsigned char *data=NULL;uint32_t size,schema,nmodules;reader r;symbols next={0};
 	if(!request(sock,P_METADATA,id,NULL,0,&data,&size))return 0;
 	r.data=data;r.length=size;r.pos=0;
@@ -104,7 +124,9 @@ static int fetch_symbols( socket_t sock,symbols *current,uint32_t id ) {
 		symbol *old=resolve(current,next.items[i].start);
 		if(old&&old->start==next.items[i].start&&old->end==next.items[i].end&&!strcmp(old->name,next.items[i].name)){next.items[i].self=old->self;next.items[i].total=old->total;}
 	}
+	if(output&&!capture_record_parts(output,1,NULL,0,data,size))goto fail_next;
 	free_symbols(current);*current=next;free(data);return 1;
+fail_next: free(data);free_symbols(&next);return 0;
 fail: free(data);free_symbols(&next);return 0;
 }
 static int by_hot( const void *a,const void *b ){const symbol *x=*(symbol*const*)a,*y=*(symbol*const*)b;if(x->self!=y->self)return x->self<y->self?1:-1;return x->total<y->total?1:x->total>y->total?-1:0;}
@@ -121,19 +143,20 @@ static int consume( symbols *s,unsigned char *pending,size_t *length,uint64_t *s
 		if(pending[pos+4]==1){uint32_t frames=u32(pending+pos+20);if(body!=20+frames*8U)return 0;symbol *leaf=NULL;(*samples)++;for(uint32_t i=0;i<frames;i++){symbol *x=resolve(s,u64(pending+pos+24+i*8));if(x){x->total++;if(!leaf)leaf=x;}else(*unresolved)++;}if(leaf)leaf->self++;}pos+=body+4;}
 	if(pos){memmove(pending,pending+pos,*length-pos);*length-=pos;}return 1;
 }
-static void usage( const char *p ){fprintf(stderr,"Usage: %s [--host HOST] [--rate HZ] [--interval MS] [--duration SEC] [--top N] PORT\n",p);}
+static void usage( const char *p ){fprintf(stderr,"Usage: %s [--host HOST] [--rate HZ] [--interval MS] [--duration SEC] [--top N] [--output FILE] PORT\n",p);}
 
 int main( int argc,char **argv ) {
-	const char *host="127.0.0.1",*port=NULL;int rate=1000,interval=1000,duration=0,top=15,code=1;socket_t sock=INVALID_SOCKET;symbols table={0};
+	const char *host="127.0.0.1",*port=NULL,*output_path=NULL;int rate=1000,interval=1000,duration=0,top=15,code=1;socket_t sock=INVALID_SOCKET;symbols table={0};capture output={0};
 	unsigned char hello[16],config[8],read_body[12],*reply=NULL,*pending=NULL;uint32_t reply_size,id=1;uint64_t cursor=0,dropped=0,samples=0,unresolved=0;size_t pending_len=0;double started,next_report,next_metadata;
-	for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")){usage(argv[0]);return 0;}else if(!strcmp(argv[i],"--host")&&++i<argc)host=argv[i];else if(!strcmp(argv[i],"--rate")&&++i<argc)rate=atoi(argv[i]);else if(!strcmp(argv[i],"--interval")&&++i<argc)interval=atoi(argv[i]);else if(!strcmp(argv[i],"--duration")&&++i<argc)duration=atoi(argv[i]);else if(!strcmp(argv[i],"--top")&&++i<argc)top=atoi(argv[i]);else if(argv[i][0]=='-'||port){usage(argv[0]);return 2;}else port=argv[i];}
+	for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")){usage(argv[0]);return 0;}else if(!strcmp(argv[i],"--host")&&++i<argc)host=argv[i];else if(!strcmp(argv[i],"--rate")&&++i<argc)rate=atoi(argv[i]);else if(!strcmp(argv[i],"--interval")&&++i<argc)interval=atoi(argv[i]);else if(!strcmp(argv[i],"--duration")&&++i<argc)duration=atoi(argv[i]);else if(!strcmp(argv[i],"--top")&&++i<argc)top=atoi(argv[i]);else if(!strcmp(argv[i],"--output")&&++i<argc)output_path=argv[i];else if(argv[i][0]=='-'||port){usage(argv[0]);return 2;}else port=argv[i];}
 	if(!port||rate<=0||interval<=0||duration<0||top<=0){usage(argv[0]);return 2;}
 #ifdef _WIN32
 	{WSADATA w;if(WSAStartup(MAKEWORD(2,2),&w)){fprintf(stderr,"Winsock initialization failed\n");return 1;}}
 #endif
 	sock=open_socket(host,port);if(sock==INVALID_SOCKET){fprintf(stderr,"Could not connect to %s:%s\n",host,port);goto done;}
 	if(!recv_all(sock,hello,16)||memcmp(hello,"HLDI",4)||u16(hello+4)!=1||(u16(hello+6)&3)!=3){fprintf(stderr,"Endpoint lacks HLDI/1 profiler symbols\n");goto done;}
-	if(!fetch_symbols(sock,&table,id++)||!table.count){fprintf(stderr,"Could not load symbols\n");goto done;}
+	if(!capture_open(&output,output_path,u32(hello+12),(uint32_t)rate)){fprintf(stderr,"Could not open capture file %s\n",output_path);goto done;}
+	if(!fetch_symbols(sock,&table,id++,&output)||!table.count){fprintf(stderr,"Could not load symbols\n");goto done;}
 	put32(config,(uint32_t)rate);put32(config+4,1);if(!request(sock,P_CONFIGURE,id++,config,8,&reply,&reply_size)||reply_size!=32){fprintf(stderr,"Could not start profiler\n");goto done;}
 	cursor=u64(reply+8);dropped=u64(reply+16);free(reply);reply=NULL;pending=(unsigned char*)malloc(512*1024);if(!pending)goto done;
 	printf("Connected to HashLink process %u, %zu symbols, sampling at %d Hz\n",u32(hello+12),table.count,rate);signal(SIGINT,stop_signal);
@@ -143,15 +166,16 @@ int main( int argc,char **argv ) {
 	started=monotime();next_report=started+interval/1000.0;next_metadata=started+5.0;
 	while(!interrupted&&(!duration||monotime()-started<duration)){
 		put64(read_body,cursor);put32(read_body+8,256*1024);if(!request(sock,P_READ,id++,read_body,12,&reply,&reply_size)||reply_size<16){fprintf(stderr,"Profiler connection closed\n");goto done;}
-		cursor=u64(reply);dropped=u64(reply+8);if(pending_len+reply_size-16>512*1024){fprintf(stderr,"Local buffer overflow\n");goto done;}memcpy(pending+pending_len,reply+16,reply_size-16);pending_len+=reply_size-16;free(reply);reply=NULL;
+		if(!capture_record_parts(&output,2,read_body,8,reply,reply_size)){fprintf(stderr,"Capture write failed\n");goto done;}cursor=u64(reply);dropped=u64(reply+8);if(pending_len+reply_size-16>512*1024){fprintf(stderr,"Local buffer overflow\n");goto done;}memcpy(pending+pending_len,reply+16,reply_size-16);pending_len+=reply_size-16;free(reply);reply=NULL;
 		if(!consume(&table,pending,&pending_len,&samples,&unresolved)){fprintf(stderr,"Malformed profile record\n");goto done;}
-		if(monotime()>=next_metadata){if(!fetch_symbols(sock,&table,id++)){fprintf(stderr,"Metadata refresh failed\n");goto done;}next_metadata=monotime()+5;}
+		if(monotime()>=next_metadata){if(!fetch_symbols(sock,&table,id++,&output)){fprintf(stderr,"Metadata refresh failed\n");goto done;}next_metadata=monotime()+5;}
 		if(monotime()>=next_report){report(&table,samples,unresolved,dropped,top);samples=unresolved=0;next_report=monotime()+interval/1000.0;}sleep_ms(interval<100?interval:100);
 	}
 	if(samples)report(&table,samples,unresolved,dropped,top);
 	code=0;
 done:
 	if(sock!=INVALID_SOCKET){if(code==0){put32(config,(uint32_t)rate);put32(config+4,0);request(sock,P_CONFIGURE,id++,config,8,&reply,&reply_size);free(reply);}CLOSE_SOCKET(sock);}free(pending);free_symbols(&table);
+	capture_close(&output,cursor,dropped,code==0);if(output.failed&&code==0){fprintf(stderr,"Capture finalization failed\n");code=1;}
 #ifdef _WIN32
 	WSACleanup();
 #endif

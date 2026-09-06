@@ -97,10 +97,42 @@ program counters using the separate symbol-metadata snapshot.
 
 ```sh
 hl --diagnostics 7000 program.hl
-hlprof-live --rate 500 --interval 1000 --top 20 7000
+hlprof-live --rate 500 --interval 1000 --top 20 \
+  --output capture.hlprof 7000
 ```
 
 The client fetches and periodically refreshes symbol metadata, reads samples by
 cursor, and prints self and inclusive percentages. Use `--duration SEC` for a
 bounded capture or Ctrl-C to stop; either path pauses the remotely controlled
 sampler before disconnecting.
+
+## Portable capture container
+
+Files produced by `--output` use the little-endian `HLPC` format. The 24-byte
+file header contains:
+
+| Field | Size |
+| --- | ---: |
+| Magic (`HLPC`) | 4 |
+| Format version (`1`) | 2 |
+| Header size (`24`) | 2 |
+| Flags | 4 |
+| Process ID | 4 |
+| Requested sample rate | 4 |
+| Reserved | 4 |
+
+The remainder is an append-only sequence of records. Every record starts with
+`type:u32`, `payloadLength:u32`, and `elapsedNanoseconds:u64`.
+
+- Type 1 contains an unmodified HLDI symbol-metadata payload. Multiple records
+  preserve module changes during a capture.
+- Type 2 contains `requestedCursor:u64`, followed by an unmodified profiler
+  read response: `nextCursor:u64`, `droppedRecords:u64`, and profiler records.
+- Type 3 marks a completed capture and contains `finalCursor:u64` and
+  `droppedRecords:u64`.
+
+An interrupted or failed write has no type 3 record, allowing offline readers
+to distinguish a partial capture while still recovering its complete records.
+
+Because metadata and sample chunks are preserved rather than pre-aggregated,
+offline tools can reconstruct call trees, timelines, and alternative reports.
