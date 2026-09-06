@@ -53,7 +53,7 @@
 
 #define MAX_STACK_SIZE (8 << 20)
 #define MAX_STACK_COUNT 2048
-#define PROFILE_STREAM_SIZE (8 << 20)
+#define PROFILE_STREAM_SIZE HL_PROFILE_STREAM_SIZE
 
 HL_API double hl_sys_time( void );
 int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out, int size );
@@ -103,8 +103,12 @@ static struct {
 	unsigned long long first;
 	unsigned long long next;
 	unsigned long long dropped;
+	unsigned long long consumer;
 	hl_mutex *lock;
 	bool remote_paused;
+	int requested_rate;
+	double last_adjust;
+	double last_consume;
 } stream = {0};
 
 enum { PROFILE_STREAM_SAMPLE = 1, PROFILE_STREAM_EVENT = 2 };
@@ -164,6 +168,16 @@ static void stream_record( int kind, int flags, double time, int tid, int value,
 	}
 	stream_append_locked(header,sizeof(header));
 	if( payload_size ) stream_append_locked(payload,payload_size);
+	if( stream.requested_rate > 0 && time - stream.last_adjust >= 1.0 ) {
+		unsigned long long used = stream.next - stream.consumer;
+		int next_rate = data.sample_count;
+		if( (used > PROFILE_STREAM_SIZE * 3 / 4 || time - stream.last_consume > 1.0) && next_rate > 10 ) next_rate /= 2;
+		else if( used < PROFILE_STREAM_SIZE / 4 && next_rate < stream.requested_rate ) next_rate *= 2;
+		if( next_rate < 10 ) next_rate = 10;
+		if( next_rate > stream.requested_rate ) next_rate = stream.requested_rate;
+		data.sample_count = next_rate;
+		stream.last_adjust = time;
+	}
 	hl_mutex_release(stream.lock);
 }
 
@@ -364,7 +378,6 @@ static void profile_resume() {
 }
 
 static void hl_profile_loop( void *_ ) {
-	double wait_time = 1. / data.sample_count;
 	double next = hl_sys_time();
 	data.tmpMemory = malloc(MAX_STACK_SIZE);
 	data.waitLoop = false;
@@ -443,7 +456,7 @@ static void hl_profile_loop( void *_ ) {
 				free(cur);
 			cur = n;
 		}
-		next += wait_time;
+		next += 1. / data.sample_count;
 	}
 	free(data.tmpMemory);
 	data.tmpMemory = NULL;
@@ -497,13 +510,15 @@ void hl_profile_setup( int sample_count ) {
 #	endif
 }
 
-void hl_profile_stream_status( unsigned long long *first, unsigned long long *next, unsigned long long *dropped, int *sample_rate, int *paused ) {
+void hl_profile_stream_status( unsigned long long *first, unsigned long long *next, unsigned long long *dropped, int *sample_rate, int *paused, unsigned long long *consumer, int *requested_rate ) {
 	if( stream.lock ) hl_mutex_acquire(stream.lock);
 	*first = stream.first;
 	*next = stream.next;
 	*dropped = stream.dropped;
 	*sample_rate = data.sample_count;
 	*paused = data.profiling_pause > 0;
+	*consumer = stream.consumer;
+	*requested_rate = stream.requested_rate;
 	if( stream.lock ) hl_mutex_release(stream.lock);
 }
 
@@ -524,15 +539,25 @@ unsigned int hl_profile_stream_read( unsigned long long cursor, void *output, un
 	}
 	*next = cursor;
 	*dropped = stream.dropped;
+	stream.consumer = cursor;
+	stream.last_consume = hl_sys_time();
 	hl_mutex_release(stream.lock);
 	return total;
 }
 
 bool hl_profile_stream_configure( int sample_rate, bool enabled ) {
 	if( sample_rate <= 0 || sample_rate > 100000 ) return false;
-	if( data.sample_count && data.sample_count != sample_rate ) return false;
 	if( enabled ) {
 		if( !data.sample_count ) hl_profile_setup(sample_rate);
+		data.sample_count = sample_rate;
+		if( stream.lock ) {
+			hl_mutex_acquire(stream.lock);
+			stream.requested_rate = sample_rate;
+			stream.consumer = stream.next;
+			stream.last_adjust = hl_sys_time();
+			stream.last_consume = stream.last_adjust;
+			hl_mutex_release(stream.lock);
+		}
 		if( stream.remote_paused ) profile_resume();
 		stream.remote_paused = false;
 	} else if( data.sample_count && !stream.remote_paused ) {

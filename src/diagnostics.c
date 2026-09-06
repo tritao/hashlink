@@ -250,13 +250,16 @@ static bool send_frame( hl_socket *socket, int service, int type, int flags, uns
 }
 
 static bool send_status( hl_socket *socket, int type, unsigned int request_id ) {
-	unsigned char payload[32];
-	unsigned long long first, next, dropped;
-	int rate, paused;
-	hl_profile_stream_status(&first,&next,&dropped,&rate,&paused);
+	unsigned char payload[56];
+	unsigned long long first, next, dropped, consumer;
+	int rate, paused, requested_rate;
+	hl_profile_stream_status(&first,&next,&dropped,&rate,&paused,&consumer,&requested_rate);
 	write_u64(payload,first); write_u64(payload + 8,next);
 	write_u64(payload + 16,dropped);
 	write_u32(payload + 24,(unsigned int)rate); write_u32(payload + 28,(unsigned int)paused);
+	write_u64(payload + 32,HL_PROFILE_STREAM_SIZE);
+	write_u64(payload + 40,consumer);
+	write_u32(payload + 48,(unsigned int)requested_rate); write_u32(payload + 52,0);
 	return send_frame(socket,DIAG_SERVICE_PROFILER,type,DIAG_RESPONSE,request_id,payload,sizeof(payload));
 }
 

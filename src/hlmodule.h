@@ -324,7 +324,8 @@ HL_EXTERN_C HL_EXPORT void hl_module_retirement_status_get( hl_module *m, hl_mod
 h_bool hl_module_debug( hl_module *m, int port, h_bool wait );
 bool hl_diagnostics_start( int port );
 void hl_diagnostics_stop( void );
-void hl_profile_stream_status( unsigned long long *first, unsigned long long *next, unsigned long long *dropped, int *sample_rate, int *paused );
+void hl_profile_stream_status( unsigned long long *first, unsigned long long *next, unsigned long long *dropped, int *sample_rate, int *paused, unsigned long long *consumer, int *requested_rate );
+#define HL_PROFILE_STREAM_SIZE (8 << 20)
 unsigned int hl_profile_stream_read( unsigned long long cursor, void *output, unsigned int capacity, unsigned long long *next, unsigned long long *dropped );
 bool hl_profile_stream_configure( int sample_rate, bool enabled );
 void hl_profile_stream_notify_revision( unsigned long long module_id, int revision );

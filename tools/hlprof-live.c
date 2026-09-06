@@ -35,6 +35,8 @@ typedef struct folded folded;
 struct folded { char *stack; uint64_t count; folded *next; };
 typedef struct { folded *buckets[4096]; } folded_table;
 static volatile sig_atomic_t interrupted;
+static uint64_t health_capacity,health_used;
+static uint32_t health_requested_rate,health_effective_rate;
 
 static uint16_t u16( const unsigned char *p ) { return (uint16_t)(p[0]|((uint16_t)p[1]<<8)); }
 static uint32_t u32( const unsigned char *p ) { return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24); }
@@ -42,6 +44,7 @@ static uint64_t u64( const unsigned char *p ) { return (uint64_t)u32(p)|((uint64
 static void put32( unsigned char *p,uint32_t v ) { p[0]=(unsigned char)v;p[1]=(unsigned char)(v>>8);p[2]=(unsigned char)(v>>16);p[3]=(unsigned char)(v>>24); }
 static void put64( unsigned char *p,uint64_t v ) { put32(p,(uint32_t)v);put32(p+4,(uint32_t)(v>>32)); }
 static void stop_signal( int sig ) { (void)sig; interrupted=1; }
+static int parse_status( const unsigned char *data,uint32_t size ) {if(size!=32&&size!=56)return 0;health_effective_rate=u32(data+24);health_requested_rate=size==56?u32(data+48):health_effective_rate;health_capacity=size==56?u64(data+32):0;health_used=size==56?u64(data+8)-u64(data+40):0;return 1;}
 
 static double monotime( void ) {
 #ifdef _WIN32
@@ -149,6 +152,7 @@ static int by_hot_line( const void *a,const void *b ){const hot_line *x=a,*y=b;i
 static void report( symbols *s,uint64_t samples,uint64_t unresolved,uint64_t dropped,int top,int show_lines ) {
 	symbol **hot=(symbol**)malloc(s->count*sizeof(symbol*));size_t count=0;if(!hot)return;
 	printf("\nsamples=%llu unresolved_frames=%llu dropped_records=%llu\n",(unsigned long long)samples,(unsigned long long)unresolved,(unsigned long long)dropped);printf("%8s %8s  %s\n","self","total",show_lines?"location / function":"function");
+	if(health_capacity)printf("buffer=%llu/%llu (%.1f%%) requested_rate=%u effective_rate=%u\n",(unsigned long long)health_used,(unsigned long long)health_capacity,health_used*100.0/health_capacity,health_requested_rate,health_effective_rate);
 	if(show_lines){size_t line_capacity=0;for(size_t i=0;i<s->count;i++)line_capacity+=s->items[i].line_count;hot_line *lines=(hot_line*)malloc(line_capacity*sizeof(hot_line));if(!lines){free(hot);return;}for(size_t i=0;i<s->count;i++)for(uint32_t j=0;j<s->items[i].line_count;j++)if(s->items[i].lines[j].total){lines[count].function=s->items+i;lines[count++].line=s->items[i].lines+j;}qsort(lines,count,sizeof(hot_line),by_hot_line);for(size_t i=0;i<count&&i<(size_t)top;i++)printf("%7.2f%% %7.2f%%  %s:%u  %s\n",samples?lines[i].line->self*100.0/samples:0.0,samples?lines[i].line->total*100.0/samples:0.0,lines[i].line->file,lines[i].line->line,lines[i].function->name);free(lines);}
 	else{for(size_t i=0;i<s->count;i++)if(s->items[i].total)hot[count++]=s->items+i;qsort(hot,count,sizeof(symbol*),by_hot);for(size_t i=0;i<count&&i<(size_t)top;i++)printf("%7.2f%% %7.2f%%  %s\n",samples?hot[i]->self*100.0/samples:0.0,samples?hot[i]->total*100.0/samples:0.0,hot[i]->name);}
 	fflush(stdout);for(size_t i=0;i<s->count;i++){s->items[i].self=s->items[i].total=0;for(uint32_t j=0;j<s->items[i].line_count;j++)s->items[i].lines[j].self=s->items[i].lines[j].total=0;}free(hot);
@@ -232,7 +236,7 @@ int main( int argc,char **argv ) {
 	if(!recv_all(sock,hello,16)||memcmp(hello,"HLDI",4)||u16(hello+4)!=1||(u16(hello+6)&3)!=3){fprintf(stderr,"Endpoint lacks HLDI/1 profiler symbols\n");goto done;}
 	if(!capture_open(&output,output_path,u32(hello+12),(uint32_t)rate)){fprintf(stderr,"Could not open capture file %s\n",output_path);goto done;}
 	if(!fetch_symbols(sock,&table,id++,&output)||!table.count){fprintf(stderr,"Could not load symbols\n");goto done;}
-	put32(config,(uint32_t)rate);put32(config+4,1);if(!request(sock,P_CONFIGURE,id++,config,8,&reply,&reply_size)||reply_size!=32){fprintf(stderr,"Could not start profiler\n");goto done;}
+	put32(config,(uint32_t)rate);put32(config+4,1);if(!request(sock,P_CONFIGURE,id++,config,8,&reply,&reply_size)||!parse_status(reply,reply_size)){fprintf(stderr,"Could not start profiler\n");goto done;}
 	cursor=u64(reply+8);dropped=u64(reply+16);free(reply);reply=NULL;pending=(unsigned char*)malloc(512*1024);if(!pending)goto done;
 	printf("Connected to HashLink process %u, %zu symbols, sampling at %d Hz\n",u32(hello+12),table.count,rate);signal(SIGINT,stop_signal);
 #ifdef SIGTERM
@@ -245,7 +249,7 @@ int main( int argc,char **argv ) {
 		if(!consume(&table,pending,&pending_len,&samples,&unresolved,NULL,show_lines,raw_leaf,&metadata_dirty,NULL,NULL,NULL,0)){fprintf(stderr,"Malformed profile record\n");goto done;}
 		if(metadata_dirty){if(!fetch_symbols(sock,&table,id++,&output)){fprintf(stderr,"Metadata refresh failed\n");goto done;}metadata_dirty=0;if(!consume(&table,pending,&pending_len,&samples,&unresolved,NULL,show_lines,raw_leaf,&metadata_dirty,NULL,NULL,NULL,0)){fprintf(stderr,"Malformed profile record\n");goto done;}}
 		if(monotime()>=next_metadata){if(!fetch_symbols(sock,&table,id++,&output)){fprintf(stderr,"Metadata refresh failed\n");goto done;}next_metadata=monotime()+5;}
-		if(monotime()>=next_report){report(&table,samples,unresolved,dropped,top,show_lines);samples=unresolved=0;next_report=monotime()+interval/1000.0;}sleep_ms(interval<100?interval:100);
+		if(monotime()>=next_report){if(request(sock,P_STATUS,id++,NULL,0,&reply,&reply_size)&&parse_status(reply,reply_size)){dropped=u64(reply+16);free(reply);reply=NULL;}report(&table,samples,unresolved,dropped,top,show_lines);samples=unresolved=0;next_report=monotime()+interval/1000.0;}sleep_ms(interval<100?interval:100);
 	}
 	if(samples)report(&table,samples,unresolved,dropped,top,show_lines);
 	code=0;
