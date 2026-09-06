@@ -118,10 +118,15 @@ typedef struct {
 
 typedef struct {
 	int tag;
-	int name;
-	int count;
-	int *arguments;
-	int result;
+	union {
+		struct {
+			int count;
+			int *arguments;
+			int result;
+		} fun;
+		int name;
+		int parameter;
+	} data;
 } hl_patch_type;
 
 typedef struct {

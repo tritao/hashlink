@@ -148,6 +148,9 @@ static unsigned int hash_type_prefix( hl_module *module, int count ) {
 		case HABSTRACT:
 			hash=hash_i32(hash,hash_type_string_index(code,type->abs_name));
 			break;
+		case HREF: case HNULL:
+			hash=hash_i32(hash,hash_type_index(code,type->tparam));
+			break;
 		case HOBJ: case HSTRUCT: {
 			hl_type_obj *obj=type->obj;
 			hash=hash_i32(hash,hash_type_string_index(code,obj->name));
@@ -212,7 +215,7 @@ void hl_patch_free( hl_patch *patch ) {
 		for(j=0;j<f->instruction_count;j++) free(f->instructions[j].operands);
 		free(f->instructions); free(f->registers); free(f->relocation_instructions); free(f->relocation_stable_ids);
 	}
-	for(i=0;i<patch->type_count;i++) free(patch->types[i].arguments);
+	for(i=0;i<patch->type_count;i++) if(patch->types[i].tag==HFUN) free(patch->types[i].data.fun.arguments);
 	free(patch->types);
 	free(patch->functions); free(patch->strings); free(patch->string_lens); free(patch->floats); free(patch->ints); free(patch);
 }
@@ -251,9 +254,10 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 			patch->types=(hl_patch_type*)calloc(patch->type_count,sizeof(hl_patch_type));if(patch->type_count&&!patch->types)FAIL("Out of memory reading patch types");
 			for(i=0;i<patch->type_count;i++){
 				hl_patch_type *type=patch->types+i;if(!read_byte(&s,&type->tag))goto section_fail;
-				if(type->tag==HFUN){if(!read_byte(&s,&type->count))goto section_fail;type->arguments=(int*)calloc(type->count,sizeof(int));if(type->count&&!type->arguments)FAIL("Out of memory reading function type");for(j=0;j<type->count;j++)if(!read_index(&s,type->arguments+j))goto section_fail;if(!read_index(&s,&type->result))goto section_fail;}
-				else if(type->tag==HABSTRACT){if(!read_index(&s,&type->name))goto section_fail;}
-				else if(type->tag<HVOID||type->tag>HGUID||type->tag==HOBJ||type->tag==HVIRTUAL||type->tag==HENUM||type->tag==HREF||type->tag==HNULL||type->tag==HPACKED)FAIL("Unsupported HLP type");
+				if(type->tag==HFUN){if(!read_byte(&s,&type->data.fun.count))goto section_fail;type->data.fun.arguments=(int*)calloc(type->data.fun.count,sizeof(int));if(type->data.fun.count&&!type->data.fun.arguments)FAIL("Out of memory reading function type");for(j=0;j<type->data.fun.count;j++)if(!read_index(&s,type->data.fun.arguments+j))goto section_fail;if(!read_index(&s,&type->data.fun.result))goto section_fail;}
+				else if(type->tag==HABSTRACT){if(!read_index(&s,&type->data.name))goto section_fail;}
+				else if(type->tag==HREF||type->tag==HNULL){if(!read_index(&s,&type->data.parameter))goto section_fail;}
+				else if(type->tag<HVOID||type->tag>HGUID||type->tag==HOBJ||type->tag==HVIRTUAL||type->tag==HENUM||type->tag==HPACKED)FAIL("Unsupported HLP type");
 			}
 		} else if( tag == 2 ) {
 			if( have_functions ) FAIL("Duplicate HLP functions section");
@@ -386,11 +390,13 @@ static bool validate_patch_types( hl_module *m, hl_patch *patch, int string_coun
 	for(int i=0;i<patch->type_count;i++){
 		hl_patch_type *type=patch->types+i;
 		if(type->tag==HFUN){
-			for(int j=0;j<type->count;j++)if(type->arguments[j]<0||type->arguments[j]>=total){*error="Invalid appended function argument type";return false;}
-			if(type->result<0||type->result>=total){*error="Invalid appended function result type";return false;}
+			for(int j=0;j<type->data.fun.count;j++)if(type->data.fun.arguments[j]<0||type->data.fun.arguments[j]>=total){*error="Invalid appended function argument type";return false;}
+			if(type->data.fun.result<0||type->data.fun.result>=total){*error="Invalid appended function result type";return false;}
 		}else if(type->tag==HABSTRACT){
-			if(type->name<0||type->name>=string_count){*error="Invalid appended abstract name";return false;}
-		}else if(type->tag<HVOID||type->tag>HGUID||type->tag==HOBJ||type->tag==HVIRTUAL||type->tag==HENUM||type->tag==HREF||type->tag==HNULL||type->tag==HPACKED){
+			if(type->data.name<0||type->data.name>=string_count){*error="Invalid appended abstract name";return false;}
+		}else if(type->tag==HREF||type->tag==HNULL){
+			if(type->data.parameter<0||type->data.parameter>=total){*error="Invalid appended parameterized type reference";return false;}
+		}else if(type->tag<HVOID||type->tag>HGUID||type->tag==HOBJ||type->tag==HVIRTUAL||type->tag==HENUM||type->tag==HPACKED){
 			*error="Unsupported HLP type";return false;
 		}
 	}
@@ -409,13 +415,15 @@ static bool stage_patch_types( hl_module *m, hl_patch *patch, uchar **strings, v
 		hl_patch_type *src=patch->types+i;hl_type *dst=m->code->types+patch->base_type_count+i;
 		memset(dst,0,sizeof(*dst));dst->kind=(hl_type_kind)src->tag;
 		if(src->tag==HFUN){
-			size_t size=sizeof(hl_type_fun)+sizeof(hl_type*)*src->count;hl_type_fun *fun=(hl_type_fun*)calloc(1,size);
+			size_t size=sizeof(hl_type_fun)+sizeof(hl_type*)*src->data.fun.count;hl_type_fun *fun=(hl_type_fun*)calloc(1,size);
 			if(!fun){*error="Out of memory staging function type";return false;}
-			(*allocations)[(*allocation_count)++]=fun;fun->nargs=src->count;fun->args=(hl_type**)(fun+1);fun->ret=m->code->types+src->result;
-			for(int j=0;j<src->count;j++)fun->args[j]=m->code->types+src->arguments[j];
+			(*allocations)[(*allocation_count)++]=fun;fun->nargs=src->data.fun.count;fun->args=(hl_type**)(fun+1);fun->ret=m->code->types+src->data.fun.result;
+			for(int j=0;j<src->data.fun.count;j++)fun->args[j]=m->code->types+src->data.fun.arguments[j];
 			dst->fun=fun;
 		}else if(src->tag==HABSTRACT){
-			dst->abs_name=strings[src->name];
+			dst->abs_name=strings[src->data.name];
+		}else if(src->tag==HREF||src->tag==HNULL){
+			dst->tparam=m->code->types+src->data.parameter;
 		}
 	}
 	return true;
