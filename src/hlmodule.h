@@ -284,6 +284,7 @@ HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_void( hl_runtime_
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_bytes( hl_runtime_module *runtime, int stable_id, vbyte **result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_bytes1( hl_runtime_module *runtime, int stable_id, vbyte *argument, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_closure( hl_runtime_module *runtime, int stable_id, vclosure **result, vdynamic **exception );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_retained_closure_i32( hl_runtime_module *runtime, vclosure *closure, int *result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_object( hl_runtime_module *runtime, int stable_id, vdynamic **result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32_object( hl_runtime_module *runtime, int stable_id, vdynamic *argument, int *result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_validate_call( hl_runtime_module *runtime, int stable_id, int shape );

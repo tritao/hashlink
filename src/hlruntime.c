@@ -200,6 +200,26 @@ hl_runtime_status hl_runtime_module_call_closure( hl_runtime_module *runtime, in
 	return status;
 }
 
+hl_runtime_status hl_runtime_module_call_retained_closure_i32( hl_runtime_module *runtime, vclosure *closure, int *out, vdynamic **exception ) {
+	vdynamic *result;
+	bool raised = false;
+	if( runtime == NULL || closure == NULL || out == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
+	if( exception != NULL ) *exception = NULL;
+	hl_mutex_acquire(runtime->lock);
+	if( closure->t->kind != HFUN || closure->t->fun->nargs != 0 || closure->t->fun->ret->kind != HI32 ) {
+		hl_mutex_release(runtime->lock);
+		return HL_RUNTIME_BAD_FUNCTION;
+	}
+	result = hl_dyn_call_safe(closure,NULL,0,&raised);
+	hl_mutex_release(runtime->lock);
+	if( raised ) {
+		if( exception != NULL ) *exception = result;
+		return HL_RUNTIME_EXCEPTION;
+	}
+	*out = result->v.i;
+	return HL_RUNTIME_OK;
+}
+
 hl_runtime_status hl_runtime_module_call_object( hl_runtime_module *runtime, int stable_id, vdynamic **out, vdynamic **exception ) {
 	vdynamic *result = NULL;
 	hl_runtime_status status;
