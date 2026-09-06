@@ -150,10 +150,10 @@ void hl_jit_init( jit_ctx *ctx, hl_module *m ) {
 	hl_codegen_init(ctx);
 	jit_code_append(ctx);
 	ctx->special_code_size = ctx->out_pos;
-	if( m->code->hasdebug ) {
-		m->jit_debug = (hl_debug_infos*)malloc(sizeof(hl_debug_infos) * m->code->nfunctions);
-		memset(m->jit_debug, 0, sizeof(hl_debug_infos) * m->code->nfunctions);
-	}
+	/* Machine-code-to-opcode mappings are useful for native crash diagnostics
+	   even when the bytecode does not contain source debug tables. */
+	m->jit_debug = (hl_debug_infos*)malloc(sizeof(hl_debug_infos) * m->code->nfunctions);
+	memset(m->jit_debug, 0, sizeof(hl_debug_infos) * m->code->nfunctions);
 }
 
 void hl_jit_free( jit_ctx *ctx, h_bool can_reset ) {

@@ -150,6 +150,16 @@ static uchar *module_resolve_symbol_snapshot( hl_module **modules, int module_co
 		return NULL;
 	// extract debug info
 	fdebug = m->code->functions + fidx;
+	if( !m->code->hasdebug ) {
+		if( !out ) return NULL;
+		int size = *outSize;
+		if( fdebug->obj )
+			pos += usprintf(out,size - pos,USTR("%s.%s(opcode:%d)"),fdebug->obj->name,fdebug->field.name,fpos);
+		else
+			pos += usprintf(out,size - pos,USTR("fun$%d(opcode:%d)"),fdebug->findex,fpos);
+		*outSize = pos;
+		return out;
+	}
 	debug_addr = fdebug->debug + ((fpos&0xFFFF) * 2);
 	file = debug_addr[0];
 	line = debug_addr[1];
@@ -178,6 +188,33 @@ uchar *hl_module_resolve_symbol_full( void *addr, uchar *out, int *outSize, int 
 	uchar *result = module_resolve_symbol_snapshot(modules,count,addr,out,outSize,r_debug_addr);
 	hl_module_registry_snapshot_free(modules,count);
 	return result;
+}
+
+const char *hl_module_resolve_jit_location( void *addr ) {
+	static char result[512];
+	int count, fidx, fpos;
+	hl_module **modules = hl_module_registry_snapshot(&count);
+	for(int i=0;i<count;i++) {
+		hl_module *m = modules[i];
+		if( addr < m->jit_code || addr > (void*)((char*)m->jit_code + m->codesize) )
+			continue;
+		if( module_resolve_pos(m,addr,&fidx,&fpos) ) {
+			hl_function *fun = m->code->functions + fidx;
+			if( fun->obj ) {
+				char object_name[192], field_name[192];
+				snprintf(object_name,sizeof(object_name),"%s",hl_to_utf8(fun->obj->name));
+				snprintf(field_name,sizeof(field_name),"%s",hl_to_utf8(fun->field.name));
+				snprintf(result,sizeof(result),"%s.%s [function=%d opcode=%d]",object_name,field_name,fun->findex,fpos);
+			} else
+				snprintf(result,sizeof(result),"fun$%d [function=%d opcode=%d]",fun->findex,fun->findex,fpos);
+			hl_module_registry_snapshot_free(modules,count);
+			return result;
+		}
+		snprintf(result,sizeof(result),"HashLink JIT address with no opcode mapping");
+		break;
+	}
+	hl_module_registry_snapshot_free(modules,count);
+	return NULL;
 }
 
 static uchar *module_resolve_symbol( void *addr, uchar *out, int *outSize ) {

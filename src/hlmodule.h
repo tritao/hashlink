@@ -301,6 +301,8 @@ h_bool hl_module_debug( hl_module *m, int port, h_bool wait );
 hl_type *hl_module_resolve_type( hl_module *m, hl_type *t, bool err );
 HL_EXTERN_C HL_EXPORT hl_module **hl_module_registry_snapshot( int *count );
 HL_EXTERN_C HL_EXPORT void hl_module_registry_snapshot_free( hl_module **modules, int count );
+/* Resolve a JIT program counter without requiring HLB source debug tables. */
+HL_EXTERN_C HL_EXPORT const char *hl_module_resolve_jit_location( void *addr );
 
 typedef struct _hl_runtime_module hl_runtime_module;
 typedef enum {
