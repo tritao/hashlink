@@ -140,6 +140,9 @@ typedef struct {
 	int relocation_count;
 	int *relocation_instructions;
 	int *relocation_stable_ids;
+	int debug_count;
+	int *debug_files;
+	int *debug_lines;
 } hl_patch_function;
 
 typedef struct {
@@ -162,6 +165,9 @@ typedef struct {
 	hl_patch_type *types;
 	int function_count;
 	hl_patch_function *functions;
+	int debug_file_count;
+	char **debug_files;
+	int *debug_file_lens;
 } hl_patch;
 
 HL_EXTERN_C HL_EXPORT hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error_msg );
