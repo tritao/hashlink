@@ -159,12 +159,13 @@ static void append_function( diag_buffer *buffer, hl_code *code, hl_function *fu
 	}
 }
 
-static void append_region( diag_buffer *buffer, hl_code *code, unsigned long long base, unsigned int size, unsigned int flags, hl_function *functions, hl_debug_infos *debug, int debug_count, int function_count ) {
+static void append_region( diag_buffer *buffer, hl_code *code, unsigned long long base, unsigned int size, unsigned int flags, unsigned int revision, hl_function *functions, hl_debug_infos *debug, int debug_count, int function_count ) {
 	int valid = 0;
 	for(int i=0;i<function_count;i++) if( debug && debug[i].offsets && debug[i].start >= 0 && (unsigned int)debug[i].start < size ) valid++;
 	buffer_u64(buffer,base);
 	buffer_u64(buffer,size);
 	buffer_u32(buffer,flags);
+	buffer_u32(buffer,revision);
 	buffer_u32(buffer,(unsigned int)valid);
 	for(int i=0;i<function_count;i++)
 		if( debug && debug[i].offsets && debug[i].start >= 0 && (unsigned int)debug[i].start < size )
@@ -175,8 +176,8 @@ static bool send_metadata( hl_socket *socket, unsigned int request_id ) {
 	diag_buffer buffer = {0};
 	int count;
 	hl_module **modules = hl_module_registry_snapshot(&count);
-	/* Schema 3 location: jit_start, jit_end, opcode_index, opcode, file, line. */
-	buffer_u32(&buffer,3);
+	/* Schema 4 adds each JIT region's introduction revision. */
+	buffer_u32(&buffer,4);
 	buffer_u32(&buffer,(unsigned int)count);
 	for(int i=0;i<count;i++) {
 		hl_module *module = modules[i];
@@ -189,7 +190,7 @@ static bool send_metadata( hl_socket *socket, unsigned int request_id ) {
 			buffer_u32(&buffer,(unsigned int)module->code->debugfiles_lens[file_index]);
 			buffer_bytes(&buffer,module->code->debugfiles[file_index],(unsigned int)module->code->debugfiles_lens[file_index]);
 		}
-		append_region(&buffer,module->code,(unsigned long long)(uintptr_t)module->jit_code,(unsigned int)module->codesize,0,module->code->functions,module->jit_debug,module->code->nfunctions,module->code->nfunctions);
+		append_region(&buffer,module->code,(unsigned long long)(uintptr_t)module->jit_code,(unsigned int)module->codesize,0,1,module->code->functions,module->jit_debug,module->code->nfunctions,module->code->nfunctions);
 		for(int region_index=0;region_index<patch_count;region_index++) {
 			hl_patch_debug_region region;
 			int valid = 0;
@@ -198,6 +199,7 @@ static bool send_metadata( hl_socket *socket, unsigned int request_id ) {
 			buffer_u64(&buffer,(unsigned long long)(uintptr_t)region.code);
 			buffer_u64(&buffer,(unsigned int)region.code_size);
 			buffer_u32(&buffer,1 | (region.retired ? 2 : 0));
+			buffer_u32(&buffer,(unsigned int)region.revision);
 			count_at = buffer.length;
 			buffer_u32(&buffer,0);
 			for(int j=0;j<region.function_count;j++) {

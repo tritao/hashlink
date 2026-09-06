@@ -108,6 +108,7 @@ static struct {
 } stream = {0};
 
 enum { PROFILE_STREAM_SAMPLE = 1, PROFILE_STREAM_EVENT = 2 };
+#define PROFILE_EVENT_MODULE_REVISION 0x484C0001
 
 static void stream_write_u32( unsigned char *p, unsigned int value ) {
 	p[0] = (unsigned char)value; p[1] = (unsigned char)(value >> 8);
@@ -539,6 +540,14 @@ bool hl_profile_stream_configure( int sample_rate, bool enabled ) {
 		stream.remote_paused = true;
 	}
 	return true;
+}
+
+void hl_profile_stream_notify_revision( unsigned long long module_id, int revision ) {
+	unsigned char payload[12];
+	if( revision <= 0 || stream.lock == NULL ) return;
+	stream_write_u64(payload,module_id);
+	stream_write_u32(payload + 8,(unsigned int)revision);
+	stream_record(PROFILE_STREAM_EVENT,0,hl_sys_time(),hl_get_thread()->thread_id,PROFILE_EVENT_MODULE_REVISION,payload,sizeof(payload));
 }
 
 static bool read_profile_data( profile_reader *r, void *ptr, int size ) {

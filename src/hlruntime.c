@@ -382,7 +382,11 @@ hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const
 	applied = hl_module_apply_patch(runtime->module,patch,&error);
 	hl_patch_free(patch);
 	hl_mutex_release(runtime->lock);
-	if( applied ) { hl_debug_notify_revision(runtime->module); return HL_RUNTIME_OK; }
+	if( applied ) {
+		hl_profile_stream_notify_revision(runtime->module->diagnostics_id,runtime->module->revision);
+		hl_debug_notify_revision(runtime->module);
+		return HL_RUNTIME_OK;
+	}
 	if( error != NULL && strcmp(error,"Stale patch revision") == 0 ) return HL_RUNTIME_STALE_PATCH;
 	return HL_RUNTIME_INCOMPATIBLE;
 }
