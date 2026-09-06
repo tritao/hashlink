@@ -146,7 +146,14 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 	code = hl_code_read(bytes,length,&error);
 	if( code == NULL ) return HL_RUNTIME_BAD_FORMAT;
 	module = hl_module_alloc(code);
-	if( module == NULL || !hl_module_init(module,HL_MODULE_PATCHABLE) ) {
+	if( module != NULL ) {
+		module->debug_hlb = (unsigned char*)malloc(length);
+		if( module->debug_hlb != NULL ) {
+			memcpy(module->debug_hlb,bytes,length);
+			module->debug_hlb_size = length;
+		}
+	}
+	if( module == NULL || module->debug_hlb == NULL || !hl_module_init(module,HL_MODULE_PATCHABLE) ) {
 		if( module != NULL ) hl_module_free_shutdown(module);
 		hl_code_free(code);
 		return HL_RUNTIME_JIT_FAILED;
