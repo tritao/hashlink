@@ -236,6 +236,7 @@ typedef struct {
 	int patch_type_allocation_capacity;
 	int patch_failure_stage;
 	int registry_readers;
+	unsigned long long diagnostics_id;
 	bool retiring;
 	bool roots_detached;
 	unsigned char *debug_hlb;

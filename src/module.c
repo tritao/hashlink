@@ -40,6 +40,7 @@ HL_API void hl_sys_sleep( double t );
 
 static hl_module **cur_modules = NULL;
 static int modules_count = 0;
+static unsigned long long next_diagnostics_id = 1;
 static hl_mutex *modules_lock = NULL;
 
 static void module_registry_free() {
@@ -877,6 +878,7 @@ static void hl_module_add( hl_module *m ) {
 	hl_module **new_modules = (hl_module**)malloc(sizeof(void*)*(modules_count + 1));
 	memcpy(new_modules, old_modules, sizeof(void*)*modules_count);
 	new_modules[modules_count] = m;
+	m->diagnostics_id = next_diagnostics_id++;
 	cur_modules = new_modules;
 	modules_count++;
 	free(old_modules);

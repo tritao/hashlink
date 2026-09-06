@@ -22,12 +22,21 @@ typedef struct {
 
 enum { DIAG_SERVICE_CONTROL = 0, DIAG_SERVICE_PROFILER = 2 };
 enum { DIAG_CONTROL_CAPABILITIES = 1 };
-enum { DIAG_PROFILE_STATUS = 1, DIAG_PROFILE_CONFIGURE = 2, DIAG_PROFILE_READ = 3 };
-enum { DIAG_RESPONSE = 1, DIAG_ERROR = 2, DIAG_CAP_PROFILER = 1 };
+enum { DIAG_PROFILE_STATUS = 1, DIAG_PROFILE_CONFIGURE = 2, DIAG_PROFILE_READ = 3, DIAG_PROFILE_METADATA = 4 };
+enum { DIAG_RESPONSE = 1, DIAG_ERROR = 2, DIAG_CAP_PROFILER = 1, DIAG_CAP_SYMBOLS = 2 };
 
 static hl_diag_transport *diag_transport;
 static hl_socket *diag_client;
 static volatile bool diag_stopped;
+
+typedef struct {
+	unsigned char *data;
+	unsigned int length;
+	unsigned int capacity;
+	bool failed;
+} diag_buffer;
+
+static bool send_frame( hl_socket *socket, int service, int type, int flags, unsigned int request_id, const void *payload, unsigned int length );
 
 static unsigned int read_u32( const unsigned char *p ) {
 	return (unsigned int)p[0] | ((unsigned int)p[1] << 8) | ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
@@ -50,6 +59,136 @@ static void write_u64( unsigned char *p, unsigned long long value ) {
 	write_u32(p,(unsigned int)value); write_u32(p + 4,(unsigned int)(value >> 32));
 }
 
+static unsigned char *buffer_reserve( diag_buffer *buffer, unsigned int size ) {
+	unsigned int required = buffer->length + size;
+	unsigned int capacity = buffer->capacity ? buffer->capacity : 4096;
+	unsigned char *data;
+	if( buffer->failed || required < buffer->length || required > (64 << 20) ) { buffer->failed = true; return NULL; }
+	while( capacity < required ) capacity <<= 1;
+	if( capacity != buffer->capacity ) {
+		data = realloc(buffer->data,capacity);
+		if( data == NULL ) { buffer->failed = true; return NULL; }
+		buffer->data = data;
+		buffer->capacity = capacity;
+	}
+	data = buffer->data + buffer->length;
+	buffer->length = required;
+	return data;
+}
+
+static void buffer_u32( diag_buffer *buffer, unsigned int value ) {
+	unsigned char *p = buffer_reserve(buffer,4);
+	if( p ) write_u32(p,value);
+}
+
+static void buffer_u64( diag_buffer *buffer, unsigned long long value ) {
+	unsigned char *p = buffer_reserve(buffer,8);
+	if( p ) write_u64(p,value);
+}
+
+static void buffer_bytes( diag_buffer *buffer, const void *data, unsigned int size ) {
+	unsigned char *p = buffer_reserve(buffer,size);
+	if( p && size ) memcpy(p,data,size);
+}
+
+static unsigned int function_end( hl_debug_infos *debug, int count, int index, unsigned int region_size ) {
+	int start = debug[index].start;
+	int end = (int)region_size;
+	for(int i=0;i<count;i++)
+		if( debug[i].offsets && debug[i].start > start && debug[i].start < end ) end = debug[i].start;
+	return end < start ? (unsigned int)start : (unsigned int)end;
+}
+
+static void function_name( hl_function *function, char *output, int capacity ) {
+	if( function->obj ) {
+		char object_name[256], field_name[256];
+		snprintf(object_name,sizeof(object_name),"%s",hl_to_utf8(function->obj->name));
+		snprintf(field_name,sizeof(field_name),"%s",hl_to_utf8(function->field.name));
+		snprintf(output,capacity,"%s.%s",object_name,field_name);
+	} else if( function->field.ref && function->field.ref->obj ) {
+		char object_name[256], field_name[256];
+		snprintf(object_name,sizeof(object_name),"%s",hl_to_utf8(function->field.ref->obj->name));
+		snprintf(field_name,sizeof(field_name),"%s",hl_to_utf8(function->field.ref->field.name));
+		snprintf(output,capacity,"%s.~%s.%d",object_name,field_name,function->ref);
+	} else
+		snprintf(output,capacity,"fun$%d",function->findex);
+}
+
+static void append_function( diag_buffer *buffer, hl_function *function, unsigned int start, unsigned int size ) {
+	char name[768];
+	unsigned int length;
+	function_name(function,name,sizeof(name));
+	length = (unsigned int)strlen(name);
+	buffer_u32(buffer,(unsigned int)function->findex);
+	buffer_u32(buffer,start);
+	buffer_u32(buffer,size);
+	buffer_u32(buffer,length);
+	buffer_bytes(buffer,name,length);
+}
+
+static void append_region( diag_buffer *buffer, unsigned long long base, unsigned int size, unsigned int flags, hl_function *functions, hl_debug_infos *debug, int debug_count, int function_count ) {
+	int valid = 0;
+	for(int i=0;i<function_count;i++) if( debug && debug[i].offsets && debug[i].start >= 0 && (unsigned int)debug[i].start < size ) valid++;
+	buffer_u64(buffer,base);
+	buffer_u64(buffer,size);
+	buffer_u32(buffer,flags);
+	buffer_u32(buffer,(unsigned int)valid);
+	for(int i=0;i<function_count;i++)
+		if( debug && debug[i].offsets && debug[i].start >= 0 && (unsigned int)debug[i].start < size )
+			append_function(buffer,functions + i,(unsigned int)debug[i].start,function_end(debug,debug_count,i,size) - (unsigned int)debug[i].start);
+}
+
+static bool send_metadata( hl_socket *socket, unsigned int request_id ) {
+	diag_buffer buffer = {0};
+	int count;
+	hl_module **modules = hl_module_registry_snapshot(&count);
+	buffer_u32(&buffer,1);
+	buffer_u32(&buffer,(unsigned int)count);
+	for(int i=0;i<count;i++) {
+		hl_module *module = modules[i];
+		int patch_count = hl_module_patch_debug_region_count(module);
+		buffer_u64(&buffer,module->diagnostics_id);
+		buffer_u32(&buffer,(unsigned int)module->revision);
+		buffer_u32(&buffer,(unsigned int)(1 + patch_count));
+		append_region(&buffer,(unsigned long long)(uintptr_t)module->jit_code,(unsigned int)module->codesize,0,module->code->functions,module->jit_debug,module->code->nfunctions,module->code->nfunctions);
+		for(int region_index=0;region_index<patch_count;region_index++) {
+			hl_patch_debug_region region;
+			int valid = 0;
+			unsigned int count_at;
+			if( !hl_module_patch_debug_region_get(module,region_index,&region) ) continue;
+			buffer_u64(&buffer,(unsigned long long)(uintptr_t)region.code);
+			buffer_u64(&buffer,(unsigned int)region.code_size);
+			buffer_u32(&buffer,1 | (region.retired ? 2 : 0));
+			count_at = buffer.length;
+			buffer_u32(&buffer,0);
+			for(int j=0;j<region.function_count;j++) {
+				int function_index;
+				hl_function *function;
+				hl_debug_infos *debug;
+				unsigned int end = (unsigned int)region.code_size;
+				if( !hl_module_patch_debug_function_get(module,region_index,j,&function_index,&function,&debug) ) continue;
+				if( debug->start < 0 || (unsigned int)debug->start >= (unsigned int)region.code_size ) continue;
+				for(int k=0;k<region.function_count;k++) {
+					int other_index;
+					hl_function *other_function;
+					hl_debug_infos *other_debug;
+					if( hl_module_patch_debug_function_get(module,region_index,k,&other_index,&other_function,&other_debug) && other_debug->start > debug->start && (unsigned int)other_debug->start < end ) end = (unsigned int)other_debug->start;
+				}
+				append_function(&buffer,function,(unsigned int)debug->start,end - (unsigned int)debug->start);
+				valid++;
+			}
+			if( !buffer.failed ) write_u32(buffer.data + count_at,(unsigned int)valid);
+		}
+	}
+	hl_module_registry_snapshot_free(modules,count);
+	if( buffer.failed ) { free(buffer.data); return false; }
+	{
+		bool sent = send_frame(socket,DIAG_SERVICE_PROFILER,DIAG_PROFILE_METADATA,DIAG_RESPONSE,request_id,buffer.data,buffer.length);
+		free(buffer.data);
+		return sent;
+	}
+}
+
 static bool recv_header( hl_socket *socket, diag_header *header ) {
 	unsigned char bytes[16];
 	if( !hl_diag_transport_recv(socket,bytes,sizeof(bytes)) ) return false;
@@ -69,7 +208,7 @@ static bool send_frame( hl_socket *socket, int service, int type, int flags, uns
 	return hl_diag_transport_send(socket,bytes,sizeof(bytes)) && (length == 0 || hl_diag_transport_send(socket,payload,(int)length));
 }
 
-static bool send_status( hl_socket *socket, unsigned int request_id ) {
+static bool send_status( hl_socket *socket, int type, unsigned int request_id ) {
 	unsigned char payload[32];
 	unsigned long long first, next, dropped;
 	int rate, paused;
@@ -77,12 +216,12 @@ static bool send_status( hl_socket *socket, unsigned int request_id ) {
 	write_u64(payload,first); write_u64(payload + 8,next);
 	write_u64(payload + 16,dropped);
 	write_u32(payload + 24,(unsigned int)rate); write_u32(payload + 28,(unsigned int)paused);
-	return send_frame(socket,DIAG_SERVICE_PROFILER,DIAG_PROFILE_STATUS,DIAG_RESPONSE,request_id,payload,sizeof(payload));
+	return send_frame(socket,DIAG_SERVICE_PROFILER,type,DIAG_RESPONSE,request_id,payload,sizeof(payload));
 }
 
 static void handle_client( hl_socket *socket ) {
 	unsigned char hello[16];
-	memcpy(hello,"HLDI",4); write_u16(hello + 4,1); write_u16(hello + 6,DIAG_CAP_PROFILER);
+	memcpy(hello,"HLDI",4); write_u16(hello + 4,1); write_u16(hello + 6,DIAG_CAP_PROFILER | DIAG_CAP_SYMBOLS);
 	write_u32(hello + 8,HL_VERSION); write_u32(hello + 12,(unsigned int)hl_sys_getpid());
 	if( !hl_diag_transport_send(socket,hello,sizeof(hello)) ) return;
 	while( true ) {
@@ -95,13 +234,13 @@ static void handle_client( hl_socket *socket ) {
 			if( payload == NULL || !hl_diag_transport_recv(socket,payload,(int)header.length) ) { free(payload); break; }
 		}
 		if( header.service == DIAG_SERVICE_CONTROL && header.type == DIAG_CONTROL_CAPABILITIES && header.length == 0 ) {
-			unsigned char caps[4]; write_u32(caps,DIAG_CAP_PROFILER);
+			unsigned char caps[4]; write_u32(caps,DIAG_CAP_PROFILER | DIAG_CAP_SYMBOLS);
 			ok = send_frame(socket,header.service,header.type,DIAG_RESPONSE,header.request_id,caps,sizeof(caps));
 		} else if( header.service == DIAG_SERVICE_PROFILER && header.type == DIAG_PROFILE_STATUS && header.length == 0 ) {
-			ok = send_status(socket,header.request_id);
+			ok = send_status(socket,header.type,header.request_id);
 		} else if( header.service == DIAG_SERVICE_PROFILER && header.type == DIAG_PROFILE_CONFIGURE && header.length == 8 ) {
 			ok = hl_profile_stream_configure((int)read_u32(payload),read_u32(payload + 4) != 0);
-			if( ok ) ok = send_status(socket,header.request_id);
+			if( ok ) ok = send_status(socket,header.type,header.request_id);
 		} else if( header.service == DIAG_SERVICE_PROFILER && header.type == DIAG_PROFILE_READ && header.length == 12 ) {
 			unsigned long long cursor = read_u64(payload);
 			unsigned int limit = read_u32(payload + 8), count;
@@ -115,6 +254,8 @@ static void handle_client( hl_socket *socket ) {
 				ok = send_frame(socket,header.service,header.type,DIAG_RESPONSE,header.request_id,out,16 + count);
 				free(out);
 			}
+		} else if( header.service == DIAG_SERVICE_PROFILER && header.type == DIAG_PROFILE_METADATA && header.length == 0 ) {
+			ok = send_metadata(socket,header.request_id);
 		}
 		free(payload);
 		if( !ok && !send_frame(socket,header.service,header.type,DIAG_RESPONSE | DIAG_ERROR,header.request_id,NULL,0) ) break;
