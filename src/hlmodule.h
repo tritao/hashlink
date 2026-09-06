@@ -320,6 +320,11 @@ HL_EXTERN_C HL_EXPORT h_bool hl_module_retire_try( hl_module *m, hl_module_retir
 /** Snapshot known module-owned resources and borrowers. The caller must quiesce calls. */
 HL_EXTERN_C HL_EXPORT void hl_module_retirement_status_get( hl_module *m, hl_module_retirement_status *out );
 h_bool hl_module_debug( hl_module *m, int port, h_bool wait );
+bool hl_diagnostics_start( int port );
+void hl_diagnostics_stop( void );
+void hl_profile_stream_status( unsigned long long *first, unsigned long long *next, unsigned long long *dropped, int *sample_rate, int *paused );
+unsigned int hl_profile_stream_read( unsigned long long cursor, void *output, unsigned int capacity, unsigned long long *next, unsigned long long *dropped );
+bool hl_profile_stream_configure( int sample_rate, bool enabled );
 hl_type *hl_module_resolve_type( hl_module *m, hl_type *t, bool err );
 HL_EXTERN_C HL_EXPORT hl_module **hl_module_registry_snapshot( int *count );
 HL_EXTERN_C HL_EXPORT void hl_module_registry_snapshot_free( hl_module **modules, int count );

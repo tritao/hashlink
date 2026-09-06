@@ -237,6 +237,8 @@ if (WITH_VM)
         src/hlpatch.c
         src/hlruntime.c
         src/debugger.c
+        src/diagnostics.c
+        src/diagnostics_transport.c
         src/profile.c
     )
     if(APPLE)

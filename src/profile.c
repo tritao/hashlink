@@ -53,6 +53,7 @@
 
 #define MAX_STACK_SIZE (8 << 20)
 #define MAX_STACK_COUNT 2048
+#define PROFILE_STREAM_SIZE (8 << 20)
 
 HL_API double hl_sys_time( void );
 int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out, int size );
@@ -96,6 +97,74 @@ static struct {
 	profile_data *first_record;
 	hl_condition *waitCond;
 } data = {0};
+
+static struct {
+	unsigned char *bytes;
+	unsigned long long first;
+	unsigned long long next;
+	unsigned long long dropped;
+	hl_mutex *lock;
+	bool remote_paused;
+} stream = {0};
+
+enum { PROFILE_STREAM_SAMPLE = 1, PROFILE_STREAM_EVENT = 2 };
+
+static void stream_write_u32( unsigned char *p, unsigned int value ) {
+	p[0] = (unsigned char)value; p[1] = (unsigned char)(value >> 8);
+	p[2] = (unsigned char)(value >> 16); p[3] = (unsigned char)(value >> 24);
+}
+
+static void stream_write_u64( unsigned char *p, unsigned long long value ) {
+	stream_write_u32(p,(unsigned int)value); stream_write_u32(p + 4,(unsigned int)(value >> 32));
+}
+
+static unsigned int stream_read_u32_at( unsigned long long position ) {
+	unsigned char bytes[4];
+	for(int i=0;i<4;i++) bytes[i] = stream.bytes[(position + i) % PROFILE_STREAM_SIZE];
+	return (unsigned int)bytes[0] | ((unsigned int)bytes[1] << 8) | ((unsigned int)bytes[2] << 16) | ((unsigned int)bytes[3] << 24);
+}
+
+static void stream_append_locked( const unsigned char *input, unsigned int size ) {
+	unsigned int remaining = size;
+	while( remaining ) {
+		unsigned int offset = (unsigned int)(stream.next % PROFILE_STREAM_SIZE);
+		unsigned int count = PROFILE_STREAM_SIZE - offset;
+		if( count > remaining ) count = remaining;
+		memcpy(stream.bytes + offset,input,count);
+		stream.next += count;
+		input += count;
+		remaining -= count;
+	}
+}
+
+static void stream_record( int kind, int flags, double time, int tid, int value, const void *payload, unsigned int payload_size ) {
+	unsigned int body_size = 20 + payload_size;
+	unsigned int record_size = 4 + body_size;
+	unsigned char header[24];
+	unsigned long long time_bits;
+	if( stream.lock == NULL ) return;
+	memcpy(&time_bits,&time,sizeof(time_bits));
+	stream_write_u32(header,body_size);
+	header[4] = (unsigned char)kind; header[5] = (unsigned char)flags;
+	header[6] = 0; header[7] = 0;
+	stream_write_u64(header + 8,time_bits);
+	stream_write_u32(header + 16,(unsigned int)tid);
+	stream_write_u32(header + 20,(unsigned int)value);
+	hl_mutex_acquire(stream.lock);
+	if( record_size > PROFILE_STREAM_SIZE ) {
+		stream.dropped++;
+		hl_mutex_release(stream.lock);
+		return;
+	}
+	while( stream.next + record_size - stream.first > PROFILE_STREAM_SIZE ) {
+		unsigned int old_size = stream_read_u32_at(stream.first);
+		stream.first += 4 + old_size;
+		stream.dropped++;
+	}
+	stream_append_locked(header,sizeof(header));
+	if( payload_size ) stream_append_locked(payload,payload_size);
+	hl_mutex_release(stream.lock);
+}
 
 #ifdef HL_LINUX
 static struct
@@ -266,6 +335,11 @@ static void read_thread_data( thread_handle *t ) {
 	double time = hl_sys_time();
 	hl_threads_info *gc = hl_gc_threads_info();
 	if( gc->stopping_world ) eventId |= 0x40000000;
+	{
+		unsigned char frames[MAX_STACK_COUNT * 8];
+		for(int i=0;i<count;i++) stream_write_u64(frames + i * 8,(unsigned long long)(uintptr_t)data.stackOut[i]);
+		stream_record(PROFILE_STREAM_SAMPLE,gc->stopping_world ? 1 : 0,time,t->tid,count,frames,count * 8);
+	}
 	record_data(&time,sizeof(double));
 	record_data(&t->tid,sizeof(int));
 	record_data(&eventId,sizeof(int));
@@ -379,7 +453,12 @@ static void hl_profile_loop( void *_ ) {
 static void profile_event( int code, vbyte *data, int dataLen );
 
 void hl_profile_setup( int sample_count ) {
-#	if defined(HL_THREADS) && (defined(HL_WIN_DESKTOP) || defined(HL_LINUX) || defined (HL_MAC))
+	#	if defined(HL_THREADS) && (defined(HL_WIN_DESKTOP) || defined(HL_LINUX) || defined (HL_MAC))
+	if( stream.lock == NULL ) {
+		stream.lock = hl_mutex_alloc(false);
+		stream.bytes = malloc(PROFILE_STREAM_SIZE);
+		hl_add_root(&stream.lock);
+	}
 	if( data.waitCond == NULL ) {
 		data.waitCond = hl_condition_alloc();
 		hl_add_root(&data.waitCond);
@@ -391,6 +470,7 @@ void hl_profile_setup( int sample_count ) {
 	if( sample_count < 0 ) {
 		// was not started with --profile : pause until we get start event
 		profile_pause();
+		stream.remote_paused = true;
 		return;
 	}
 	data.sample_count = sample_count;
@@ -414,6 +494,51 @@ void hl_profile_setup( int sample_count ) {
 #	endif
 	hl_thread_start(hl_profile_loop,NULL,false);
 #	endif
+}
+
+void hl_profile_stream_status( unsigned long long *first, unsigned long long *next, unsigned long long *dropped, int *sample_rate, int *paused ) {
+	if( stream.lock ) hl_mutex_acquire(stream.lock);
+	*first = stream.first;
+	*next = stream.next;
+	*dropped = stream.dropped;
+	*sample_rate = data.sample_count;
+	*paused = data.profiling_pause > 0;
+	if( stream.lock ) hl_mutex_release(stream.lock);
+}
+
+unsigned int hl_profile_stream_read( unsigned long long cursor, void *output, unsigned int capacity, unsigned long long *next, unsigned long long *dropped ) {
+	unsigned int total = 0;
+	if( stream.lock == NULL || output == NULL ) { *next = 0; *dropped = 0; return 0; }
+	hl_mutex_acquire(stream.lock);
+	if( cursor < stream.first ) cursor = stream.first;
+	if( cursor > stream.next ) cursor = stream.next;
+	if( stream.next - cursor < capacity ) capacity = (unsigned int)(stream.next - cursor);
+	while( total < capacity ) {
+		unsigned int offset = (unsigned int)(cursor % PROFILE_STREAM_SIZE);
+		unsigned int count = PROFILE_STREAM_SIZE - offset;
+		if( count > capacity - total ) count = capacity - total;
+		memcpy((unsigned char*)output + total,stream.bytes + offset,count);
+		cursor += count;
+		total += count;
+	}
+	*next = cursor;
+	*dropped = stream.dropped;
+	hl_mutex_release(stream.lock);
+	return total;
+}
+
+bool hl_profile_stream_configure( int sample_rate, bool enabled ) {
+	if( sample_rate <= 0 || sample_rate > 100000 ) return false;
+	if( data.sample_count && data.sample_count != sample_rate ) return false;
+	if( enabled ) {
+		if( !data.sample_count ) hl_profile_setup(sample_rate);
+		if( stream.remote_paused ) profile_resume();
+		stream.remote_paused = false;
+	} else if( data.sample_count && !stream.remote_paused ) {
+		profile_pause();
+		stream.remote_paused = true;
+	}
+	return true;
 }
 
 static bool read_profile_data( profile_reader *r, void *ptr, int size ) {
@@ -585,6 +710,12 @@ static void profile_event( int code, vbyte *ptr, int dataLen ) {
 		}
 		data.first_record = NULL;
 		data.record = NULL;
+		if( stream.lock ) {
+			hl_mutex_acquire(stream.lock);
+			stream.first = stream.next;
+			stream.dropped = 0;
+			hl_mutex_release(stream.lock);
+		}
 		profile_resume();
 		break;
 	case -4:
@@ -611,6 +742,7 @@ static void profile_event( int code, vbyte *ptr, int dataLen ) {
 		profile_pause();
 		while( !data.waitLoop ) {}
 		double time = hl_sys_time();
+		stream_record(PROFILE_STREAM_EVENT,0,time,hl_get_thread()->thread_id,code,ptr,dataLen);
 		record_data(&time,sizeof(double));
 		record_data(&hl_get_thread()->thread_id,sizeof(int));
 		record_data(&code,sizeof(int));
