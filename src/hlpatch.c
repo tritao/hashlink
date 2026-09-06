@@ -63,6 +63,64 @@ int hl_module_patch_retired_allocation_count( hl_module *m ) {
 	return count;
 }
 
+static bool patch_code_contains( hl_patch_code *owner, void *addr ) {
+	unsigned char *code = (unsigned char*)owner->code;
+	return code != NULL && addr >= (void*)code && addr < (void*)(code + owner->code_size);
+}
+
+static bool patch_code_resolve_pos( hl_module *m, hl_patch_code *owner, void *addr, hl_function **function, int *opcode ) {
+	int code_pos, best_start = -1, best_function = -1;
+	if( !patch_code_contains(owner,addr) || owner->jit_debug == NULL ) return false;
+	code_pos = (int)((unsigned char*)addr - (unsigned char*)owner->code);
+	for(int i=0;i<owner->function_count;i++) {
+		hl_function *candidate = owner->functions + i;
+		int index = m->functions_indexes[candidate->findex];
+		hl_debug_infos *debug;
+		if( index < 0 || index >= owner->jit_debug_count ) continue;
+		debug = owner->jit_debug + index;
+		if( debug->offsets != NULL && debug->start <= code_pos && debug->start > best_start ) {
+			best_start = debug->start;
+			best_function = i;
+		}
+	}
+	if( best_function < 0 ) return false;
+	{
+		hl_function *resolved = owner->functions + best_function;
+		int index = m->functions_indexes[resolved->findex];
+		hl_debug_infos *debug = owner->jit_debug + index;
+		int min = 0, max = resolved->nops;
+		code_pos -= debug->start;
+		while( min < max ) {
+			int mid = (min + max) >> 1;
+			int offset = debug->large ? ((int*)debug->offsets)[mid] : ((unsigned short*)debug->offsets)[mid];
+			if( offset < code_pos ) min = mid + 1; else max = mid;
+		}
+		if( min == 0 ) min = 1; /* function prologue maps to its first opcode */
+		*function = resolved;
+		*opcode = min - 1;
+		return true;
+	}
+}
+
+bool hl_module_patch_resolve_pos( hl_module *m, void *addr, hl_function **function, int *opcode ) {
+	if( m == NULL || m->patch_owners == NULL ) return false;
+	for(int i=0;i<m->code->nfunctions+m->code->nnatives;i++) {
+		hl_patch_code *owner = m->patch_owners[i];
+		if( owner == NULL ) continue;
+		for(int j=0;j<i;j++) if( m->patch_owners[j] == owner ) { owner = NULL; break; }
+		if( owner != NULL && patch_code_resolve_pos(m,owner,addr,function,opcode) ) return true;
+	}
+	for(hl_patch_code *owner=m->retired_patch_code;owner;owner=owner->next_retired)
+		if( patch_code_resolve_pos(m,owner,addr,function,opcode) ) return true;
+	return false;
+}
+
+bool hl_module_patch_contains_address( hl_module *m, void *addr ) {
+	hl_function *function;
+	int opcode;
+	return hl_module_patch_resolve_pos(m,addr,&function,&opcode);
+}
+
 static bool take( patch_reader *r, int count, const unsigned char **out ) {
 	if( count < 0 || r->end - r->p < count ) { r->error = "Truncated HLP data"; return false; }
 	*out = r->p; r->p += count; return true;

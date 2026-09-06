@@ -60,7 +60,7 @@ static void module_registry_init() {
 	hl_global_lock(false);
 }
 
-static bool module_resolve_pos( hl_module *m, void *addr, int *fidx, int *fpos ) {
+static bool module_resolve_pos( hl_module *m, void *addr, hl_function **function, int *fpos ) {
 	int code_pos = ((int)(int_val)((unsigned char*)addr - (unsigned char*)m->jit_code));
 	int min, max;
 	hl_debug_infos *dbg;
@@ -82,7 +82,6 @@ static bool module_resolve_pos( hl_module *m, void *addr, int *fidx, int *fpos )
 		return false; // hl_callback
 	do {
 		min--;
-		*fidx = min;
 		dbg = m->jit_debug + min;
 		fdebug = m->code->functions + min;
 	} while( !dbg->offsets );
@@ -99,9 +98,33 @@ static bool module_resolve_pos( hl_module *m, void *addr, int *fidx, int *fpos )
 			max = mid;
 	}
 	if( min == 0 )
-		return false; // ???
+		min = 1; // function prologue maps to its first opcode
+	*function = fdebug;
 	*fpos = min - 1;
 	return true;
+}
+
+static bool module_resolve_address( hl_module *m, void *addr, hl_function **function, int *opcode ) {
+	if( addr >= m->jit_code && addr < (void*)((char*)m->jit_code + m->codesize) )
+		return module_resolve_pos(m,addr,function,opcode);
+	return hl_module_patch_resolve_pos(m,addr,function,opcode);
+}
+
+static bool module_contains_address( hl_module *m, void *addr ) {
+	if( addr >= m->jit_code && addr < (void*)((char*)m->jit_code + m->codesize) ) return true;
+	return hl_module_patch_contains_address(m,addr);
+}
+
+static bool module_contains_trace_address( hl_module *m, void *addr ) {
+	unsigned char *code = m->jit_code;
+	int code_size = m->codesize;
+	if( hl_module_patch_contains_address(m,addr) ) return true;
+	if( m->jit_debug ) {
+		int start = m->jit_debug[0].start;
+		code += start;
+		code_size -= start;
+	}
+	return addr >= (void*)code && addr < (void*)(code + code_size);
 }
 
 hl_module **hl_module_registry_snapshot( int *count ) {
@@ -136,21 +159,20 @@ static uchar *module_resolve_symbol_snapshot( hl_module **modules, int module_co
 	int *debug_addr;
 	int file, line;
 	int pos = 0;
-	int fidx, fpos;
+	int fpos;
 	hl_function *fdebug;
 	int i;
 	hl_module *m = NULL;
 	for(i=0;i<module_count;i++) {
 		m = modules[i];
-		if( addr >= m->jit_code && addr <= (void*)((char*)m->jit_code + m->codesize) ) break;
+		if( module_contains_address(m,addr) ) break;
 	}
 	if( i == module_count )
 		return NULL;
-	if( !module_resolve_pos(m,addr,&fidx,&fpos) )
+	if( !module_resolve_address(m,addr,&fdebug,&fpos) )
 		return NULL;
 	// extract debug info
-	fdebug = m->code->functions + fidx;
-	if( !m->code->hasdebug ) {
+	if( !m->code->hasdebug || fdebug->debug == NULL ) {
 		if( !out ) return NULL;
 		int size = *outSize;
 		if( fdebug->obj )
@@ -192,23 +214,25 @@ uchar *hl_module_resolve_symbol_full( void *addr, uchar *out, int *outSize, int 
 
 const char *hl_module_resolve_jit_location( void *addr ) {
 	static char result[512];
-	int count, fidx, fpos;
+	int count, fpos;
 	hl_module **modules = hl_module_registry_snapshot(&count);
 	for(int i=0;i<count;i++) {
 		hl_module *m = modules[i];
-		if( addr < m->jit_code || addr > (void*)((char*)m->jit_code + m->codesize) )
+		if( !module_contains_address(m,addr) )
 			continue;
-		if( module_resolve_pos(m,addr,&fidx,&fpos) ) {
-			hl_function *fun = m->code->functions + fidx;
-			if( fun->obj ) {
-				char object_name[192], field_name[192];
-				snprintf(object_name,sizeof(object_name),"%s",hl_to_utf8(fun->obj->name));
-				snprintf(field_name,sizeof(field_name),"%s",hl_to_utf8(fun->field.name));
-				snprintf(result,sizeof(result),"%s.%s [function=%d opcode=%d]",object_name,field_name,fun->findex,fpos);
-			} else
-				snprintf(result,sizeof(result),"fun$%d [function=%d opcode=%d]",fun->findex,fun->findex,fpos);
-			hl_module_registry_snapshot_free(modules,count);
-			return result;
+		{
+			hl_function *fun = NULL;
+			if( module_resolve_address(m,addr,&fun,&fpos) ) {
+				if( fun->obj ) {
+					char object_name[192], field_name[192];
+					snprintf(object_name,sizeof(object_name),"%s",hl_to_utf8(fun->obj->name));
+					snprintf(field_name,sizeof(field_name),"%s",hl_to_utf8(fun->field.name));
+					snprintf(result,sizeof(result),"%s.%s [function=%d opcode=%d]",object_name,field_name,fun->findex,fpos);
+				} else
+					snprintf(result,sizeof(result),"fun$%d [function=%d opcode=%d]",fun->findex,fun->findex,fpos);
+				hl_module_registry_snapshot_free(modules,count);
+				return result;
+			}
 		}
 		snprintf(result,sizeof(result),"HashLink JIT address with no opcode mapping");
 		break;
@@ -231,17 +255,10 @@ int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out
 	hl_module **modules = hl_module_registry_snapshot(&module_count);
 	if( module_count == 1 ) {
 		hl_module *m = modules[0];
-		unsigned char *code = m->jit_code;
-		int code_size = m->codesize;
-		if( m->jit_debug ) {
-			int s = m->jit_debug[0].start;
-			code += s;
-			code_size -= s;
-		}
 		while( stack_ptr < (void**)stack_top ) {
 #if defined(HL_64) && defined(HL_WIN)
 			void *module_addr = *stack_ptr++; // EIP
-			if( module_addr >= (void*)code && module_addr < (void*)(code + code_size) ) {
+			if( module_contains_trace_address(m,module_addr) ) {
 				if( out ) {
 					if( count == size ) break;
 					out[count++] = module_addr;
@@ -252,7 +269,7 @@ int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out
 			void *stack_addr = *stack_ptr++; // EBP
 			if( stack_addr > stack_bottom && stack_addr < stack_top ) {
 				void *module_addr = *stack_ptr; // EIP
-				if( module_addr >= (void*)code && module_addr < (void*)(code + code_size) ) {
+				if( module_contains_trace_address(m,module_addr) ) {
 					if( out ) {
 						if( count == size ) break;
 						out[count++] = module_addr;
@@ -278,12 +295,12 @@ int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out
 					hl_module *m = modules[i];
 					unsigned char *code = m->jit_code;
 					int code_size = m->codesize;
-					if( module_addr >= (void*)code && module_addr < (void*)(code + code_size) ) {
+					if( module_contains_trace_address(m,module_addr) ) {
 						if( out && count == size ) {
 							stack_ptr = stack_top;
 							break;
 						}
-						if( m->jit_debug ) {
+						if( m->jit_debug && module_addr >= m->jit_code && module_addr < (void*)((char*)m->jit_code + m->codesize) ) {
 							int s = m->jit_debug[0].start;
 							code += s;
 							code_size -= s;
@@ -320,9 +337,7 @@ static int module_capture_stack( void **stack, int size ) {
 		void *module_addr = (void*)ip;
 		for(int i=0;i<module_count;i++) {
 			hl_module *m = modules[i];
-			unsigned char *code = m->jit_code;
-			int code_size = m->codesize;
-			if( module_addr >= (void*)code && module_addr < (void*)(code + code_size) ) {
+			if( module_contains_trace_address(m,module_addr) ) {
 				if( stack && count == size )
 					break;
 				if( stack )
@@ -357,8 +372,7 @@ static bool module_is_jit_code( void *addr ) {
 	bool found = false;
 	for(int i=0;i<module_count;i++) {
 		hl_module *m = modules[i];
-		unsigned char *code = m->jit_code;
-		if( addr >= (void*)code && addr < (void*)(code + m->codesize) ) {
+		if( module_contains_trace_address(m,addr) ) {
 			found = true;
 			break;
 		}

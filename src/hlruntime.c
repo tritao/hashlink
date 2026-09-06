@@ -200,6 +200,16 @@ static int resolve_stable_id( hl_runtime_module *runtime, int stable_id ) {
 	return -1;
 }
 
+const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id ) {
+	int slot;
+	void *address;
+	if( runtime == NULL ) return NULL;
+	slot = resolve_stable_id(runtime,stable_id);
+	if( slot < 0 ) return NULL;
+	address = runtime->module->patch_targets ? runtime->module->patch_targets[slot] : runtime->module->functions_ptrs[slot];
+	return hl_module_resolve_jit_location(address);
+}
+
 hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int stable_id, int *out, vdynamic **exception ) {
 	hl_function *function;
 	vclosure closure;
