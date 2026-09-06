@@ -152,6 +152,8 @@ hlprof-live report --top 30 capture.hlprof
 hlprof-live report --lines --top 30 capture.hlprof
 hlprof-live export --format folded capture.hlprof > stacks.folded
 hlprof-live export --format folded --lines capture.hlprof > stacks.folded
+hlprof-live export --format perfetto --lines \
+  --output trace.json capture.hlprof
 ```
 
 `report` reconstructs metadata revisions and prints aggregate self/inclusive
@@ -160,3 +162,9 @@ FlameGraph-compatible tools. Both modes validate cursor continuity and recover
 all complete records from partial captures, reporting truncation on stderr.
 With `--lines`, reports aggregate source locations and folded frames include
 `file:line` annotations.
+
+Perfetto export produces Chrome Trace Event JSON accepted by Perfetto UI. It
+creates per-runtime-thread sampling events with resolved stacks, leaf source
+locations, and GC stop-the-world state. Custom `hl.Profile.event()` records,
+symbol refreshes, and dropped-record notifications are emitted as timeline
+events on their respective categories.

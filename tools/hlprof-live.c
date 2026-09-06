@@ -160,28 +160,38 @@ static int folded_add( folded_table *table,const char *stack ) {
 }
 static void folded_write( folded_table *table ) {for(int i=0;i<4096;i++)for(folded *e=table->buckets[i];e;e=e->next)printf("%s %llu\n",e->stack,(unsigned long long)e->count);}
 static void folded_free( folded_table *table ){for(int i=0;i<4096;i++){folded *e=table->buckets[i];while(e){folded *next=e->next;free(e->stack);free(e);e=next;}}}
-static int consume( symbols *s,unsigned char *pending,size_t *length,uint64_t *samples,uint64_t *unresolved,folded_table *folded_stacks,int show_lines ) {
+static void json_string( FILE *file,const char *text ){fputc('"',file);for(;*text;text++){unsigned char c=(unsigned char)*text;if(c=='"'||c=='\\'){fputc('\\',file);fputc(c,file);}else if(c=='\n')fputs("\\n",file);else if(c=='\r')fputs("\\r",file);else if(c=='\t')fputs("\\t",file);else if(c<32)fprintf(file,"\\u%04x",c);else fputc(c,file);}fputc('"',file);}
+static void perfetto_begin_event( FILE *file,int *first ){if(!*first)fputc(',',file);*first=0;}
+static int consume( symbols *s,unsigned char *pending,size_t *length,uint64_t *samples,uint64_t *unresolved,folded_table *folded_stacks,int show_lines,FILE *perfetto,int *perfetto_first,double *time_origin,uint32_t pid ) {
 	size_t pos=0;while(*length-pos>=4){uint32_t body=u32(pending+pos);if(body<20||body>(8U<<20))return 0;if(*length-pos<(size_t)body+4)break;
-		if(pending[pos+4]==1){uint32_t frames=u32(pending+pos+20);if(body!=20+frames*8U)return 0;symbol *leaf=NULL;source_line *leaf_line=NULL;char *stack=NULL;size_t stack_len=0,stack_cap=0;(*samples)++;for(uint32_t i=0;i<frames;i++){uint64_t pc=u64(pending+pos+24+i*8);symbol *x=resolve(s,pc);if(x){source_line *line=resolve_line(x,pc);x->total++;if(line)line->total++;if(!leaf){leaf=x;leaf_line=line;}}else(*unresolved)++;}
+		double event_time=0;if(perfetto){uint64_t time_bits=u64(pending+pos+8);memcpy(&event_time,&time_bits,sizeof(event_time));if(*time_origin<0)*time_origin=event_time;}
+		if(pending[pos+4]==1){uint32_t frames=u32(pending+pos+20),tid=u32(pending+pos+16);if(body!=20+frames*8U)return 0;symbol *leaf=NULL;source_line *leaf_line=NULL;char *stack=NULL;size_t stack_len=0,stack_cap=0;(*samples)++;for(uint32_t i=0;i<frames;i++){uint64_t pc=u64(pending+pos+24+i*8);symbol *x=resolve(s,pc);if(x){source_line *line=resolve_line(x,pc);x->total++;if(line)line->total++;if(!leaf){leaf=x;leaf_line=line;}}else(*unresolved)++;}
 			if(leaf)leaf->self++;
 			if(leaf_line)leaf_line->self++;
-			if(folded_stacks){for(uint32_t i=frames;i>0;i--){uint64_t pc=u64(pending+pos+24+(i-1)*8);symbol *x=resolve(s,pc);source_line *line=x?resolve_line(x,pc):NULL;char label[1536];const char *name;if(show_lines&&line){snprintf(label,sizeof(label),"%s (%s:%u)",x->name,line->file,line->line);name=label;}else name=x?x->name:"[unknown]";size_t n=strlen(name),need=stack_len+n+(stack_len?1:0)+1;if(need>stack_cap){size_t cap=stack_cap?stack_cap*2:256;while(cap<need)cap*=2;char *next=(char*)realloc(stack,cap);if(!next){free(stack);return 0;}stack=next;stack_cap=cap;}if(stack_len)stack[stack_len++]=';';memcpy(stack+stack_len,name,n);stack_len+=n;stack[stack_len]=0;}if(stack&&!folded_add(folded_stacks,stack)){free(stack);return 0;}free(stack);}
-		}pos+=body+4;}
+			if(folded_stacks||perfetto){for(uint32_t i=frames;i>0;i--){uint64_t pc=u64(pending+pos+24+(i-1)*8);symbol *x=resolve(s,pc);source_line *line=x?resolve_line(x,pc):NULL;char label[1536];const char *name;if(show_lines&&line){snprintf(label,sizeof(label),"%s (%s:%u)",x->name,line->file,line->line);name=label;}else name=x?x->name:"[unknown]";size_t n=strlen(name),need=stack_len+n+(stack_len?1:0)+1;if(need>stack_cap){size_t cap=stack_cap?stack_cap*2:256;while(cap<need)cap*=2;char *next=(char*)realloc(stack,cap);if(!next){free(stack);return 0;}stack=next;stack_cap=cap;}if(stack_len)stack[stack_len++]=';';memcpy(stack+stack_len,name,n);stack_len+=n;stack[stack_len]=0;}}
+			if(folded_stacks&&stack&&!folded_add(folded_stacks,stack)){free(stack);return 0;}
+			if(perfetto){perfetto_begin_event(perfetto,perfetto_first);fputs("{\"ph\":\"i\",\"s\":\"t\",\"cat\":\"hl.sample\",\"name\":",perfetto);json_string(perfetto,leaf?leaf->name:"sample");fprintf(perfetto,",\"pid\":%u,\"tid\":%u,\"ts\":%.3f,\"args\":{\"stack\":",pid,tid,(event_time-*time_origin)*1000000.0);json_string(perfetto,stack?stack:"");fprintf(perfetto,",\"gc_stop\":%s",(pending[pos+5]&1)?"true":"false");if(leaf_line){fputs(",\"file\":",perfetto);json_string(perfetto,leaf_line->file);fprintf(perfetto,",\"line\":%u",leaf_line->line);}fputs("}}",perfetto);}
+			free(stack);
+		}else if(pending[pos+4]==2&&perfetto){uint32_t tid=u32(pending+pos+16),event_id=u32(pending+pos+20);perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"i\",\"s\":\"t\",\"cat\":\"hl.event\",\"name\":\"event %u\",\"pid\":%u,\"tid\":%u,\"ts\":%.3f,\"args\":{\"payload\":\"",event_id,pid,tid,(event_time-*time_origin)*1000000.0);for(uint32_t i=0;i<body-20;i++)fprintf(perfetto,"%02x",pending[pos+24+i]);fputs("\"}}",perfetto);}
+		pos+=body+4;}
 	if(pos){memmove(pending,pending+pos,*length-pos);*length-=pos;}return 1;
 }
-static void usage( const char *p ){fprintf(stderr,"Usage:\n  %s [--host HOST] [--rate HZ] [--interval MS] [--duration SEC] [--top N] [--lines] [--output FILE] PORT\n  %s report [--top N] [--lines] CAPTURE\n  %s export --format folded [--lines] CAPTURE\n",p,p,p);}
+static void usage( const char *p ){fprintf(stderr,"Usage:\n  %s [--host HOST] [--rate HZ] [--interval MS] [--duration SEC] [--top N] [--lines] [--output FILE] PORT\n  %s report [--top N] [--lines] CAPTURE\n  %s export --format folded [--lines] CAPTURE\n  %s export --format perfetto [--lines] --output FILE CAPTURE\n",p,p,p,p);}
 
-static int offline( int argc,char **argv,int export_folded ) {
-	const char *path=NULL;int top=15,code=1,complete=0,format_seen=0,show_lines=0;FILE *file=NULL;symbols table={0};folded_table folded_stacks={0};unsigned char header[24],record_header[16],*payload=NULL,*pending=NULL;size_t pending_len=0,pending_cap=512*1024;uint64_t samples=0,unresolved=0,dropped=0,cursor=0,last_time=0;int have_cursor=0;
+static int offline( int argc,char **argv,int exporting ) {
+	const char *path=NULL,*output_path=NULL;int top=15,code=1,complete=0,format=0,show_lines=0,perfetto_first=1;FILE *file=NULL,*perfetto=NULL;symbols table={0};folded_table folded_stacks={0};unsigned char header[24],record_header[16],*payload=NULL,*pending=NULL;size_t pending_len=0,pending_cap=512*1024;uint64_t samples=0,unresolved=0,dropped=0,cursor=0,last_time=0,reported_dropped=0;int have_cursor=0;double time_origin=-1;
 	for(int i=2;i<argc;i++){
-		if(!strcmp(argv[i],"--top")&&++i<argc&&!export_folded)top=atoi(argv[i]);
+		if(!strcmp(argv[i],"--top")&&++i<argc&&!exporting)top=atoi(argv[i]);
 		else if(!strcmp(argv[i],"--lines"))show_lines=1;
-		else if(!strcmp(argv[i],"--format")&&++i<argc&&export_folded){if(strcmp(argv[i],"folded")){fprintf(stderr,"Only folded export is supported\n");goto done;}format_seen=1;}
+		else if(!strcmp(argv[i],"--format")&&++i<argc&&exporting){if(!strcmp(argv[i],"folded"))format=1;else if(!strcmp(argv[i],"perfetto"))format=2;else{fprintf(stderr,"Unsupported export format %s\n",argv[i]);goto done;}}
+		else if(!strcmp(argv[i],"--output")&&++i<argc&&exporting)output_path=argv[i];
 		else if(argv[i][0]=='-'||path){usage(argv[0]);goto done;}else path=argv[i];
 	}
-	if(!path||top<=0||(export_folded&&!format_seen)){usage(argv[0]);goto done;}
+	if(!path||top<=0||(exporting&&!format)||(format==2&&!output_path)){usage(argv[0]);goto done;}
+	if(format==2&&!strcmp(path,output_path)){fprintf(stderr,"Perfetto output must differ from the capture path\n");goto done;}
 	file=fopen(path,"rb");if(!file){fprintf(stderr,"Could not open capture %s\n",path);goto done;}
 	if(fread(header,1,24,file)!=24||memcmp(header,"HLPC",4)||u16(header+4)!=1||u16(header+6)!=24){fprintf(stderr,"Invalid or unsupported HLPC capture\n");goto done;}
+	if(format==2){perfetto=fopen(output_path,"wb");if(!perfetto){fprintf(stderr,"Could not open Perfetto output %s\n",output_path);goto done;}fputs("{\"traceEvents\":[",perfetto);}
 	pending=(unsigned char*)malloc(pending_cap);if(!pending)goto done;
 	while(!complete){
 		size_t got=fread(record_header,1,16,file);uint32_t type,size;uint64_t elapsed;
@@ -189,19 +199,20 @@ static int offline( int argc,char **argv,int export_folded ) {
 		if(got!=16){fprintf(stderr,"warning: truncated capture record header\n");break;}
 		type=u32(record_header);size=u32(record_header+4);elapsed=u64(record_header+8);if(size>(64U<<20)||elapsed<last_time){fprintf(stderr,"Malformed capture record\n");goto done;}last_time=elapsed;
 		payload=size?(unsigned char*)malloc(size):NULL;if(size&&(!payload||fread(payload,1,size,file)!=size)){fprintf(stderr,"warning: truncated capture record payload\n");free(payload);payload=NULL;break;}
-		if(type==1){if(!parse_symbols(payload,size,&table)){fprintf(stderr,"Malformed symbol metadata\n");goto done;}}
+		if(type==1){if(!parse_symbols(payload,size,&table)){fprintf(stderr,"Malformed symbol metadata\n");goto done;}if(perfetto){perfetto_begin_event(perfetto,&perfetto_first);fprintf(perfetto,"{\"ph\":\"i\",\"s\":\"g\",\"cat\":\"hl.metadata\",\"name\":\"symbols refreshed\",\"pid\":%u,\"tid\":0,\"ts\":%.3f,\"args\":{\"symbols\":%zu}}",u32(header+12),elapsed/1000.0,table.count);}}
 		else if(type==2){uint64_t requested,next;if(size<24||!table.count){fprintf(stderr,"Malformed sample chunk\n");goto done;}requested=u64(payload);next=u64(payload+8);dropped=u64(payload+16);if((have_cursor&&requested!=cursor)||next<requested){fprintf(stderr,"Non-contiguous capture cursor\n");goto done;}cursor=next;have_cursor=1;
+			if(perfetto&&dropped>reported_dropped){perfetto_begin_event(perfetto,&perfetto_first);fprintf(perfetto,"{\"ph\":\"i\",\"s\":\"g\",\"cat\":\"hl.diagnostics\",\"name\":\"profile records dropped\",\"pid\":%u,\"tid\":0,\"ts\":%.3f,\"args\":{\"dropped\":%llu}}",u32(header+12),elapsed/1000.0,(unsigned long long)(dropped-reported_dropped));reported_dropped=dropped;}
 			if(pending_len+size-24>pending_cap){size_t cap=pending_cap;while(cap<pending_len+size-24)cap*=2;unsigned char *next_buffer=(unsigned char*)realloc(pending,cap);if(!next_buffer){goto done;}pending=next_buffer;pending_cap=cap;}memcpy(pending+pending_len,payload+24,size-24);pending_len+=size-24;
-			if(!consume(&table,pending,&pending_len,&samples,&unresolved,export_folded?&folded_stacks:NULL,show_lines)){fprintf(stderr,"Malformed profiler stream\n");goto done;}
+			if(!consume(&table,pending,&pending_len,&samples,&unresolved,format==1?&folded_stacks:NULL,show_lines,perfetto,&perfetto_first,&time_origin,u32(header+12))){fprintf(stderr,"Malformed profiler stream\n");goto done;}
 		}else if(type==3){if(size!=16||!have_cursor||u64(payload)!=cursor){fprintf(stderr,"Malformed completion record\n");goto done;}dropped=u64(payload+8);complete=1;}
 		free(payload);payload=NULL;
 	}
 	if(!complete)fprintf(stderr,"warning: partial capture; reporting complete records only\n");
 	if(pending_len)fprintf(stderr,"warning: ignored %zu trailing profiler bytes\n",pending_len);
-	if(export_folded)folded_write(&folded_stacks);else report(&table,samples,unresolved,dropped,top,show_lines);
+	if(format==1)folded_write(&folded_stacks);else if(!format)report(&table,samples,unresolved,dropped,top,show_lines);
 	code=0;
 done:
-	free(payload);free(pending);if(file)fclose(file);folded_free(&folded_stacks);free_symbols(&table);return code;
+	free(payload);free(pending);if(file)fclose(file);if(perfetto){fputs("],\"displayTimeUnit\":\"ms\"}\n",perfetto);if(fclose(perfetto)!=0)code=1;}folded_free(&folded_stacks);free_symbols(&table);return code;
 }
 
 int main( int argc,char **argv ) {
@@ -228,7 +239,7 @@ int main( int argc,char **argv ) {
 	while(!interrupted&&(!duration||monotime()-started<duration)){
 		put64(read_body,cursor);put32(read_body+8,256*1024);if(!request(sock,P_READ,id++,read_body,12,&reply,&reply_size)||reply_size<16){fprintf(stderr,"Profiler connection closed\n");goto done;}
 		if(!capture_record_parts(&output,2,read_body,8,reply,reply_size)){fprintf(stderr,"Capture write failed\n");goto done;}cursor=u64(reply);dropped=u64(reply+8);if(pending_len+reply_size-16>512*1024){fprintf(stderr,"Local buffer overflow\n");goto done;}memcpy(pending+pending_len,reply+16,reply_size-16);pending_len+=reply_size-16;free(reply);reply=NULL;
-		if(!consume(&table,pending,&pending_len,&samples,&unresolved,NULL,show_lines)){fprintf(stderr,"Malformed profile record\n");goto done;}
+		if(!consume(&table,pending,&pending_len,&samples,&unresolved,NULL,show_lines,NULL,NULL,NULL,0)){fprintf(stderr,"Malformed profile record\n");goto done;}
 		if(monotime()>=next_metadata){if(!fetch_symbols(sock,&table,id++,&output)){fprintf(stderr,"Metadata refresh failed\n");goto done;}next_metadata=monotime()+5;}
 		if(monotime()>=next_report){report(&table,samples,unresolved,dropped,top,show_lines);samples=unresolved=0;next_report=monotime()+interval/1000.0;}sleep_ms(interval<100?interval:100);
 	}
