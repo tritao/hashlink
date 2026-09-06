@@ -4,6 +4,8 @@
 
 #define HL_RUNTIME_INIT_STABLE_ID 0x7FFF0000
 
+void hl_debug_notify_revision( hl_module *m );
+
 struct _hl_runtime_module {
 	hl_module *module;
 	hl_mutex *lock;
@@ -198,6 +200,7 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 		}
 	}
 	*out = runtime;
+	hl_debug_notify_revision(module);
 	return HL_RUNTIME_OK;
 }
 
@@ -379,7 +382,7 @@ hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const
 	applied = hl_module_apply_patch(runtime->module,patch,&error);
 	hl_patch_free(patch);
 	hl_mutex_release(runtime->lock);
-	if( applied ) return HL_RUNTIME_OK;
+	if( applied ) { hl_debug_notify_revision(runtime->module); return HL_RUNTIME_OK; }
 	if( error != NULL && strcmp(error,"Stale patch revision") == 0 ) return HL_RUNTIME_STALE_PATCH;
 	return HL_RUNTIME_INCOMPATIBLE;
 }

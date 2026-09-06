@@ -22,6 +22,12 @@
 #include <hl.h>
 #include <hlmodule.h>
 #include <stdlib.h>
+#include <stdio.h>
+#ifdef HL_WIN
+#include <windows.h>
+#else
+#include <time.h>
+#endif
 
 struct _hl_socket;
 typedef struct _hl_socket hl_socket;
@@ -40,10 +46,43 @@ static hl_socket *debug_socket = NULL;
 static hl_socket *client_socket = NULL;
 static bool debugger_connected = false;
 static bool debugger_stopped = false;
+static bool debug_protocol3 = false;
+static volatile int debug_pending_revision = 0;
+static volatile int debug_ack_revision = 0;
+static hl_mutex *debug_notify_lock = NULL;
+
+static void debug_trace( const char *event, hl_module *m, int revision, void *address, int value ) {
+	const char *path = getenv("HL_DEBUG_TRACE");
+	FILE *out;
+	if( path == NULL || *path == 0 ) return;
+	out = fopen(path,"a");
+	if( out == NULL ) return;
+	fprintf(out,"{\"component\":\"runtime\",\"event\":\"%s\",\"pid\":%d,\"module\":\"%p\",\"revision\":%d,\"address\":\"%p\",\"value\":%d}\n",event,hl_sys_getpid(),(void*)m,revision,address,value);
+	fclose(out);
+}
 
 #define send hl_send_data
 static void send( void *ptr, int size ) {
 	hl_socket_send(client_socket, ptr, 0, size);
+}
+
+static bool recv_all( hl_socket *s, void *ptr, int size ) {
+	int pos = 0;
+	while( pos < size ) {
+		int count = hl_socket_recv(s,(vbyte*)ptr,pos,size-pos);
+		if( count <= 0 ) return false;
+		pos += count;
+	}
+	return true;
+}
+
+static void debug_wait_tick() {
+#ifdef HL_WIN
+	Sleep(1);
+#else
+	struct timespec delay = {0,1000000};
+	nanosleep(&delay,NULL);
+#endif
 }
 
 static void send_debug_function( hl_function *f, hl_debug_infos *d, int function_index, bool indexed ) {
@@ -99,11 +138,30 @@ static void send_patch_regions( hl_module *m ) {
 static void send_patch_refresh() {
 	int count;
 	hl_module **modules = hl_module_registry_snapshot(&count);
+	debug_trace("map3_sent",NULL,0,NULL,count);
 	send("MAP3",4);
 	send(&count,4);
 	for(int i=0;i<count;i++)
 		send_patch_regions(modules[i]);
 	hl_module_registry_snapshot_free(modules,count);
+}
+
+/* Patch publication calls this before returning to user code. The short REV3
+   record is sent only while the protocol thread is blocked waiting for a
+   command, so it cannot interleave with MAP3. The publisher stays parked until
+   breakpoint mappings have been rebound and the adapter has acknowledged. */
+void hl_debug_notify_revision( hl_module *m ) {
+	if( !debug_protocol3 || debug_notify_lock == NULL || m == NULL ) return;
+	hl_mutex_acquire(debug_notify_lock);
+	if( client_socket == NULL ) { hl_mutex_release(debug_notify_lock); return; }
+	debug_pending_revision = m->revision;
+	debug_trace("rev3_sent",m,m->revision,NULL,0);
+	send("REV3",4);
+	send(&m,sizeof(void*));
+	send(&m->revision,4);
+	hl_mutex_release(debug_notify_lock);
+	while( client_socket != NULL && debug_ack_revision < m->revision ) debug_wait_tick();
+	debug_trace("revision_released",m,m->revision,NULL,0);
 }
 
 static void hl_debug_loop() {
@@ -112,9 +170,8 @@ static void hl_debug_loop() {
 	int hl_ver = HL_VERSION;
 	bool loop = false;
 	int pid = hl_sys_getpid();
-	bool protocol3 = false;
 	const char *protocol = getenv("HL_DEBUG_PROTOCOL");
-	if( protocol && protocol[0] == '3' && protocol[1] == 0 ) protocol3 = true;
+	if( protocol && protocol[0] == '3' && protocol[1] == 0 ) debug_protocol3 = true;
 #	ifdef HL_64
 	flags |= 1;
 #	endif
@@ -131,8 +188,11 @@ static void hl_debug_loop() {
 		vbyte cmd;
 		hl_socket *s = hl_socket_accept(debug_socket);
 		if( s == NULL ) break;
+		debug_ack_revision = debug_pending_revision;
+		hl_mutex_acquire(debug_notify_lock);
 		client_socket = s;
-		send(protocol3 ? "HLD3" : "HLD2",4);
+		hl_mutex_release(debug_notify_lock);
+		send(debug_protocol3 ? "HLD3" : "HLD2",4);
 		send(&flags,4);
 		send(&hl_ver, 4);
 		send(&pid,4);
@@ -159,7 +219,7 @@ static void hl_debug_loop() {
 			send(&m->code->nfunctions,4);
 			for(int j=0;j<m->code->nfunctions;j++)
 				send_debug_function(m->code->functions+j,m->jit_debug+j,j,false);
-			if( protocol3 ) send_patch_regions(m);
+			if( debug_protocol3 ) send_patch_regions(m);
 		}
 		hl_module_registry_snapshot_free(mods,nmodules);
 
@@ -169,14 +229,39 @@ static void hl_debug_loop() {
 		// wait answer
 		// for some reason, this is not working on windows (recv returns 0 ?)
 		hl_socket_recv(s,&cmd,0,1);
-		if( protocol3 ) debugger_connected = true;
-		while( protocol3 && cmd == 'R' ) {
-			send_patch_refresh();
+		if( debug_protocol3 ) debugger_connected = true;
+		while( debug_protocol3 && (cmd == 'R' || cmd == 'A' || cmd == 'B') ) {
+			if( cmd == 'R' )
+				send_patch_refresh();
+			else if( cmd == 'A' ) {
+				if( debug_pending_revision == 0 ) send("ACK3",4);
+				debug_ack_revision = debug_pending_revision;
+				debug_trace("ack3_received",NULL,debug_ack_revision,NULL,0);
+			}
+			else {
+				int count;
+				if( !recv_all(s,&count,4) || count < 0 || count > 65536 ) break;
+				send("BRK3",4);
+				send(&count,4);
+				for(int i=0;i<count;i++) {
+					void *address;
+					unsigned char byte, old;
+					if( !recv_all(s,&address,sizeof(void*)) || !recv_all(s,&byte,1) ) { count = -1; break; }
+					old = *(unsigned char*)address;
+					*(unsigned char*)address = byte;
+					debug_trace("breakpoint_write",NULL,debug_pending_revision,address,byte);
+					send(&old,1);
+				}
+				if( count < 0 ) break;
+			}
 			if( hl_socket_recv(s,&cmd,0,1) <= 0 ) break;
 		}
+		debug_ack_revision = debug_pending_revision;
+		hl_mutex_acquire(debug_notify_lock);
+		client_socket = NULL;
+		hl_mutex_release(debug_notify_lock);
 		hl_socket_close(s);
 		debugger_connected = true;
-		client_socket = NULL;
 	} while( loop );
 	debugger_stopped = true;
 }
@@ -191,6 +276,10 @@ h_bool hl_module_debug( hl_module *m, int port, h_bool wait ) {
 		return false;
 	}
 	debug_socket = s;
+	if( debug_notify_lock == NULL ) {
+		debug_notify_lock = hl_mutex_alloc(false);
+		hl_add_root(&debug_notify_lock);
+	}
 #	ifdef HL_THREADS
 	hl_add_root(&debug_socket);
 	hl_add_root(&client_socket);
