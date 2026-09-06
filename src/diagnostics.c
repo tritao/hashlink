@@ -118,14 +118,14 @@ static unsigned int function_jit_offset( hl_debug_infos *debug, int opcode ) {
 	return debug->large ? (unsigned int)((int*)debug->offsets)[opcode] : (unsigned int)((unsigned short*)debug->offsets)[opcode];
 }
 
-static int function_line_count( hl_code *code, hl_function *function, hl_debug_infos *debug, unsigned int size ) {
-	int count = 0, previous_file = -1, previous_line = -1;
+static int function_location_count( hl_code *code, hl_function *function, hl_debug_infos *debug, unsigned int size ) {
+	int count = 0;
 	if( !code->hasdebug || function->debug == NULL ) return 0;
 	for(int i=0;i<function->nops;i++) {
 		int file = function->debug[i * 2] & 0x7FFFFFFF;
 		int line = function->debug[i * 2 + 1];
-		if( file < 0 || file >= code->ndebugfiles || line <= 0 || function_jit_offset(debug,i) >= size ) continue;
-		if( file != previous_file || line != previous_line ) { count++; previous_file = file; previous_line = line; }
+		unsigned int start = function_jit_offset(debug,i), end = function_jit_offset(debug,i + 1);
+		if( file >= 0 && file < code->ndebugfiles && line > 0 && start < end && start < size ) count++;
 	}
 	return count;
 }
@@ -140,18 +140,21 @@ static void append_function( diag_buffer *buffer, hl_code *code, hl_function *fu
 	buffer_u32(buffer,size);
 	buffer_u32(buffer,length);
 	buffer_bytes(buffer,name,length);
-	line_count = (unsigned int)function_line_count(code,function,debug,size);
+	line_count = (unsigned int)function_location_count(code,function,debug,size);
 	buffer_u32(buffer,line_count);
 	if( line_count ) {
-		int previous_file = -1, previous_line = -1;
 		for(int i=0;i<function->nops;i++) {
 			int file = function->debug[i * 2] & 0x7FFFFFFF;
 			int line = function->debug[i * 2 + 1];
-			if( file < 0 || file >= code->ndebugfiles || line <= 0 || function_jit_offset(debug,i) >= size || (file == previous_file && line == previous_line) ) continue;
-			buffer_u32(buffer,function_jit_offset(debug,i));
+			unsigned int start = function_jit_offset(debug,i), end = function_jit_offset(debug,i + 1);
+			if( file < 0 || file >= code->ndebugfiles || line <= 0 || start >= end || start >= size ) continue;
+			if( end > size ) end = size;
+			buffer_u32(buffer,start);
+			buffer_u32(buffer,end);
+			buffer_u32(buffer,(unsigned int)i);
+			buffer_u32(buffer,(unsigned int)debug->opcodes[i]);
 			buffer_u32(buffer,(unsigned int)file);
 			buffer_u32(buffer,(unsigned int)line);
-			previous_file = file; previous_line = line;
 		}
 	}
 }
@@ -172,7 +175,8 @@ static bool send_metadata( hl_socket *socket, unsigned int request_id ) {
 	diag_buffer buffer = {0};
 	int count;
 	hl_module **modules = hl_module_registry_snapshot(&count);
-	buffer_u32(&buffer,2);
+	/* Schema 3 location: jit_start, jit_end, opcode_index, opcode, file, line. */
+	buffer_u32(&buffer,3);
 	buffer_u32(&buffer,(unsigned int)count);
 	for(int i=0;i<count;i++) {
 		hl_module *module = modules[i];

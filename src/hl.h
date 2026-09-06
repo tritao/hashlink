@@ -328,11 +328,12 @@ C_FUNCTION_END
 
 #ifdef HL_VCC
 #	define HL_NO_RETURN(f) __declspec(noreturn) f
-#	define HL_UNREACHABLE
 #else
 #	define HL_NO_RETURN(f) f __attribute__((noreturn))
-#	define HL_UNREACHABLE __builtin_unreachable()
 #endif
+/* Keep a bad exception-jump callback from turning a violated noreturn
+   contract into undefined control flow (commonly an optimized spin). */
+#define HL_UNREACHABLE abort()
 
 // ---- TYPES -------------------------------------------
 
