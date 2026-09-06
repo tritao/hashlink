@@ -650,6 +650,10 @@ h_bool hl_module_init_vtune( hl_module *m ) {
 	int i;
 	if( !iJIT_IsProfilingActive() || m->jit_debug == NULL )
 		return false;
+	if( m->vtune_method_ids == NULL ) {
+		m->vtune_method_ids = (unsigned int*)calloc(m->code->nfunctions,sizeof(unsigned int));
+		if( m->vtune_method_ids == NULL ) return false;
+	}
 	for(i=0;i<m->code->nfunctions;i++) {
 		hl_function *f = m->code->functions + i;
 		void *faddr = m->functions_ptrs[f->findex];
@@ -658,7 +662,9 @@ h_bool hl_module_init_vtune( hl_module *m ) {
 		iJIT_Method_Load jm = {0};
 		char out[256];
 		if( dbg->offsets == NULL ) continue;
+		if( m->vtune_method_ids[i] != 0 ) continue;
 		jm.method_id = iJIT_GetNewMethodID();
+		m->vtune_method_ids[i] = jm.method_id;
 		if( f->obj ) {
 			jm.class_file_name = hl_to_utf8(f->obj->name);
 			jm.method_name = hl_to_utf8(f->field.name);
@@ -696,6 +702,18 @@ h_bool hl_module_init_vtune( hl_module *m ) {
 		free(lines);
 	}
 	return true;
+}
+
+static void hl_module_free_vtune( hl_module *m ) {
+	if( m->vtune_method_ids == NULL ) return;
+	for(int i=0;i<m->code->nfunctions;i++) {
+		if( m->vtune_method_ids[i] == 0 ) continue;
+		iJIT_Method_Load jm = {0};
+		jm.method_id = m->vtune_method_ids[i];
+		iJIT_NotifyEvent(iJVM_EVENT_TYPE_METHOD_UNLOAD_START,(void*)&jm);
+	}
+	free(m->vtune_method_ids);
+	m->vtune_method_ids = NULL;
 }
 static void modules_init_vtune() {
 	int count;
@@ -1253,14 +1271,17 @@ void hl_module_free( hl_module *m ) {
 		if( hl_is_ptr(m->code->globals[i]) )
 			hl_remove_root(m->globals_data+m->globals_indexes[i]);
 	}
-	hl_free(&m->ctx.alloc);
-	if( m->patch_entry_code ) hl_free_executable_memory(m->patch_entry_code,m->patch_entry_code_size);
-	free(m->patch_targets);
-	hl_free_executable_memory(m->code, m->codesize);
+#ifdef HL_VTUNE
+	hl_module_free_vtune(m);
+#endif
 #ifdef WIN64_UNWIND_TABLES
 	RtlDeleteFunctionTable(m->unwind_table);
 	free(m->unwind_table);
 #endif
+	hl_free(&m->ctx.alloc);
+	if( m->patch_entry_code ) hl_free_executable_memory(m->patch_entry_code,m->patch_entry_code_size);
+	free(m->patch_targets);
+	hl_free_executable_memory(m->code, m->codesize);
 	if( m->hash ) hl_code_hash_free(m->hash);
 	free(m->functions_indexes);
 	free(m->functions_ptrs);

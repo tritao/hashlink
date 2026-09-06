@@ -630,6 +630,7 @@ typedef struct {
 	void* (*get_wrapper)(hl_type* t);
 	void (*profile_event)(int code, vbyte *data, int len);
 	void (*before_exit)();
+	void (*stop_profiler)();
 	void (*free_jit_support)();
 	void (*free_module_registry)();
 	void (*vtune_init)();

@@ -386,6 +386,7 @@ void hl_profile_setup( int sample_count ) {
 	}
 	hl_setup.profile_event = profile_event;
 	hl_setup.before_exit = hl_profile_end;
+	hl_setup.stop_profiler = hl_profile_end;
 	if( data.sample_count ) return;
 	if( sample_count < 0 ) {
 		// was not started with --profile : pause until we get start event
@@ -551,13 +552,17 @@ static void profile_dump( vbyte* ptr ) {
 
 void hl_profile_end() {
 	profile_dump(NULL);
-	if( !data.sample_count ) return;
+	if( !data.sample_count ) {
+		hl_setup.stop_profiler = NULL;
+		return;
+	}
 	data.stopLoop = true;
 	hl_condition_acquire(data.waitCond);
 	data.profiling_pause = 0;
 	hl_condition_broadcast(data.waitCond);
 	hl_condition_release(data.waitCond);
 	while( data.stopLoop ) {};
+	hl_setup.stop_profiler = NULL;
 }
 
 static void profile_event( int code, vbyte *ptr, int dataLen ) {

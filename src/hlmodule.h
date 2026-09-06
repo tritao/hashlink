@@ -229,6 +229,9 @@ typedef struct {
 	int unwind_table_size;
 	PRUNTIME_FUNCTION unwind_table;
 #endif
+#ifdef HL_VTUNE
+	unsigned int *vtune_method_ids;
+#endif
 } hl_module;
 
 HL_EXTERN_C HL_EXPORT hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg );
