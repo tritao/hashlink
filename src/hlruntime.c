@@ -368,14 +368,19 @@ void hl_runtime_module_set_patch_failure_stage( hl_runtime_module *runtime, int 
 	hl_mutex_release(runtime->lock);
 }
 
-void hl_runtime_module_release( hl_runtime_module *runtime ) {
-	if( runtime == NULL ) return;
+hl_runtime_status hl_runtime_module_release( hl_runtime_module *runtime ) {
+	if( runtime == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
 	hl_mutex_acquire(runtime->lock);
-	hl_module_unload(runtime->module);
+	if( !hl_module_retire_try(runtime->module,NULL) ) {
+		hl_mutex_release(runtime->lock);
+		return HL_RUNTIME_RETIRE_BLOCKED;
+	}
+	runtime->module = NULL;
 	hl_mutex_release(runtime->lock);
 	hl_remove_root(&runtime->lock);
 	hl_mutex_free(runtime->lock);
 	free(runtime->stable_ids);
 	free(runtime->slots);
 	free(runtime);
+	return HL_RUNTIME_OK;
 }

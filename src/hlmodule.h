@@ -224,6 +224,8 @@ typedef struct {
 	int patch_type_allocation_capacity;
 	int patch_failure_stage;
 	int registry_readers;
+	bool retiring;
+	bool roots_detached;
 	hl_module_context ctx;
 #ifdef WIN64_UNWIND_TABLES
 	int unwind_table_size;
@@ -283,6 +285,10 @@ typedef struct {
 	int registry_readers;
 	int flags;
 } hl_module_retirement_status;
+/** Unpublish a module and detach its owned roots. Safe to call repeatedly. */
+HL_EXTERN_C HL_EXPORT void hl_module_retire_prepare( hl_module *m );
+/** Reclaim a prepared module when no tracked borrower remains. */
+HL_EXTERN_C HL_EXPORT h_bool hl_module_retire_try( hl_module *m, hl_module_retirement_status *status );
 /** Snapshot known module-owned resources and borrowers. The caller must quiesce calls. */
 HL_EXTERN_C HL_EXPORT void hl_module_retirement_status_get( hl_module *m, hl_module_retirement_status *out );
 h_bool hl_module_debug( hl_module *m, int port, h_bool wait );
@@ -294,7 +300,7 @@ typedef struct _hl_runtime_module hl_runtime_module;
 typedef enum {
 	HL_RUNTIME_OK = 0, HL_RUNTIME_BAD_ARGUMENT, HL_RUNTIME_BAD_FORMAT,
 	HL_RUNTIME_STALE_PATCH, HL_RUNTIME_INCOMPATIBLE, HL_RUNTIME_JIT_FAILED,
-	HL_RUNTIME_BAD_FUNCTION, HL_RUNTIME_EXCEPTION
+	HL_RUNTIME_BAD_FUNCTION, HL_RUNTIME_EXCEPTION, HL_RUNTIME_RETIRE_BLOCKED
 } hl_runtime_status;
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int stable_id, int *result, vdynamic **exception );
@@ -319,7 +325,7 @@ HL_EXTERN_C HL_EXPORT int hl_runtime_module_native_root_count( hl_runtime_module
 HL_EXTERN_C HL_EXPORT void hl_runtime_module_retirement_status_get( hl_runtime_module *runtime, hl_module_retirement_status *out );
 /** Test hook: fail the next patch at a staging boundary (1..3), or disable with 0. */
 HL_EXTERN_C HL_EXPORT void hl_runtime_module_set_patch_failure_stage( hl_runtime_module *runtime, int stage );
-HL_EXTERN_C HL_EXPORT void hl_runtime_module_release( hl_runtime_module *runtime );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_release( hl_runtime_module *runtime );
 
 void hl_profile_setup( int sample_count );
 void hl_profile_end();

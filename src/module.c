@@ -1282,10 +1282,10 @@ h_bool hl_module_patch( hl_module *m1, hl_code *c ) {
 
 void hl_module_free( hl_module *m ) {
 	hl_module_patch_release_all(m);
-	for(int i=0;i<m->code->nglobals;i++) {
-		if( hl_is_ptr(m->code->globals[i]) )
-			hl_remove_root(m->globals_data+m->globals_indexes[i]);
-	}
+	if( !m->roots_detached )
+		for(int i=0;i<m->code->nglobals;i++)
+			if( hl_is_ptr(m->code->globals[i]) )
+				hl_remove_root(m->globals_data+m->globals_indexes[i]);
 #ifdef HL_VTUNE
 	hl_module_free_vtune(m);
 #endif
@@ -1295,7 +1295,7 @@ void hl_module_free( hl_module *m ) {
 #endif
 	if( m->patch_entry_code ) hl_free_executable_memory(m->patch_entry_code,m->patch_entry_code_size);
 	free(m->patch_targets);
-	hl_free_executable_memory(m->code, m->codesize);
+	hl_free_executable_memory(m->jit_code, m->codesize);
 	if( m->hash ) hl_code_hash_free(m->hash);
 	free(m->functions_indexes);
 	free(m->functions_ptrs);
@@ -1324,27 +1324,46 @@ void hl_module_free( hl_module *m ) {
 	free(m);
 }
 
-h_bool hl_module_unload( hl_module *m ) {
+void hl_module_retire_prepare( hl_module *m ) {
 	int i;
-	if( m == NULL ) return false;
+	if( m == NULL || m->retiring ) return;
+	m->retiring = true;
 	module_registry_init();
 	hl_mutex_acquire(modules_lock);
 	for(i=0;i<modules_count;i++)
 		if( cur_modules[i] == m ) break;
-	if( i == modules_count ) {
-		hl_mutex_release(modules_lock);
-		return false;
-	}
-	for(;i<modules_count-1;i++) cur_modules[i] = cur_modules[i+1];
-	modules_count--;
-	if( modules_count == 0 ) {
-		free(cur_modules);
-		cur_modules = NULL;
-	} else {
-		hl_module **resized = (hl_module**)realloc(cur_modules,sizeof(hl_module*) * modules_count);
-		if( resized != NULL ) cur_modules = resized;
+	if( i < modules_count ) {
+		for(;i<modules_count-1;i++) cur_modules[i] = cur_modules[i+1];
+		modules_count--;
+		if( modules_count == 0 ) {
+			free(cur_modules);
+			cur_modules = NULL;
+		} else {
+			hl_module **resized = (hl_module**)realloc(cur_modules,sizeof(hl_module*) * modules_count);
+			if( resized != NULL ) cur_modules = resized;
+		}
 	}
 	hl_mutex_release(modules_lock);
+	for(i=0;i<m->code->nglobals;i++)
+		if( hl_is_ptr(m->code->globals[i]) )
+			hl_remove_root(m->globals_data+m->globals_indexes[i]);
+	m->roots_detached = true;
+}
+
+h_bool hl_module_retire_try( hl_module *m, hl_module_retirement_status *status ) {
+	hl_module_retirement_status current;
+	if( m == NULL ) return false;
+	hl_module_retire_prepare(m);
+	hl_module_retirement_status_get(m,&current);
+	if( status != NULL ) *status = current;
+	if( current.live_managed_allocations > 0 || current.registry_readers > 0 ) return false;
+	hl_module_free(m);
+	return true;
+}
+
+h_bool hl_module_unload( hl_module *m ) {
+	if( m == NULL ) return false;
+	hl_module_retire_prepare(m);
 	for(;;) {
 		hl_mutex_acquire(modules_lock);
 		int readers = m->registry_readers;
