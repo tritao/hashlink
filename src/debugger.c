@@ -65,6 +65,7 @@ static void send_debug_function( hl_function *f, hl_debug_infos *d, int function
 
 static void send_patch_regions( hl_module *m ) {
 	int count = hl_module_patch_debug_region_count(m);
+	send(&m,sizeof(void*));
 	send(&m->revision,4);
 	send(&count,4);
 	for(int i=0;i<count;i++) {
@@ -91,10 +92,8 @@ static void send_patch_refresh() {
 	hl_module **modules = hl_module_registry_snapshot(&count);
 	send("MAP3",4);
 	send(&count,4);
-	for(int i=0;i<count;i++) {
-		send(&modules[i],sizeof(void*));
+	for(int i=0;i<count;i++)
 		send_patch_regions(modules[i]);
-	}
 	hl_module_registry_snapshot_free(modules,count);
 }
 
