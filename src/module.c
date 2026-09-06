@@ -1278,7 +1278,6 @@ void hl_module_free( hl_module *m ) {
 	RtlDeleteFunctionTable(m->unwind_table);
 	free(m->unwind_table);
 #endif
-	hl_free(&m->ctx.alloc);
 	if( m->patch_entry_code ) hl_free_executable_memory(m->patch_entry_code,m->patch_entry_code_size);
 	free(m->patch_targets);
 	hl_free_executable_memory(m->code, m->codesize);
@@ -1306,6 +1305,7 @@ void hl_module_free( hl_module *m ) {
 	}
 	if( m->jit_ctx )
 		hl_jit_free(m->jit_ctx,false);
+	hl_free(&m->ctx.alloc);
 	free(m);
 }
 
