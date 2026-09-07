@@ -114,8 +114,10 @@ static void send_patch_regions( hl_module *m ) {
 	send(&m->jit_code,sizeof(void*));
 	send(&m->codesize,4);
 	send(&m->code->nfunctions,4);
-	for(int i=0;i<m->code->nfunctions;i++)
+	for(int i=0;i<m->code->nfunctions;i++) {
 		send_debug_function(m->code->functions+i,m->jit_debug+i,i,false,true,m->code->function_stable_ids[i]);
+		int span_count = 0; send(&span_count,4);
+	}
 	send(&count,4);
 	for(int i=0;i<count;i++) {
 		hl_patch_debug_region region;
@@ -132,6 +134,16 @@ static void send_patch_regions( hl_module *m ) {
 			hl_debug_infos *debug;
 			if( !hl_module_patch_debug_function_get(m,i,j,&function_index,&function,&debug) ) return;
 			send_debug_function(function,debug,function_index,true,true,m->code->function_stable_ids[function_index]);
+			int first_start,first_end,first_flags;
+			int span_count = function->nops > 0 && hl_module_patch_debug_source_span_get(m,i,j,0,&first_start,&first_end,&first_flags) ? function->nops : 0;
+			send(&span_count,4);
+			for(int opcode=0;opcode<span_count;opcode++) {
+				int start,end,flags;
+				if( opcode == 0 ) { start=first_start; end=first_end; flags=first_flags; }
+				else if( !hl_module_patch_debug_source_span_get(m,i,j,opcode,&start,&end,&flags) ) return;
+				send(function->debug+opcode*2,4); send(function->debug+opcode*2+1,4);
+				send(&start,4); send(&end,4); send(&flags,4);
+			}
 		}
 	}
 }
