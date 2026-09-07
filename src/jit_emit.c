@@ -1546,7 +1546,7 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 	case OGetGlobal:
 		{
 			int offs = m->globals_indexes[o->p2];
-			STORE(dst, LOAD_MEM_PTR(LOAD_CONST_PTR(m->globals_data),offs));
+			STORE(dst, LOAD_MEM(LOAD_CONST_PTR(m->globals_data),offs,dst->t));
 		}
 		break;
 	case OSetGlobal:
