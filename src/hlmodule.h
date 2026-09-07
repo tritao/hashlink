@@ -74,6 +74,14 @@ typedef struct {
 	int *fields;
 } hl_constant;
 
+typedef struct {
+	int kind;
+	int version;
+	int flags;
+	int size;
+	unsigned char *data;
+} hl_debug_section;
+
 /* Extra contiguous type slots reserved at load time for non-moving patch metadata. */
 #define HL_PATCH_TYPE_RESERVE 65536
 
@@ -89,6 +97,7 @@ typedef struct {
 	int nnatives;
 	int nfunctions;
 	int nconstants;
+	int ndebugsections;
 	int entrypoint;
 	int ndebugfiles;
 	bool hasdebug;
@@ -105,7 +114,9 @@ typedef struct {
 	hl_type**	globals;
 	hl_native*	natives;
 	hl_function*functions;
+	int*        function_stable_ids;
 	hl_constant*constants;
+	hl_debug_section*debugsections;
 	hl_alloc	alloc;
 	hl_alloc	falloc;
 } hl_code;

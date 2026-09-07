@@ -344,6 +344,29 @@ static void hl_read_function( hl_reader *r, hl_function *f ) {
 		hl_read_opcode(r, f, f->ops+i);
 }
 
+static void hl_read_function_identities( hl_reader *r, const unsigned char *data, int size ) {
+	hl_reader section = { data, size, 0, 0, r->code };
+	hl_reader *s = &section;
+	int count = hl_read_uindex(s);
+	for(int i=0;i<count;i++) {
+		int stable_id = hl_read_uindex(s);
+		int function_index = hl_read_uindex(s);
+		int target = -1;
+		for(int j=0;j<r->code->nfunctions;j++) if(r->code->functions[j].findex == function_index) { target = j; break; }
+		for(int field=0;field<3;field++) {
+			int length = hl_read_uindex(s);
+			if( length < 0 || s->pos + length > s->size ) { ERROR("Invalid function identity string"); return; }
+			s->pos += length;
+		}
+		(void)hl_read_index(s); (void)hl_read_index(s);
+		(void)hl_read_uindex(s); (void)hl_read_uindex(s);
+		for(int j=0;j<r->code->nfunctions;j++) if(r->code->function_stable_ids[j] == stable_id) { ERROR("Duplicate stable function identity"); return; }
+		if( s->error || target < 0 || r->code->function_stable_ids[target] >= 0 ) { ERROR("Invalid function identity"); return; }
+		r->code->function_stable_ids[target] = stable_id;
+	}
+	if( s->pos != s->size ) ERROR("Trailing function identity data");
+}
+
 static const char *hl_validate_function_control_flow( hl_function *f ) {
 	for( int i = 0; i < f->nops; i++ ) {
 		hl_opcode *op = f->ops + i;
@@ -454,7 +477,7 @@ hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg ) {
 	hl_alloc alloc;
 	int i;
 	int flags;
-	int max_version = 6;
+	int max_version = 7;
 	hl_alloc_init(&alloc);
 	c = hl_zalloc(&alloc,sizeof(hl_code));
 	c->alloc = alloc;
@@ -527,6 +550,8 @@ hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg ) {
 	}
 	CHK_ERROR();
 	ALLOC(c->functions, hl_function, c->nfunctions);
+	ALLOC(c->function_stable_ids, int, c->nfunctions);
+	for(i=0;i<c->nfunctions;i++) c->function_stable_ids[i] = -1;
 	for(i=0;i<c->nfunctions;i++) {
 		hl_read_function(r,c->functions+i);
 		CHK_ERROR();
@@ -562,6 +587,28 @@ hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg ) {
 			k->fields[j] = UINDEX();
 		CHK_ERROR();
 	}
+	if( c->version >= 7 ) {
+		c->ndebugsections = UINDEX();
+		CHK_ERROR();
+		ALLOC(c->debugsections, hl_debug_section, c->ndebugsections);
+		for(i=0;i<c->ndebugsections;i++) {
+			hl_debug_section *s = c->debugsections + i;
+			s->kind = UINDEX();
+			s->version = UINDEX();
+			s->flags = UINDEX();
+			s->size = UINDEX();
+			CHK_ERROR();
+			if( s->kind <= 0 || s->version <= 0 ) EXIT("Invalid debug section header");
+			s->data = hl_malloc(&c->alloc,s->size);
+			hl_read_bytes(r,s->data,s->size);
+			CHK_ERROR();
+			if( s->kind == 1 && s->version == 1 ) {
+				hl_read_function_identities(r,s->data,s->size);
+				CHK_ERROR();
+			}
+		}
+	}
+	for(i=0;i<c->nfunctions;i++) if( c->function_stable_ids[i] < 0 ) c->function_stable_ids[i] = c->functions[i].findex;
 	return c;
 }
 

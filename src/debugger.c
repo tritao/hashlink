@@ -85,7 +85,7 @@ static void debug_wait_tick() {
 #endif
 }
 
-static void send_debug_function( hl_function *f, hl_debug_infos *d, int function_index, bool indexed ) {
+static void send_debug_function( hl_function *f, hl_debug_infos *d, int function_index, bool indexed, bool include_stable_id, int stable_id ) {
 	struct {
 		int nops;
 		int start;
@@ -93,6 +93,7 @@ static void send_debug_function( hl_function *f, hl_debug_infos *d, int function
 		unsigned char large;
 	} fdata;
 	if( indexed ) send(&function_index,4);
+	if( include_stable_id ) send(&stable_id,4);
 	fdata.nops = f->nops;
 	fdata.start = d->start;
 	fdata.vars_size = d->vars_size;
@@ -114,7 +115,7 @@ static void send_patch_regions( hl_module *m ) {
 	send(&m->codesize,4);
 	send(&m->code->nfunctions,4);
 	for(int i=0;i<m->code->nfunctions;i++)
-		send_debug_function(m->code->functions+i,m->jit_debug+i,i,false);
+		send_debug_function(m->code->functions+i,m->jit_debug+i,i,false,true,m->code->function_stable_ids[i]);
 	send(&count,4);
 	for(int i=0;i<count;i++) {
 		hl_patch_debug_region region;
@@ -130,7 +131,7 @@ static void send_patch_regions( hl_module *m ) {
 			hl_function *function;
 			hl_debug_infos *debug;
 			if( !hl_module_patch_debug_function_get(m,i,j,&function_index,&function,&debug) ) return;
-			send_debug_function(function,debug,function_index,true);
+			send_debug_function(function,debug,function_index,true,true,m->code->function_stable_ids[function_index]);
 		}
 	}
 }
@@ -218,7 +219,7 @@ static void hl_debug_loop() {
 			send(&m->code->types,sizeof(void*));
 			send(&m->code->nfunctions,4);
 			for(int j=0;j<m->code->nfunctions;j++)
-				send_debug_function(m->code->functions+j,m->jit_debug+j,j,false);
+				send_debug_function(m->code->functions+j,m->jit_debug+j,j,false,false,-1);
 			if( debug_protocol3 ) send_patch_regions(m);
 		}
 		hl_module_registry_snapshot_free(mods,nmodules);
