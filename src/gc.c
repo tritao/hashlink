@@ -1417,6 +1417,14 @@ HL_API void hl_gc_stats( double *total_allocated, double *allocation_count, doub
 	*current_memory = (double)gc_stats.pages_total_memory;
 }
 
+HL_API void hl_gc_profile_stats( unsigned long long *allocated, unsigned long long *allocations, unsigned long long *heap, unsigned long long *collections, unsigned long long *mark_micros ) {
+	*allocated = (unsigned long long)gc_stats.total_allocated;
+	*allocations = (unsigned long long)gc_stats.allocation_count;
+	*heap = (unsigned long long)gc_stats.pages_total_memory;
+	*collections = (unsigned long long)gc_stats.mark_count;
+	*mark_micros = (unsigned long long)gc_stats.mark_time;
+}
+
 HL_API void hl_gc_enable( bool b ) {
 	gc_is_active = b;
 }

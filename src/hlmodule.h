@@ -329,6 +329,7 @@ void hl_profile_stream_status( unsigned long long *first, unsigned long long *ne
 unsigned int hl_profile_stream_read( unsigned long long cursor, void *output, unsigned int capacity, unsigned long long *next, unsigned long long *dropped );
 bool hl_profile_stream_configure( int sample_rate, bool enabled );
 void hl_profile_stream_notify_revision( unsigned long long module_id, int revision );
+HL_API void hl_gc_profile_stats( unsigned long long *allocated, unsigned long long *allocations, unsigned long long *heap, unsigned long long *collections, unsigned long long *mark_micros );
 hl_type *hl_module_resolve_type( hl_module *m, hl_type *t, bool err );
 HL_EXTERN_C HL_EXPORT hl_module **hl_module_registry_snapshot( int *count );
 HL_EXTERN_C HL_EXPORT void hl_module_registry_snapshot_free( hl_module **modules, int count );

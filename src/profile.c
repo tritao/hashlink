@@ -19,11 +19,15 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+#ifndef _WIN32
+#define _GNU_SOURCE
+#endif
 #include <hl.h>
 #include <hlmodule.h>
 #include "hlsystem.h"
 
 #ifdef HL_LINUX
+#include <dlfcn.h>
 #include <semaphore.h>
 #include <signal.h>
 #include <sys/syscall.h>
@@ -117,6 +121,37 @@ static struct {
 enum { PROFILE_STREAM_SAMPLE = 1, PROFILE_STREAM_EVENT = 2 };
 #define PROFILE_EVENT_MODULE_REVISION 0x484C0001
 #define PROFILE_EVENT_THREAD_NAME 0x484C0002
+#define PROFILE_EVENT_GC_STATS 0x484C0003
+#define PROFILE_EVENT_NATIVE_SYMBOL 0x484C0004
+
+static unsigned long long native_seen[4096];
+static void stream_write_u32( unsigned char *p, unsigned int value );
+static void stream_write_u64( unsigned char *p, unsigned long long value );
+static void stream_record( int kind, int flags, double time, int tid, int value, const void *payload, unsigned int payload_size );
+
+static void stream_native_symbol( void *address, double time, int tid ) {
+#if defined(HL_LINUX) || defined(HL_MAC)
+	unsigned long long pc = (unsigned long long)(uintptr_t)address;
+	unsigned int slot = (unsigned int)((pc >> 4) & 4095);
+	Dl_info info;
+	if( native_seen[slot] == pc || !dladdr(address,&info) || info.dli_sname == NULL ) return;
+	native_seen[slot] = pc;
+	{
+		const char *module = info.dli_fname ? info.dli_fname : "[native]";
+		unsigned int module_len = (unsigned int)strlen(module), symbol_len = (unsigned int)strlen(info.dli_sname);
+		unsigned int size = 24 + module_len + symbol_len;
+		unsigned char *payload = malloc(size);
+		if( payload == NULL ) return;
+		stream_write_u64(payload,pc); stream_write_u64(payload + 8,(unsigned long long)(uintptr_t)info.dli_saddr);
+		stream_write_u32(payload + 16,module_len); stream_write_u32(payload + 20,symbol_len);
+		memcpy(payload + 24,module,module_len); memcpy(payload + 24 + module_len,info.dli_sname,symbol_len);
+		stream_record(PROFILE_STREAM_EVENT,0,time,tid,PROFILE_EVENT_NATIVE_SYMBOL,payload,size);
+		free(payload);
+	}
+#else
+	(void)address; (void)time; (void)tid;
+#endif
+}
 
 static void stream_write_u32( unsigned char *p, unsigned int value ) {
 	p[0] = (unsigned char)value; p[1] = (unsigned char)(value >> 8);
@@ -352,12 +387,25 @@ static void read_thread_data( thread_handle *t ) {
 
 	int count = hl_module_capture_stack_range((char*)data.tmpMemory+size, (void**)data.tmpMemory, data.stackOut, MAX_STACK_COUNT);
 #endif
+	/* Stack scanning finds managed return addresses; preserve a native instruction
+	   pointer as the leaf when the thread was interrupted inside a shared library. */
+#if defined(HL_LINUX) || defined(HL_MAC)
+	{
+		Dl_info native_leaf;
+		if( eip && count < MAX_STACK_COUNT && dladdr(eip,&native_leaf) && native_leaf.dli_sname ) {
+			memmove(data.stackOut + 1,data.stackOut,sizeof(void*) * count);
+			data.stackOut[0] = eip;
+			count++;
+		}
+	}
+#endif
 	int eventId = count | 0x80000000;
 	double time = hl_sys_time();
 	hl_threads_info *gc = hl_gc_threads_info();
 	if( gc->stopping_world ) eventId |= 0x40000000;
 	{
 		unsigned char frames[MAX_STACK_COUNT * 8];
+		for(int i=0;i<count;i++) stream_native_symbol(data.stackOut[i],time,t->tid);
 		for(int i=0;i<count;i++) stream_write_u64(frames + i * 8,(unsigned long long)(uintptr_t)data.stackOut[i]);
 		stream_record(PROFILE_STREAM_SAMPLE,gc->stopping_world ? 1 : 0,time,t->tid,count,frames,count * 8);
 	}
@@ -394,10 +442,18 @@ static void profile_resume() {
 
 static void hl_profile_loop( void *_ ) {
 	double next = hl_sys_time();
+	double next_gc_stats = next;
 	data.tmpMemory = malloc(MAX_STACK_SIZE);
 	data.waitLoop = false;
 	while( !data.stopLoop ) {
 		double t = hl_sys_time();
+		if( t >= next_gc_stats ) {
+			unsigned long long values[5]; unsigned char payload[40];
+			hl_gc_profile_stats(values,values+1,values+2,values+3,values+4);
+			for(int stat=0;stat<5;stat++) stream_write_u64(payload + stat * 8,values[stat]);
+			stream_record(PROFILE_STREAM_EVENT,0,t,0,PROFILE_EVENT_GC_STATS,payload,sizeof(payload));
+			next_gc_stats = t + 1.0;
+		}
 		hl_condition_acquire(data.waitCond);
 		if( t < next || data.profiling_pause ) {
 			if( !(t < next) ) next = t;
