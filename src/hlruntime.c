@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define HL_RUNTIME_INIT_STABLE_ID 0x7FFF0000
+#define HL_RUNTIME_INIT_STABLE_ID 0x1FFFFFFF
 
 void hl_debug_notify_revision( hl_module *m );
 
