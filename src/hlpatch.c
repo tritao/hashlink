@@ -15,6 +15,8 @@ struct _hl_patch_code {
 	int jit_debug_count;
 	hl_debug_infos *jit_debug;
 	hl_source_span **debug_spans;
+	int source_snapshot_count;
+	hl_source_snapshot *source_snapshots;
 	hl_patch_code *next_retired;
 };
 
@@ -43,6 +45,8 @@ static void patch_code_free( hl_patch_code *code ) {
 	for(int i=0;i<code->jit_debug_count;i++){free(code->jit_debug[i].offsets);free(code->jit_debug[i].vars);free(code->jit_debug[i].opcodes);}
 	free(code->jit_debug);
 	free(code->debug_spans);
+	for(int i=0;i<code->source_snapshot_count;i++) free(code->source_snapshots[i].content);
+	free(code->source_snapshots);
 	if(code->code) hl_free_executable_memory(code->code,code->code_size);
 	free(code->functions);
 	free(code);
@@ -176,6 +180,20 @@ bool hl_module_patch_debug_source_span_get( hl_module *m, int region, int functi
 	if( owner == NULL || function < 0 || function >= owner->function_count || opcode < 0 || opcode >= owner->functions[function].nops
 		|| owner->debug_spans == NULL || owner->debug_spans[function] == NULL || out == NULL ) return false;
 	*out = owner->debug_spans[function][opcode];
+	return true;
+}
+
+int hl_module_patch_debug_source_snapshot_count( hl_module *m, int region ) {
+	bool retired;
+	hl_patch_code *owner = patch_debug_region_at(m,region,&retired);
+	return owner == NULL ? 0 : owner->source_snapshot_count;
+}
+
+bool hl_module_patch_debug_source_snapshot_get( hl_module *m, int region, int snapshot, hl_source_snapshot *out ) {
+	bool retired;
+	hl_patch_code *owner = patch_debug_region_at(m,region,&retired);
+	if( owner == NULL || snapshot < 0 || snapshot >= owner->source_snapshot_count || out == NULL ) return false;
+	*out = owner->source_snapshots[snapshot];
 	return true;
 }
 
@@ -351,6 +369,8 @@ void hl_patch_free( hl_patch *patch ) {
 	for(i=0;i<patch->type_count;i++) if(patch->types[i].tag==HFUN) free(patch->types[i].data.fun.arguments);
 	free(patch->types);
 	for(i=0;i<patch->debug_file_count;i++) free(patch->debug_files[i]);
+	for(i=0;i<patch->source_snapshot_count;i++) free(patch->source_snapshots[i].content);
+	free(patch->source_snapshots);
 	free(patch->debug_files); free(patch->debug_file_lens); free(patch->functions); free(patch->strings); free(patch->string_lens); free(patch->floats); free(patch->ints); free(patch);
 }
 
@@ -358,13 +378,13 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 	patch_reader r = { data, data + (size < 0 ? 0 : size), NULL };
 	hl_patch *patch = (hl_patch*)calloc(1,sizeof(hl_patch));
 	const unsigned char *p; int version, i, j, count, tag, section_count, section_length;
-	bool have_symbols = false, have_functions = false, have_debug = false;
+	bool have_symbols = false, have_functions = false, have_debug = false, have_snapshots = false;
 #define FAIL(msg) do { r.error = msg; goto fail; } while(0)
 	if( patch == NULL ) FAIL("Out of memory reading HLP");
 	if( !take(&r,3,&p) ) goto fail;
 	if( memcmp(p,"HLP",3) != 0 ) FAIL("Invalid HLP magic");
 	if( !read_byte(&r,&version) ) goto fail;
-	if( version != 6 ) FAIL("Unsupported HLP version");
+	if( version != 7 ) FAIL("Unsupported HLP version");
 	if( !take(&r,16,&p) ) goto fail;
 	memcpy(patch->module_id,p,16);
 	if( !read_count(&r,&patch->base_revision) || !read_count(&r,&patch->revision) ) goto fail;
@@ -423,6 +443,21 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 						||(span->end_line==span->line&&span->end_column<span->column)
 						||!((span->start==-1&&span->end==-1)||(span->start>=0&&span->end>=span->start)))FAIL("Invalid HLP debug location");
 				}
+			}
+		} else if( tag == 4 ) {
+			if( have_snapshots ) FAIL("Duplicate HLP source snapshot section");
+			have_snapshots=true;
+			if(!read_count(&s,&patch->source_snapshot_count))goto section_fail;
+			patch->source_snapshots=(hl_source_snapshot*)calloc(patch->source_snapshot_count,sizeof(hl_source_snapshot));
+			if(patch->source_snapshot_count&&!patch->source_snapshots)FAIL("Out of memory reading source snapshots");
+			for(i=0;i<patch->source_snapshot_count;i++) {
+				hl_source_snapshot *snapshot=patch->source_snapshots+i;const unsigned char *content;unsigned int hash=2166136261u;
+				if(!read_i32(&s,&snapshot->source_hash)||snapshot->source_hash==0||!read_count(&s,&snapshot->length)||!take(&s,snapshot->length,&content))goto section_fail;
+				for(j=0;j<i;j++)if(patch->source_snapshots[j].source_hash==snapshot->source_hash)FAIL("Duplicate HLP source snapshot");
+				for(j=0;j<snapshot->length;j++){hash^=content[j];hash*=16777619u;}
+				if((int)hash!=snapshot->source_hash)FAIL("Invalid HLP source snapshot hash");
+				snapshot->content=(unsigned char*)malloc(snapshot->length);if(snapshot->length&&!snapshot->content)FAIL("Out of memory reading source snapshot");
+				memcpy(snapshot->content,content,snapshot->length);
 			}
 		} else {
 			s.p = s.end;
@@ -606,6 +641,10 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	if(inject_patch_failure(m,2,&error))goto fail;
 	allocation=(hl_patch_code*)calloc(1,sizeof(hl_patch_code));if(!allocation){error="Out of memory applying patch";goto fail;}
 	allocation->revision=patch->revision;
+	allocation->source_snapshot_count=patch->source_snapshot_count;
+	allocation->source_snapshots=(hl_source_snapshot*)calloc(patch->source_snapshot_count,sizeof(hl_source_snapshot));
+	if(patch->source_snapshot_count&&!allocation->source_snapshots){error="Out of memory applying source snapshots";goto fail;}
+	for(int i=0;i<patch->source_snapshot_count;i++){allocation->source_snapshots[i]=patch->source_snapshots[i];allocation->source_snapshots[i].content=(unsigned char*)malloc(patch->source_snapshots[i].length);if(patch->source_snapshots[i].length&&!allocation->source_snapshots[i].content){error="Out of memory applying source snapshot";goto fail;}memcpy(allocation->source_snapshots[i].content,patch->source_snapshots[i].content,patch->source_snapshots[i].length);}
 	allocation->function_count=patch->function_count;allocation->functions=(hl_function*)calloc(patch->function_count,sizeof(hl_function));allocation->debug_spans=(hl_source_span**)calloc(patch->function_count,sizeof(hl_source_span*));
 	offsets=(int*)calloc(patch->function_count,sizeof(int));if(!allocation->functions||!allocation->debug_spans||!offsets){error="Out of memory applying patch";goto fail;}
 	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;dst->type=m->code->types+src->type;dst->findex=src->findex;dst->nregs=src->register_count;dst->nops=src->instruction_count;dst->regs=(hl_type**)calloc(dst->nregs,sizeof(hl_type*));dst->ops=(hl_opcode*)calloc(dst->nops,sizeof(hl_opcode));if(!dst->regs||!dst->ops){error="Out of memory applying patch";goto fail;}for(int j=0;j<dst->nregs;j++)dst->regs[j]=m->code->types+src->registers[j];for(int j=0;j<dst->nops;j++){hl_patch_instruction *s=src->instructions+j;hl_opcode *d=dst->ops+j;d->op=(hl_op)s->opcode;if(s->operand_count>0)d->p1=s->operands[0];if(s->operand_count>1)d->p2=s->operands[1];if(s->operand_count>2)d->p3=s->operands[2];if(s->operand_count==4&&d->op!=OCallN&&d->op!=OCallMethod&&d->op!=OCallThis&&d->op!=OCallClosure&&d->op!=OMakeEnum)d->extra=(int*)(int_val)s->operands[3];if(s->operand_count>3&&(d->op==OCall3||d->op==OCall4||d->op==OCallN||d->op==OCallMethod||d->op==OCallThis||d->op==OCallClosure||d->op==OMakeEnum)){int count=d->op==OCall3?2:d->op==OCall4?3:s->operand_count-3;d->extra=(int*)malloc(sizeof(int)*count);if(!d->extra){error="Out of memory applying patch";goto fail;}memcpy(d->extra,s->operands+3,sizeof(int)*count);}}}
