@@ -1642,7 +1642,9 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 		if( o->p1 == 0 ) add_jump_target(ctx, 0);
 		break;
 	case OToDyn:
-		if( ra->t->kind == HBOOL ) {
+		if( hl_is_dynamic(ra->t) ) {
+			STORE(dst, LOAD(ra));
+		} else if( ra->t->kind == HBOOL ) {
 			ereg arg = LOAD(ra);
 			uint64 cval;
 			if( emit_get_const(ctx, arg, &cval) )
