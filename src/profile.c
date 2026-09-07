@@ -69,6 +69,7 @@
 HL_API double hl_sys_time( void );
 int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out, int size );
 uchar *hl_module_resolve_symbol_full( void *addr, uchar *out, int *outSize, int **r_debug_addr );
+bool hl_module_is_jit_code( void *addr );
 
 typedef struct _thread_handle thread_handle;
 typedef struct _profile_data profile_data;
@@ -130,11 +131,39 @@ enum { PROFILE_STREAM_SAMPLE = 1, PROFILE_STREAM_EVENT = 2 };
 #define PROFILE_EVENT_THREAD_NAME 0x484C0002
 #define PROFILE_EVENT_GC_STATS 0x484C0003
 #define PROFILE_EVENT_NATIVE_SYMBOL 0x484C0004
+#define PROFILE_EVENT_ALLOCATION_SAMPLE 0x484C0005
+
+static volatile int profile_allocation_interval = 0;
 
 static unsigned long long native_seen[4096];
 static void stream_write_u32( unsigned char *p, unsigned int value );
 static void stream_write_u64( unsigned char *p, unsigned long long value );
 static void stream_record( int kind, int flags, double time, int tid, int value, const void *payload, unsigned int payload_size );
+static void stream_native_symbol( void *address, double time, int tid );
+
+static void profile_allocation( hl_type *type, int requested, int allocated, void *return_address ) {
+	static HL_THREAD_VAR unsigned int counter;
+	void *frames[1];
+	unsigned char payload[32 + sizeof(frames)];
+	int interval = profile_allocation_interval, count = 1;
+	hl_thread_info *thread;
+	if( interval <= 0 || ++counter < (unsigned int)interval ) return;
+	counter = 0;
+	thread = hl_get_thread();
+	if( thread == NULL || stream.lock == NULL ) return;
+	frames[0] = return_address;
+	stream_write_u64(payload,(unsigned long long)requested);
+	stream_write_u64(payload + 8,(unsigned long long)allocated);
+	stream_write_u32(payload + 16,(unsigned int)interval);
+	stream_write_u32(payload + 20,type == NULL ? 0xFFFFFFFFU : (unsigned int)type->kind);
+	stream_write_u32(payload + 24,(unsigned int)count);
+	stream_write_u32(payload + 28,0);
+	for(int i=0;i<count;i++) {
+		stream_native_symbol(frames[i],hl_sys_time(),thread->thread_id);
+		stream_write_u64(payload + 32 + i * 8,(unsigned long long)(uintptr_t)frames[i]);
+	}
+	stream_record(PROFILE_STREAM_EVENT,0,hl_sys_time(),thread->thread_id,PROFILE_EVENT_ALLOCATION_SAMPLE,payload,32 + count * 8);
+}
 
 static void stream_native_symbol_record( unsigned long long pc, unsigned long long base, const char *module, const char *symbol, double time, int tid ) {
 	unsigned int module_len = (unsigned int)strlen(module), symbol_len = (unsigned int)strlen(symbol);
@@ -425,7 +454,7 @@ static void read_thread_data( thread_handle *t ) {
 #if defined(HL_LINUX) || defined(HL_MAC)
 	{
 		Dl_info native_leaf;
-		bool jit_leaf = eip && hl_module_resolve_jit_location(eip) != NULL;
+		bool jit_leaf = eip && hl_module_is_jit_code(eip);
 		bool named_native_leaf = eip && dladdr(eip,&native_leaf) && native_leaf.dli_sname;
 		if( count < MAX_STACK_COUNT && (jit_leaf || named_native_leaf) ) {
 			memmove(data.stackOut + 1,data.stackOut,sizeof(void*) * count);
@@ -679,6 +708,14 @@ bool hl_profile_stream_configure( int sample_rate, bool enabled ) {
 		profile_pause();
 		stream.remote_paused = true;
 	}
+	return true;
+}
+
+bool hl_profile_stream_configure_allocations( int interval ) {
+	extern void hl_gc_set_profile_allocation_callback( void (*callback)(hl_type*,int,int,void*) );
+	if( interval < 0 || interval > 100000000 ) return false;
+	profile_allocation_interval = interval;
+	hl_gc_set_profile_allocation_callback(interval == 0 ? NULL : profile_allocation);
 	return true;
 }
 

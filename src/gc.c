@@ -23,6 +23,7 @@
 #ifdef HL_WIN
 #	undef _GUID
 #	include <windows.h>
+#	include <intrin.h>
 #else
 #	include <sys/types.h>
 #	include <sys/mman.h>
@@ -543,6 +544,11 @@ static void gc_free_page( gc_pheader *ph, int block_count ) {
 }
 
 static void gc_check_mark();
+static void (* volatile gc_profile_allocation_callback)(hl_type*,int,int,void*);
+
+HL_API void hl_gc_set_profile_allocation_callback( void (*callback)(hl_type*,int,int,void*) ) {
+	gc_profile_allocation_callback = callback;
+}
 
 void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 	void *ptr;
@@ -617,6 +623,14 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 		gc_owned_allocs = owned;
 	}
 	gc_global_lock(false);
+	void (*allocation_callback)(hl_type*,int,int,void*) = gc_profile_allocation_callback;
+	if( allocation_callback ) {
+#ifdef HL_WIN
+		allocation_callback(t,size,allocated,_ReturnAddress());
+#else
+		allocation_callback(t,size,allocated,__builtin_return_address(0));
+#endif
+	}
 	hl_track_call(HL_TRACK_ALLOC, on_alloc(t,size,flags,ptr));
 	return ptr;
 }

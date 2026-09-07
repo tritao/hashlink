@@ -294,8 +294,12 @@ static void handle_client( hl_socket *socket ) {
 			ok = send_frame(socket,header.service,header.type,DIAG_RESPONSE,header.request_id,caps,sizeof(caps));
 		} else if( header.service == DIAG_SERVICE_PROFILER && header.type == DIAG_PROFILE_STATUS && header.length == 0 ) {
 			ok = send_status(socket,header.type,header.request_id);
-		} else if( header.service == DIAG_SERVICE_PROFILER && header.type == DIAG_PROFILE_CONFIGURE && header.length == 8 ) {
+		} else if( header.service == DIAG_SERVICE_PROFILER && header.type == DIAG_PROFILE_CONFIGURE && (header.length == 8 || header.length == 12) ) {
 			ok = hl_profile_stream_configure((int)read_u32(payload),read_u32(payload + 4) != 0);
+			if( ok && header.length == 12 ) {
+				extern bool hl_profile_stream_configure_allocations( int interval );
+				ok = hl_profile_stream_configure_allocations((int)read_u32(payload + 8));
+			}
 			if( ok ) ok = send_status(socket,header.type,header.request_id);
 		} else if( header.service == DIAG_SERVICE_PROFILER && header.type == DIAG_PROFILE_READ && header.length == 12 ) {
 			unsigned long long cursor = read_u64(payload);

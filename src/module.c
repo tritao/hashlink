@@ -370,7 +370,7 @@ static int module_capture_stack( void **stack, int size ) {
 #endif
 }
 
-static bool module_is_jit_code( void *addr ) {
+bool hl_module_is_jit_code( void *addr ) {
 	int module_count;
 	hl_module **modules = hl_module_registry_snapshot(&module_count);
 	bool found = false;
@@ -389,7 +389,7 @@ static bool module_capture_break_context( void **rip, void **regs ) {
 #ifdef WIN64_UNWIND_TABLES
 	CONTEXT c;
 	RtlCaptureContext(&c);
-	while( !module_is_jit_code((void*)c.Rip) ) {
+	while( !hl_module_is_jit_code((void*)c.Rip) ) {
 		DWORD64 base;
 		PRUNTIME_FUNCTION fn_entry = RtlLookupFunctionEntry(c.Rip, &base, NULL);
 		if( !fn_entry ) return false;
