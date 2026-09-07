@@ -21,6 +21,7 @@
  */
 #include <hl.h>
 #include <hlmodule.h>
+
 #include <jit.h>
 
 #ifdef HL_WIN
@@ -1416,6 +1417,7 @@ h_bool hl_module_retire_try( hl_module *m, hl_module_retirement_status *status )
 	hl_module_retirement_status_get(m,&current);
 	if( status != NULL ) *status = current;
 	if( current.live_managed_allocations > 0 || current.registry_readers > 0 ) return false;
+	if( hl_setup.debug_module_removed != NULL ) hl_setup.debug_module_removed(m);
 	hl_module_free_shutdown(m);
 	return true;
 }
