@@ -144,6 +144,15 @@ static void send_patch_regions( hl_module *m ) {
 				send(&span,sizeof(span));
 			}
 		}
+		int snapshot_count = hl_module_patch_debug_source_snapshot_count(m,i);
+		send(&snapshot_count,4);
+		for(int j=0;j<snapshot_count;j++) {
+			hl_source_snapshot snapshot;
+			if( !hl_module_patch_debug_source_snapshot_get(m,i,j,&snapshot) ) return;
+			send(&snapshot.source_hash,4);
+			send(&snapshot.length,4);
+			if( snapshot.length > 0 ) send(snapshot.content,snapshot.length);
+		}
 	}
 }
 
