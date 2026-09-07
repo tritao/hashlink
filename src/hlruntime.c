@@ -2,7 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define HL_RUNTIME_INIT_STABLE_ID 0x7FFF0000
+/* Must match the maximum 29-bit stable ID reserved by HlFunctionCache. */
+#define HL_RUNTIME_INIT_STABLE_ID 0x1FFFFFFF
 
 void hl_debug_notify_revision( hl_module *m );
 
@@ -194,8 +195,10 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 		if( status != HL_RUNTIME_OK ) {
 			exception = NULL;
 			runtime_clear_exception_state();
-			if( hl_runtime_module_release(runtime) != HL_RUNTIME_OK )
-				failed_retirement_add(runtime);
+			/* Unpublish now, but do not reclaim JIT metadata while the failed
+			   initializer's native call frames can still retain raw pointers. */
+			hl_module_retire_prepare(runtime->module);
+			failed_retirement_add(runtime);
 			return status;
 		}
 	}
