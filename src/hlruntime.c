@@ -209,8 +209,10 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 		if( status != HL_RUNTIME_OK ) {
 			exception = NULL;
 			runtime_clear_exception_state();
-			if( hl_runtime_module_release(runtime) != HL_RUNTIME_OK )
-				failed_retirement_add(runtime);
+			/* Unpublish now, but do not reclaim JIT metadata while the failed
+			   initializer's native call frames can still retain raw pointers. */
+			hl_module_retire_prepare(runtime->module);
+			failed_retirement_add(runtime);
 			return status;
 		}
 	}
