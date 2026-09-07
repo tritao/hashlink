@@ -25,6 +25,9 @@ typedef int socket_t;
 enum { SVC_PROFILE=2, P_STATUS=1, P_CONFIGURE=2, P_READ=3, P_METADATA=4 };
 enum { F_RESPONSE=1, F_ERROR=2, CAP_PROFILE=1, CAP_SYMBOLS=2 };
 #define PROFILE_EVENT_MODULE_REVISION 0x484C0001U
+#define PROFILE_EVENT_THREAD_NAME 0x484C0002U
+#define PROFILE_EVENT_GC_STATS 0x484C0003U
+#define PROFILE_EVENT_NATIVE_SYMBOL 0x484C0004U
 
 typedef struct { uint32_t offset,end,opcode_index,opcode,line; char *file; uint64_t self,total; } source_line;
 typedef struct { uint64_t start,end,self,total; uint32_t function_id,revision; char *name; source_line *lines; uint32_t line_count; } symbol;
@@ -34,7 +37,13 @@ typedef struct { FILE *file; double started; int failed; } capture;
 typedef struct folded folded;
 struct folded { char *stack; uint64_t count; folded *next; };
 typedef struct { folded *buckets[4096]; } folded_table;
+typedef struct native_symbol native_symbol;
+struct native_symbol { uint64_t pc,base; char *module,*name; native_symbol *next; };
+typedef struct { uint64_t allocated,allocations,collections,mark_micros; double time; int valid; } perfetto_gc_state;
 static volatile sig_atomic_t interrupted;
+static native_symbol *native_symbols;
+static perfetto_gc_state perfetto_gc;
+static uint32_t perfetto_threads[4096];
 static uint64_t health_capacity,health_used,health_records,health_sample_nanos,health_generated;
 static uint32_t health_requested_rate,health_effective_rate;
 
@@ -112,6 +121,13 @@ static symbol *add_symbol( symbols *s,uint64_t start,uint64_t end,uint32_t id,ui
 static int by_address( const void *a,const void *b ){const symbol *x=a,*y=b;return x->start<y->start?-1:x->start>y->start?1:0;}
 static symbol *resolve( symbols *s,uint64_t pc ){size_t lo=0,hi=s->count;while(lo<hi){size_t m=(lo+hi)>>1;if(s->items[m].start<=pc)lo=m+1;else hi=m;}return lo&&pc<s->items[lo-1].end?s->items+lo-1:NULL;}
 static source_line *resolve_line( symbol *s,uint64_t pc ){uint32_t offset=(uint32_t)(pc-s->start),lo=0,hi=s->line_count;while(lo<hi){uint32_t m=(lo+hi)>>1;if(s->lines[m].offset<=offset)lo=m+1;else hi=m;}if(!lo)return NULL;source_line *line=s->lines+lo-1;return line->end&&offset>=line->end?NULL:line;}
+static native_symbol *resolve_native( uint64_t pc ){for(native_symbol *n=native_symbols;n;n=n->next)if(n->pc==pc)return n;return NULL;}
+static int add_native( uint64_t pc,uint64_t base,const unsigned char *module,uint32_t module_len,const unsigned char *name,uint32_t name_len ) {
+	native_symbol *n=resolve_native(pc);if(n)return 1;n=(native_symbol*)calloc(1,sizeof(*n));if(!n)return 0;
+	n->module=(char*)malloc((size_t)module_len+1);n->name=(char*)malloc((size_t)name_len+1);if(!n->module||!n->name){free(n->module);free(n->name);free(n);return 0;}
+	memcpy(n->module,module,module_len);n->module[module_len]=0;memcpy(n->name,name,name_len);n->name[name_len]=0;n->pc=pc;n->base=base;n->next=native_symbols;native_symbols=n;return 1;
+}
+static void free_native( void ){while(native_symbols){native_symbol *next=native_symbols->next;free(native_symbols->module);free(native_symbols->name);free(native_symbols);native_symbols=next;}}
 static int parse_symbols( const unsigned char *data,uint32_t size,symbols *current ) {
 	uint32_t schema,nmodules;reader r;symbols next={0};char **files=NULL;uint32_t file_count=0;
 	r.data=data;r.length=size;r.pos=0;
@@ -172,15 +188,20 @@ static void perfetto_begin_event( FILE *file,int *first ){if(!*first)fputc(',',f
 static int consume( symbols *s,unsigned char *pending,size_t *length,uint64_t *samples,uint64_t *unresolved,folded_table *folded_stacks,int show_lines,int raw_leaf,int *metadata_dirty,FILE *perfetto,int *perfetto_first,double *time_origin,uint32_t pid ) {
 	size_t pos=0;while(*length-pos>=4){uint32_t body=u32(pending+pos);if(body<20||body>(8U<<20))return 0;if(*length-pos<(size_t)body+4)break;
 		double event_time=0;if(perfetto){uint64_t time_bits=u64(pending+pos+8);memcpy(&event_time,&time_bits,sizeof(event_time));if(*time_origin<0)*time_origin=event_time;}
-		if(pending[pos+4]==1){uint32_t frames=u32(pending+pos+20),tid=u32(pending+pos+16);uint64_t leaf_pc=frames?u64(pending+pos+24):0;symbol *raw_symbol=frames?resolve(s,leaf_pc):NULL;source_line *raw_line=raw_symbol?resolve_line(raw_symbol,leaf_pc):NULL;if(body!=20+frames*8U)return 0;symbol *leaf=NULL;source_line *leaf_line=NULL;char *stack=NULL;size_t stack_len=0,stack_cap=0;(*samples)++;for(uint32_t i=0;i<frames;i++){uint64_t pc=u64(pending+pos+24+i*8);symbol *x=resolve(s,pc);if(x){source_line *line=resolve_line(x,pc);x->total++;if(line)line->total++;if(!leaf){leaf=x;leaf_line=line;}}else(*unresolved)++;}
+		if(pending[pos+4]==1){uint32_t frames=u32(pending+pos+20),tid=u32(pending+pos+16);uint64_t leaf_pc=frames?u64(pending+pos+24):0;symbol *raw_symbol=frames?resolve(s,leaf_pc):NULL;native_symbol *raw_native=frames?resolve_native(leaf_pc):NULL;source_line *raw_line=raw_symbol?resolve_line(raw_symbol,leaf_pc):NULL;if(body!=20+frames*8U)return 0;symbol *leaf=NULL;native_symbol *native_leaf=NULL;source_line *leaf_line=NULL;char *stack=NULL;size_t stack_len=0,stack_cap=0;(*samples)++;for(uint32_t i=0;i<frames;i++){uint64_t pc=u64(pending+pos+24+i*8);symbol *x=resolve(s,pc);native_symbol *native=x?NULL:resolve_native(pc);if(x){source_line *line=resolve_line(x,pc);x->total++;if(line)line->total++;if(!leaf){leaf=x;leaf_line=line;}}else if(native){if(!leaf&&!native_leaf)native_leaf=native;}else(*unresolved)++;}
+			if(perfetto&&perfetto_threads[tid&4095]!=tid){perfetto_threads[tid&4095]=tid;perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"M\",\"name\":\"thread_name\",\"pid\":%u,\"tid\":%u,\"args\":{\"name\":\"Thread %u\"}}",pid,tid,tid);}
 			if(leaf)leaf->self++;
 			if(leaf_line)leaf_line->self++;
-			if(raw_leaf&&frames){if(raw_symbol){printf("leaf_pc=0x%llx offset=0x%llx function=%s",(unsigned long long)leaf_pc,(unsigned long long)(leaf_pc-raw_symbol->start),raw_symbol->name);if(raw_line)printf(" opcode=%u opcode_kind=%u location=%s:%u",raw_line->opcode_index,raw_line->opcode,raw_line->file,raw_line->line);putchar('\n');}else printf("leaf_pc=0x%llx offset=? function=[native/unknown]\n",(unsigned long long)leaf_pc);}
-			if(folded_stacks||perfetto){for(uint32_t i=frames;i>0;i--){uint64_t pc=u64(pending+pos+24+(i-1)*8);symbol *x=resolve(s,pc);source_line *line=x?resolve_line(x,pc):NULL;char label[1536];const char *name;if(show_lines&&line){snprintf(label,sizeof(label),"%s (%s:%u)",x->name,line->file,line->line);name=label;}else name=x?x->name:"[unknown]";size_t n=strlen(name),need=stack_len+n+(stack_len?1:0)+1;if(need>stack_cap){size_t cap=stack_cap?stack_cap*2:256;while(cap<need)cap*=2;char *next=(char*)realloc(stack,cap);if(!next){free(stack);return 0;}stack=next;stack_cap=cap;}if(stack_len)stack[stack_len++]=';';memcpy(stack+stack_len,name,n);stack_len+=n;stack[stack_len]=0;}}
+			if(raw_leaf&&frames){if(raw_symbol){printf("leaf_pc=0x%llx offset=0x%llx function=%s",(unsigned long long)leaf_pc,(unsigned long long)(leaf_pc-raw_symbol->start),raw_symbol->name);if(raw_line)printf(" opcode=%u opcode_kind=%u location=%s:%u",raw_line->opcode_index,raw_line->opcode,raw_line->file,raw_line->line);putchar('\n');}else if(raw_native)printf("leaf_pc=0x%llx offset=0x%llx function=%s module=%s\n",(unsigned long long)leaf_pc,(unsigned long long)(leaf_pc-raw_native->base),raw_native->name,raw_native->module);else printf("leaf_pc=0x%llx offset=? function=[native/unknown]\n",(unsigned long long)leaf_pc);}
+			if(folded_stacks||perfetto){for(uint32_t i=frames;i>0;i--){uint64_t pc=u64(pending+pos+24+(i-1)*8);symbol *x=resolve(s,pc);native_symbol *native=x?NULL:resolve_native(pc);source_line *line=x?resolve_line(x,pc):NULL;char label[1536];const char *name;if(show_lines&&line){snprintf(label,sizeof(label),"%s (%s:%u)",x->name,line->file,line->line);name=label;}else if(native){snprintf(label,sizeof(label),"%s+0x%llx (%s)",native->name,(unsigned long long)(pc-native->base),native->module);name=label;}else name=x?x->name:"[unknown]";size_t n=strlen(name),need=stack_len+n+(stack_len?1:0)+1;if(need>stack_cap){size_t cap=stack_cap?stack_cap*2:256;while(cap<need)cap*=2;char *next=(char*)realloc(stack,cap);if(!next){free(stack);return 0;}stack=next;stack_cap=cap;}if(stack_len)stack[stack_len++]=';';memcpy(stack+stack_len,name,n);stack_len+=n;stack[stack_len]=0;}}
 			if(folded_stacks&&stack&&!folded_add(folded_stacks,stack)){free(stack);return 0;}
-			if(perfetto){perfetto_begin_event(perfetto,perfetto_first);fputs("{\"ph\":\"i\",\"s\":\"t\",\"cat\":\"hl.sample\",\"name\":",perfetto);json_string(perfetto,leaf?leaf->name:"sample");fprintf(perfetto,",\"pid\":%u,\"tid\":%u,\"ts\":%.3f,\"args\":{\"stack\":",pid,tid,(event_time-*time_origin)*1000000.0);json_string(perfetto,stack?stack:"");fprintf(perfetto,",\"gc_stop\":%s",(pending[pos+5]&1)?"true":"false");if(leaf_line){fputs(",\"file\":",perfetto);json_string(perfetto,leaf_line->file);fprintf(perfetto,",\"line\":%u",leaf_line->line);}fputs("}}",perfetto);}
+			if(perfetto){perfetto_begin_event(perfetto,perfetto_first);fputs("{\"ph\":\"i\",\"s\":\"t\",\"cat\":\"hl.sample\",\"name\":",perfetto);json_string(perfetto,leaf?leaf->name:native_leaf?native_leaf->name:"sample");fprintf(perfetto,",\"pid\":%u,\"tid\":%u,\"ts\":%.3f,\"args\":{\"stack\":",pid,tid,(event_time-*time_origin)*1000000.0);json_string(perfetto,stack?stack:"");fprintf(perfetto,",\"gc_stop\":%s",(pending[pos+5]&1)?"true":"false");if(leaf_line){fputs(",\"file\":",perfetto);json_string(perfetto,leaf_line->file);fprintf(perfetto,",\"line\":%u",leaf_line->line);}fputs("}}",perfetto);if(pending[pos+5]&1){perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"i\",\"s\":\"t\",\"cat\":\"hl.gc\",\"name\":\"GC stop sample\",\"pid\":%u,\"tid\":%u,\"ts\":%.3f}",pid,tid,(event_time-*time_origin)*1000000.0);}}
 			free(stack);
-		}else if(pending[pos+4]==2){uint32_t tid=u32(pending+pos+16),event_id=u32(pending+pos+20);if(metadata_dirty&&event_id==PROFILE_EVENT_MODULE_REVISION&&body==32)*metadata_dirty=1;if(perfetto){perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"i\",\"s\":\"t\",\"cat\":\"hl.event\",\"name\":\"event %u\",\"pid\":%u,\"tid\":%u,\"ts\":%.3f,\"args\":{\"payload\":\"",event_id,pid,tid,(event_time-*time_origin)*1000000.0);for(uint32_t i=0;i<body-20;i++)fprintf(perfetto,"%02x",pending[pos+24+i]);fputs("\"}}",perfetto);}}
+		}else if(pending[pos+4]==2){uint32_t tid=u32(pending+pos+16),event_id=u32(pending+pos+20),payload_size=body-20;const unsigned char *payload=pending+pos+24;if(metadata_dirty&&event_id==PROFILE_EVENT_MODULE_REVISION&&body==32)*metadata_dirty=1;
+			if(event_id==PROFILE_EVENT_NATIVE_SYMBOL&&payload_size>=24){uint32_t module_len=u32(payload+16),name_len=u32(payload+20);if(module_len+name_len!=payload_size-24||!add_native(u64(payload),u64(payload+8),payload+24,module_len,payload+24+module_len,name_len))return 0;}
+			if(perfetto&&event_id==PROFILE_EVENT_THREAD_NAME){char *name=(char*)malloc((size_t)payload_size+1);if(!name)return 0;memcpy(name,payload,payload_size);name[payload_size]=0;perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"M\",\"name\":\"thread_name\",\"pid\":%u,\"tid\":%u,\"args\":{\"name\":",pid,tid);json_string(perfetto,name);fputs("}}",perfetto);free(name);}
+			else if(perfetto&&event_id==PROFILE_EVENT_GC_STATS&&payload_size==40){uint64_t allocated=u64(payload),allocations=u64(payload+8),heap=u64(payload+16),collections=u64(payload+24),mark=u64(payload+32);double seconds=perfetto_gc.valid?event_time-perfetto_gc.time:0,allocation_rate=seconds>0?(allocated-perfetto_gc.allocated)/seconds:0,collection_rate=seconds>0?(collections-perfetto_gc.collections)/seconds:0,mark_rate=seconds>0?(mark-perfetto_gc.mark_micros)/seconds:0;perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"C\",\"cat\":\"hl.gc\",\"name\":\"HashLink GC\",\"pid\":%u,\"tid\":0,\"ts\":%.3f,\"args\":{\"heap_bytes\":%llu,\"allocated_bytes\":%llu,\"allocation_bytes_per_second\":%.3f,\"allocations\":%llu,\"collections\":%llu,\"collections_per_second\":%.3f,\"mark_micros\":%llu,\"mark_micros_per_second\":%.3f}}",pid,(event_time-*time_origin)*1000000.0,(unsigned long long)heap,(unsigned long long)allocated,allocation_rate,(unsigned long long)allocations,(unsigned long long)collections,collection_rate,(unsigned long long)mark,mark_rate);perfetto_gc.allocated=allocated;perfetto_gc.allocations=allocations;perfetto_gc.collections=collections;perfetto_gc.mark_micros=mark;perfetto_gc.time=event_time;perfetto_gc.valid=1;}
+			else if(perfetto&&event_id!=PROFILE_EVENT_NATIVE_SYMBOL){perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"i\",\"s\":\"t\",\"cat\":\"hl.event\",\"name\":\"event %u\",\"pid\":%u,\"tid\":%u,\"ts\":%.3f,\"args\":{\"payload\":\"",event_id,pid,tid,(event_time-*time_origin)*1000000.0);for(uint32_t i=0;i<payload_size;i++)fprintf(perfetto,"%02x",payload[i]);fputs("\"}}",perfetto);}}
 		pos+=body+4;if(metadata_dirty&&*metadata_dirty)break;}
 	if(pos){memmove(pending,pending+pos,*length-pos);*length-=pos;}return 1;
 }
@@ -223,7 +244,7 @@ static int offline( int argc,char **argv,int exporting ) {
 	if(format==1)folded_write(&folded_stacks);else if(!format)report(&table,samples,unresolved,dropped,top,show_lines);
 	code=0;
 done:
-	free(payload);free(pending);if(file)fclose(file);if(perfetto){fputs("],\"displayTimeUnit\":\"ms\"}\n",perfetto);if(fclose(perfetto)!=0)code=1;}folded_free(&folded_stacks);free_symbols(&table);return code;
+	free(payload);free(pending);if(file)fclose(file);if(perfetto){fputs("],\"displayTimeUnit\":\"ms\"}\n",perfetto);if(fclose(perfetto)!=0)code=1;}folded_free(&folded_stacks);free_native();memset(&perfetto_gc,0,sizeof(perfetto_gc));memset(perfetto_threads,0,sizeof(perfetto_threads));free_symbols(&table);return code;
 }
 
 int main( int argc,char **argv ) {
