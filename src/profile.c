@@ -26,6 +26,13 @@
 #include <hlmodule.h>
 #include "hlsystem.h"
 
+#ifdef HL_WIN
+#include <dbghelp.h>
+#ifdef _MSC_VER
+#pragma comment(lib, "Dbghelp.lib")
+#endif
+#endif
+
 #ifdef HL_LINUX
 #include <dlfcn.h>
 #include <semaphore.h>
@@ -129,6 +136,18 @@ static void stream_write_u32( unsigned char *p, unsigned int value );
 static void stream_write_u64( unsigned char *p, unsigned long long value );
 static void stream_record( int kind, int flags, double time, int tid, int value, const void *payload, unsigned int payload_size );
 
+static void stream_native_symbol_record( unsigned long long pc, unsigned long long base, const char *module, const char *symbol, double time, int tid ) {
+	unsigned int module_len = (unsigned int)strlen(module), symbol_len = (unsigned int)strlen(symbol);
+	unsigned int size = 24 + module_len + symbol_len;
+	unsigned char *payload = malloc(size);
+	if( payload == NULL ) return;
+	stream_write_u64(payload,pc); stream_write_u64(payload + 8,base);
+	stream_write_u32(payload + 16,module_len); stream_write_u32(payload + 20,symbol_len);
+	memcpy(payload + 24,module,module_len); memcpy(payload + 24 + module_len,symbol,symbol_len);
+	stream_record(PROFILE_STREAM_EVENT,0,time,tid,PROFILE_EVENT_NATIVE_SYMBOL,payload,size);
+	free(payload);
+}
+
 static void stream_native_symbol( void *address, double time, int tid ) {
 #if defined(HL_LINUX) || defined(HL_MAC)
 	unsigned long long pc = (unsigned long long)(uintptr_t)address;
@@ -136,18 +155,32 @@ static void stream_native_symbol( void *address, double time, int tid ) {
 	Dl_info info;
 	if( native_seen[slot] == pc || !dladdr(address,&info) || info.dli_sname == NULL ) return;
 	native_seen[slot] = pc;
-	{
-		const char *module = info.dli_fname ? info.dli_fname : "[native]";
-		unsigned int module_len = (unsigned int)strlen(module), symbol_len = (unsigned int)strlen(info.dli_sname);
-		unsigned int size = 24 + module_len + symbol_len;
-		unsigned char *payload = malloc(size);
-		if( payload == NULL ) return;
-		stream_write_u64(payload,pc); stream_write_u64(payload + 8,(unsigned long long)(uintptr_t)info.dli_saddr);
-		stream_write_u32(payload + 16,module_len); stream_write_u32(payload + 20,symbol_len);
-		memcpy(payload + 24,module,module_len); memcpy(payload + 24 + module_len,info.dli_sname,symbol_len);
-		stream_record(PROFILE_STREAM_EVENT,0,time,tid,PROFILE_EVENT_NATIVE_SYMBOL,payload,size);
-		free(payload);
+	stream_native_symbol_record(pc,(unsigned long long)(uintptr_t)info.dli_saddr,info.dli_fname ? info.dli_fname : "[native]",info.dli_sname,time,tid);
+#elif defined(HL_WIN)
+	static HANDLE process;
+	static bool initialized;
+	unsigned long long pc = (unsigned long long)(uintptr_t)address;
+	unsigned int slot = (unsigned int)((pc >> 4) & 4095);
+	DWORD64 displacement = 0;
+	IMAGEHLP_MODULE64 module_info;
+	struct { SYMBOL_INFO info; char name[MAX_SYM_NAME]; } symbol_info;
+	if( native_seen[slot] == pc ) return;
+	if( !initialized ) {
+		process = GetCurrentProcess();
+		SymSetOptions(SymGetOptions() | SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
+		if( !SymInitialize(process,NULL,TRUE) ) return;
+		initialized = true;
 	}
+	memset(&module_info,0,sizeof(module_info)); module_info.SizeOfStruct = sizeof(module_info);
+	if( !SymGetModuleInfo64(process,(DWORD64)pc,&module_info) ) return;
+	memset(&symbol_info,0,sizeof(symbol_info)); symbol_info.info.SizeOfStruct = sizeof(SYMBOL_INFO); symbol_info.info.MaxNameLen = MAX_SYM_NAME;
+	if( SymFromAddr(process,(DWORD64)pc,&displacement,&symbol_info.info) )
+		stream_native_symbol_record(pc,(unsigned long long)symbol_info.info.Address,module_info.ImageName && *module_info.ImageName ? module_info.ImageName : module_info.ModuleName,symbol_info.info.Name,time,tid);
+	else {
+		const char *module = module_info.ImageName && *module_info.ImageName ? module_info.ImageName : module_info.ModuleName;
+		stream_native_symbol_record(pc,(unsigned long long)module_info.BaseOfImage,module,module_info.ModuleName,time,tid);
+	}
+	native_seen[slot] = pc;
 #else
 	(void)address; (void)time; (void)tid;
 #endif
@@ -399,6 +432,12 @@ static void read_thread_data( thread_handle *t ) {
 			data.stackOut[0] = eip;
 			count++;
 		}
+	}
+#elif defined(HL_WIN)
+	if( eip && count < MAX_STACK_COUNT ) {
+		memmove(data.stackOut + 1,data.stackOut,sizeof(void*) * count);
+		data.stackOut[0] = eip;
+		count++;
 	}
 #endif
 	int eventId = count | 0x80000000;

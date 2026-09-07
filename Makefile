@@ -157,7 +157,7 @@ endif
 ifneq (, $(findstring MINGW64, $(UNAME)))
 CFLAGS += -municode
 LIBHL_LDLIBS += -lws2_32 -lwsock32
-hl_LDLIBS = -lm
+hl_LDLIBS = -ldbghelp -lm
 hlc_LDLIBS = -ldbghelp
 ssl_LDLIBS += -lcrypt32 -lbcrypt -lws2_32
 mysql_LDLIBS += -lws2_32 -lwsock32

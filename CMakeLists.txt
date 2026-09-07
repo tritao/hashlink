@@ -254,7 +254,7 @@ if (WITH_VM)
     target_link_libraries(hl libhl)
 
     if (WIN32)
-        target_link_libraries(hl user32)
+        target_link_libraries(hl user32 dbghelp)
     endif()
 endif()
 
