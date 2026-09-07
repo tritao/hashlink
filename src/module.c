@@ -225,8 +225,8 @@ const char *hl_module_resolve_jit_location( void *addr ) {
 		{
 			hl_function *fun = NULL;
 			if( module_resolve_address(m,addr,&fun,&fpos) ) {
-				int opcode = fpos >= 0 && fpos < fun->nops && m->jit_debug && m->jit_debug[fun-m->code->functions].opcodes
-					? m->jit_debug[fun-m->code->functions].opcodes[fpos] : -1;
+				int opcode = fpos >= 0 && fpos < fun->nops && fun->ops != NULL
+					? fun->ops[fpos].op : -1;
 				const char *opcode_name = opcode >= 0 ? hl_op_name(opcode) : "unknown";
 				if( fun->obj ) {
 					char object_name[192], field_name[192];
