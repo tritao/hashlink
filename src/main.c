@@ -209,6 +209,7 @@ int main(int argc, pchar *argv[]) {
 	char *error_msg = NULL;
 	int debug_port = -1;
 	int diagnostics_port = -1;
+	bool diagnostics_public = false;
 	bool debug_wait = false;
 	bool debug_opt = false;
 	bool hot_reload = false;
@@ -235,6 +236,10 @@ int main(int argc, pchar *argv[]) {
 		if( pcompare(arg,PSTR("--diagnostics")) == 0 ) {
 			if( argc-- == 0 ) break;
 			diagnostics_port = ptoi(*argv++);
+			continue;
+		}
+		if( pcompare(arg,PSTR("--diagnostics-public")) == 0 ) {
+			diagnostics_public = true;
 			continue;
 		}
 		if( pcompare(arg,PSTR("--debug-opt")) == 0 ) {
@@ -277,7 +282,7 @@ int main(int argc, pchar *argv[]) {
 		file = PSTR("hlboot.dat");
 		fchk = pfopen(file,"rb");
 		if( fchk == NULL ) {
-			printf("HL/JIT %d.%d.%d (c)2015-2026 Haxe Foundation\n  Usage : hl [--debug <port>] [--debug-wait] [--diagnostics <port>] <file>\n",HL_VERSION>>16,(HL_VERSION>>8)&0xFF,HL_VERSION&0xFF);
+			printf("HL/JIT %d.%d.%d (c)2015-2026 Haxe Foundation\n  Usage : hl [--debug <port>] [--debug-wait] [--diagnostics <port>] [--diagnostics-public] <file>\n",HL_VERSION>>16,(HL_VERSION>>8)&0xFF,HL_VERSION&0xFF);
 #			ifdef HL_DEBUG
 			printf("  Debug : hl --dump <file> to dump the jit code without running it\n");
 #			endif
@@ -330,7 +335,7 @@ int main(int argc, pchar *argv[]) {
 	cl.hasValue = 0;
 	setup_handler();
 	hl_profile_setup(profile_count);
-	if( diagnostics_port > 0 && !hl_diagnostics_start(diagnostics_port) ) {
+	if( diagnostics_port > 0 && !hl_diagnostics_start(diagnostics_port,diagnostics_public) ) {
 		fprintf(stderr,"Could not start diagnostics on port %d\n",diagnostics_port);
 		hl_profile_end();
 		return 5;

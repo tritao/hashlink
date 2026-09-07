@@ -322,7 +322,7 @@ HL_EXTERN_C HL_EXPORT h_bool hl_module_retire_try( hl_module *m, hl_module_retir
 /** Snapshot known module-owned resources and borrowers. The caller must quiesce calls. */
 HL_EXTERN_C HL_EXPORT void hl_module_retirement_status_get( hl_module *m, hl_module_retirement_status *out );
 h_bool hl_module_debug( hl_module *m, int port, h_bool wait );
-bool hl_diagnostics_start( int port );
+bool hl_diagnostics_start( int port, bool public_bind );
 void hl_diagnostics_stop( void );
 void hl_profile_stream_status( unsigned long long *first, unsigned long long *next, unsigned long long *dropped, int *sample_rate, int *paused, unsigned long long *consumer, int *requested_rate );
 #define HL_PROFILE_STREAM_SIZE (8 << 20)

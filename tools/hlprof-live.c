@@ -92,14 +92,15 @@ static socket_t open_socket( const char *host,const char *port ) {
 	for(it=list;it;it=it->ai_next){result=(socket_t)socket(it->ai_family,it->ai_socktype,it->ai_protocol);if(result==INVALID_SOCKET)continue;if(connect(result,it->ai_addr,(int)it->ai_addrlen)==0)break;CLOSE_SOCKET(result);result=INVALID_SOCKET;}
 	freeaddrinfo(list);return result;
 }
-static int request( socket_t s,unsigned char type,uint32_t id,const void *body,uint32_t size,unsigned char **reply,uint32_t *reply_size ) {
-	unsigned char h[16];h[0]=SVC_PROFILE;h[1]=type;h[2]=h[3]=0;put32(h+4,id);put32(h+8,size);put32(h+12,0);
+static int request_service( socket_t s,unsigned char service,unsigned char type,uint32_t id,const void *body,uint32_t size,unsigned char **reply,uint32_t *reply_size ) {
+	unsigned char h[16];h[0]=service;h[1]=type;h[2]=h[3]=0;put32(h+4,id);put32(h+8,size);put32(h+12,0);
 	if(!send_all(s,h,16)||(size&&!send_all(s,body,size))||!recv_all(s,h,16))return 0;
 	*reply_size=u32(h+8);
-	if(h[0]!=SVC_PROFILE||h[1]!=type||u32(h+4)!=id||(u16(h+2)&F_RESPONSE)==0||(u16(h+2)&F_ERROR)||*reply_size>(64U<<20))return 0;
+	if(h[0]!=service||h[1]!=type||u32(h+4)!=id||(u16(h+2)&F_RESPONSE)==0||(u16(h+2)&F_ERROR)||*reply_size>(64U<<20))return 0;
 	*reply=*reply_size?(unsigned char*)malloc(*reply_size):NULL;
 	if(*reply_size&&(!*reply||!recv_all(s,*reply,*reply_size))){free(*reply);*reply=NULL;return 0;}return 1;
 }
+static int request( socket_t s,unsigned char type,uint32_t id,const void *body,uint32_t size,unsigned char **reply,uint32_t *reply_size ) {return request_service(s,SVC_PROFILE,type,id,body,size,reply,reply_size);}
 static int get32( reader *r,uint32_t *v ){if(r->length-r->pos<4)return 0;*v=u32(r->data+r->pos);r->pos+=4;return 1;}
 static int get64( reader *r,uint64_t *v ){if(r->length-r->pos<8)return 0;*v=u64(r->data+r->pos);r->pos+=8;return 1;}
 
@@ -234,6 +235,7 @@ int main( int argc,char **argv ) {
 #endif
 	sock=open_socket(host,port);if(sock==INVALID_SOCKET){fprintf(stderr,"Could not connect to %s:%s\n",host,port);goto done;}
 	if(!recv_all(sock,hello,16)||memcmp(hello,"HLDI",4)||u16(hello+4)!=1||(u16(hello+6)&3)!=3){fprintf(stderr,"Endpoint lacks HLDI/1 profiler symbols\n");goto done;}
+	if(u16(hello+6)&4){const char *token=getenv("HL_DIAGNOSTICS_TOKEN");if(!token||!*token||!request_service(sock,0,2,id++,token,(uint32_t)strlen(token),&reply,&reply_size)){fprintf(stderr,"HLDI authentication failed; set HL_DIAGNOSTICS_TOKEN\n");goto done;}free(reply);reply=NULL;}
 	if(!capture_open(&output,output_path,u32(hello+12),(uint32_t)rate)){fprintf(stderr,"Could not open capture file %s\n",output_path);goto done;}
 	if(!fetch_symbols(sock,&table,id++,&output)||!table.count){fprintf(stderr,"Could not load symbols\n");goto done;}
 	put32(config,(uint32_t)rate);put32(config+4,1);if(!request(sock,P_CONFIGURE,id++,config,8,&reply,&reply_size)||!parse_status(reply,reply_size)){fprintf(stderr,"Could not start profiler\n");goto done;}

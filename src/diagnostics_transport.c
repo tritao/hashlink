@@ -18,14 +18,14 @@ struct _hl_diag_transport {
 	int port;
 };
 
-hl_diag_transport *hl_diag_transport_listen( int port ) {
+hl_diag_transport *hl_diag_transport_listen( int port, bool public_bind ) {
 	hl_diag_transport *transport;
 	hl_socket *listener;
 	hl_socket_init();
 	listener = hl_socket_new(false);
 	if( listener == NULL ) return NULL;
 	/* Remote exposure should be done deliberately through a tunnel or host proxy. */
-	if( !hl_socket_bind(listener,0x0100007F/*127.0.0.1*/,port) || !hl_socket_listen(listener,10) ) {
+	if( !hl_socket_bind(listener,public_bind ? 0 : 0x0100007F/*127.0.0.1*/,port) || !hl_socket_listen(listener,10) ) {
 		hl_socket_close(listener);
 		return NULL;
 	}

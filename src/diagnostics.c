@@ -5,6 +5,7 @@
  */
 #include "diagnostics.h"
 #include <hlmodule.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -21,13 +22,14 @@ typedef struct {
 } diag_header;
 
 enum { DIAG_SERVICE_CONTROL = 0, DIAG_SERVICE_PROFILER = 2 };
-enum { DIAG_CONTROL_CAPABILITIES = 1 };
+enum { DIAG_CONTROL_CAPABILITIES = 1, DIAG_CONTROL_AUTHENTICATE = 2 };
 enum { DIAG_PROFILE_STATUS = 1, DIAG_PROFILE_CONFIGURE = 2, DIAG_PROFILE_READ = 3, DIAG_PROFILE_METADATA = 4 };
-enum { DIAG_RESPONSE = 1, DIAG_ERROR = 2, DIAG_CAP_PROFILER = 1, DIAG_CAP_SYMBOLS = 2 };
+enum { DIAG_RESPONSE = 1, DIAG_ERROR = 2, DIAG_CAP_PROFILER = 1, DIAG_CAP_SYMBOLS = 2, DIAG_CAP_AUTH_REQUIRED = 4 };
 
 static hl_diag_transport *diag_transport;
 static hl_socket *diag_client;
 static volatile bool diag_stopped;
+static const char *diag_token;
 
 typedef struct {
 	unsigned char *data;
@@ -265,7 +267,9 @@ static bool send_status( hl_socket *socket, int type, unsigned int request_id ) 
 
 static void handle_client( hl_socket *socket ) {
 	unsigned char hello[16];
-	memcpy(hello,"HLDI",4); write_u16(hello + 4,1); write_u16(hello + 6,DIAG_CAP_PROFILER | DIAG_CAP_SYMBOLS);
+	bool authenticated = diag_token == NULL || *diag_token == 0;
+	int capabilities = DIAG_CAP_PROFILER | DIAG_CAP_SYMBOLS | (authenticated ? 0 : DIAG_CAP_AUTH_REQUIRED);
+	memcpy(hello,"HLDI",4); write_u16(hello + 4,1); write_u16(hello + 6,capabilities);
 	write_u32(hello + 8,HL_VERSION); write_u32(hello + 12,(unsigned int)hl_sys_getpid());
 	if( !hl_diag_transport_send(socket,hello,sizeof(hello)) ) return;
 	while( true ) {
@@ -277,8 +281,15 @@ static void handle_client( hl_socket *socket ) {
 			payload = malloc(header.length);
 			if( payload == NULL || !hl_diag_transport_recv(socket,payload,(int)header.length) ) { free(payload); break; }
 		}
-		if( header.service == DIAG_SERVICE_CONTROL && header.type == DIAG_CONTROL_CAPABILITIES && header.length == 0 ) {
-			unsigned char caps[4]; write_u32(caps,DIAG_CAP_PROFILER | DIAG_CAP_SYMBOLS);
+		if( header.service == DIAG_SERVICE_CONTROL && header.type == DIAG_CONTROL_AUTHENTICATE && header.length <= 1024 ) {
+			unsigned int expected = authenticated ? 0 : (unsigned int)strlen(diag_token), difference = expected ^ header.length;
+			for(unsigned int i=0;i<header.length;i++) difference |= payload[i] ^ (i < expected ? (unsigned char)diag_token[i] : 0);
+			authenticated = difference == 0;
+			ok = authenticated && send_frame(socket,header.service,header.type,DIAG_RESPONSE,header.request_id,NULL,0);
+		} else if( !authenticated ) {
+			ok = false;
+		} else if( header.service == DIAG_SERVICE_CONTROL && header.type == DIAG_CONTROL_CAPABILITIES && header.length == 0 ) {
+			unsigned char caps[4]; write_u32(caps,capabilities);
 			ok = send_frame(socket,header.service,header.type,DIAG_RESPONSE,header.request_id,caps,sizeof(caps));
 		} else if( header.service == DIAG_SERVICE_PROFILER && header.type == DIAG_PROFILE_STATUS && header.length == 0 ) {
 			ok = send_status(socket,header.type,header.request_id);
@@ -323,9 +334,14 @@ static void diagnostics_loop( void *_ ) {
 	diag_stopped = true;
 }
 
-bool hl_diagnostics_start( int port ) {
+bool hl_diagnostics_start( int port, bool public_bind ) {
 	if( diag_transport || port <= 0 ) return false;
-	diag_transport = hl_diag_transport_listen(port);
+	diag_token = getenv("HL_DIAGNOSTICS_TOKEN");
+	if( public_bind && (diag_token == NULL || *diag_token == 0) ) {
+		fprintf(stderr,"Public diagnostics requires HL_DIAGNOSTICS_TOKEN\n");
+		return false;
+	}
+	diag_transport = hl_diag_transport_listen(port,public_bind);
 	if( diag_transport == NULL ) return false;
 	diag_stopped = false;
 #ifdef HL_THREADS
