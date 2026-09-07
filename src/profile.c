@@ -392,7 +392,9 @@ static void read_thread_data( thread_handle *t ) {
 #if defined(HL_LINUX) || defined(HL_MAC)
 	{
 		Dl_info native_leaf;
-		if( eip && count < MAX_STACK_COUNT && dladdr(eip,&native_leaf) && native_leaf.dli_sname ) {
+		bool jit_leaf = eip && hl_module_resolve_jit_location(eip) != NULL;
+		bool named_native_leaf = eip && dladdr(eip,&native_leaf) && native_leaf.dli_sname;
+		if( count < MAX_STACK_COUNT && (jit_leaf || named_native_leaf) ) {
 			memmove(data.stackOut + 1,data.stackOut,sizeof(void*) * count);
 			data.stackOut[0] = eip;
 			count++;
