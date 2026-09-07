@@ -14,9 +14,7 @@ struct _hl_patch_code {
 	hl_function *functions;
 	int jit_debug_count;
 	hl_debug_infos *jit_debug;
-	int **debug_starts;
-	int **debug_ends;
-	int **debug_flags;
+	hl_source_span **debug_spans;
 	hl_patch_code *next_retired;
 };
 
@@ -40,13 +38,11 @@ static void patch_code_free( hl_patch_code *code ) {
 		free(code->functions[i].regs);
 		free(code->functions[i].ops);
 		free(code->functions[i].debug);
-		free(code->debug_starts == NULL ? NULL : code->debug_starts[i]);
-		free(code->debug_ends == NULL ? NULL : code->debug_ends[i]);
-		free(code->debug_flags == NULL ? NULL : code->debug_flags[i]);
+		free(code->debug_spans == NULL ? NULL : code->debug_spans[i]);
 	}
 	for(int i=0;i<code->jit_debug_count;i++){free(code->jit_debug[i].offsets);free(code->jit_debug[i].vars);free(code->jit_debug[i].opcodes);}
 	free(code->jit_debug);
-	free(code->debug_starts);free(code->debug_ends);free(code->debug_flags);
+	free(code->debug_spans);
 	if(code->code) hl_free_executable_memory(code->code,code->code_size);
 	free(code->functions);
 	free(code);
@@ -174,12 +170,12 @@ bool hl_module_patch_debug_function_get( hl_module *m, int region, int function,
 	return (*debug)->offsets != NULL;
 }
 
-bool hl_module_patch_debug_source_span_get( hl_module *m, int region, int function, int opcode, int *start, int *end, int *flags ) {
+bool hl_module_patch_debug_source_span_get( hl_module *m, int region, int function, int opcode, hl_source_span *out ) {
 	bool retired;
 	hl_patch_code *owner = patch_debug_region_at(m,region,&retired);
 	if( owner == NULL || function < 0 || function >= owner->function_count || opcode < 0 || opcode >= owner->functions[function].nops
-		|| owner->debug_starts == NULL || owner->debug_starts[function] == NULL || start == NULL || end == NULL || flags == NULL ) return false;
-	*start = owner->debug_starts[function][opcode]; *end = owner->debug_ends[function][opcode]; *flags = owner->debug_flags[function][opcode];
+		|| owner->debug_spans == NULL || owner->debug_spans[function] == NULL || out == NULL ) return false;
+	*out = owner->debug_spans[function][opcode];
 	return true;
 }
 
@@ -216,6 +212,13 @@ static bool read_hash( patch_reader *r, unsigned int *out ) {
 	const unsigned char *p;
 	if( !take(r,4,&p) ) return false;
 	*out = p[0] | (p[1] << 8) | (p[2] << 16) | ((unsigned int)p[3] << 24);
+	return true;
+}
+
+static bool read_i32( patch_reader *r, int *out ) {
+	unsigned int value;
+	if( !read_hash(r,&value) ) return false;
+	*out = (int)value;
 	return true;
 }
 
@@ -343,7 +346,7 @@ void hl_patch_free( hl_patch *patch ) {
 	for(i=0;i<patch->function_count;i++) {
 		hl_patch_function *f = patch->functions + i;
 		for(j=0;j<f->instruction_count;j++) free(f->instructions[j].operands);
-		free(f->instructions); free(f->registers); free(f->relocation_instructions); free(f->relocation_stable_ids); free(f->debug_files); free(f->debug_lines); free(f->debug_starts); free(f->debug_ends); free(f->debug_flags);
+		free(f->instructions); free(f->registers); free(f->relocation_instructions); free(f->relocation_stable_ids); free(f->debug_spans);
 	}
 	for(i=0;i<patch->type_count;i++) if(patch->types[i].tag==HFUN) free(patch->types[i].data.fun.arguments);
 	free(patch->types);
@@ -361,7 +364,7 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 	if( !take(&r,3,&p) ) goto fail;
 	if( memcmp(p,"HLP",3) != 0 ) FAIL("Invalid HLP magic");
 	if( !read_byte(&r,&version) ) goto fail;
-	if( version != 5 ) FAIL("Unsupported HLP version");
+	if( version != 6 ) FAIL("Unsupported HLP version");
 	if( !take(&r,16,&p) ) goto fail;
 	memcpy(patch->module_id,p,16);
 	if( !read_count(&r,&patch->base_revision) || !read_count(&r,&patch->revision) ) goto fail;
@@ -401,7 +404,26 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 			patch->debug_files=(char**)calloc(patch->debug_file_count,sizeof(char*));patch->debug_file_lens=(int*)calloc(patch->debug_file_count,sizeof(int));if(patch->debug_file_count&&(!patch->debug_files||!patch->debug_file_lens))FAIL("Out of memory reading patch debug files");
 			for(i=0;i<patch->debug_file_count;i++){if(!read_count(&s,&count)||!take(&s,count,&p))goto section_fail;patch->debug_file_lens[i]=count;patch->debug_files[i]=(char*)malloc(count+1);if(!patch->debug_files[i])FAIL("Out of memory reading patch debug files");memcpy(patch->debug_files[i],p,count);patch->debug_files[i][count]=0;}
 			if(!read_count(&s,&count)||count!=patch->function_count)FAIL("HLP debug function count mismatch");
-			for(i=0;i<count;i++){int stable_id,nops,found=-1;if(!read_count(&s,&stable_id)||!read_count(&s,&nops))goto section_fail;for(j=0;j<patch->function_count;j++)if(patch->functions[j].stable_id==stable_id){if(found>=0)FAIL("Duplicate HLP function debug metadata");found=j;}if(found<0)FAIL("Unknown HLP debug function");hl_patch_function *f=patch->functions+found;if(f->debug_count)FAIL("Duplicate HLP function debug metadata");if(nops!=f->instruction_count)FAIL("HLP debug opcode count mismatch");f->debug_count=nops;f->debug_files=(int*)calloc(nops,sizeof(int));f->debug_lines=(int*)calloc(nops,sizeof(int));f->debug_starts=(int*)calloc(nops,sizeof(int));f->debug_ends=(int*)calloc(nops,sizeof(int));f->debug_flags=(int*)calloc(nops,sizeof(int));if(nops&&(!f->debug_files||!f->debug_lines||!f->debug_starts||!f->debug_ends||!f->debug_flags))FAIL("Out of memory reading patch debug metadata");for(j=0;j<nops;j++){int start,end;if(!read_count(&s,f->debug_files+j)||!read_count(&s,f->debug_lines+j)||!read_index(&s,&start)||!read_index(&s,&end)||!read_count(&s,f->debug_flags+j))goto section_fail;start--;end--;f->debug_starts[j]=start;f->debug_ends[j]=end;if(f->debug_files[j]>=patch->debug_file_count||f->debug_lines[j]<1||!((start==-1&&end==-1)||(start>=0&&end>=start)))FAIL("Invalid HLP debug location");}}
+			for(i=0;i<count;i++){
+				int stable_id,nops,found=-1;
+				if(!read_count(&s,&stable_id)||!read_count(&s,&nops))goto section_fail;
+				for(j=0;j<patch->function_count;j++)if(patch->functions[j].stable_id==stable_id){if(found>=0)FAIL("Duplicate HLP function debug metadata");found=j;}
+				if(found<0)FAIL("Unknown HLP debug function");
+				hl_patch_function *f=patch->functions+found;
+				if(f->debug_count)FAIL("Duplicate HLP function debug metadata");
+				if(nops!=f->instruction_count)FAIL("HLP debug opcode count mismatch");
+				f->debug_count=nops;f->debug_spans=(hl_source_span*)calloc(nops,sizeof(hl_source_span));
+				if(nops&&!f->debug_spans)FAIL("Out of memory reading patch debug metadata");
+				for(j=0;j<nops;j++){
+					hl_source_span *span=f->debug_spans+j;
+					if(!read_count(&s,&span->file)||!read_count(&s,&span->line)||!read_count(&s,&span->column)||!read_count(&s,&span->end_line)
+						||!read_count(&s,&span->end_column)||!read_i32(&s,&span->source_hash)||!read_index(&s,&span->start)||!read_index(&s,&span->end)||!read_count(&s,&span->flags))goto section_fail;
+					span->start--;span->end--;
+					if(span->file>=patch->debug_file_count||span->line<1||span->column<1||span->end_line<span->line||span->end_column<1
+						||(span->end_line==span->line&&span->end_column<span->column)
+						||!((span->start==-1&&span->end==-1)||(span->start>=0&&span->end>=span->start)))FAIL("Invalid HLP debug location");
+				}
+			}
 		} else {
 			s.p = s.end;
 		}
@@ -584,10 +606,10 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	if(inject_patch_failure(m,2,&error))goto fail;
 	allocation=(hl_patch_code*)calloc(1,sizeof(hl_patch_code));if(!allocation){error="Out of memory applying patch";goto fail;}
 	allocation->revision=patch->revision;
-	allocation->function_count=patch->function_count;allocation->functions=(hl_function*)calloc(patch->function_count,sizeof(hl_function));allocation->debug_starts=(int**)calloc(patch->function_count,sizeof(int*));allocation->debug_ends=(int**)calloc(patch->function_count,sizeof(int*));allocation->debug_flags=(int**)calloc(patch->function_count,sizeof(int*));
-	offsets=(int*)calloc(patch->function_count,sizeof(int));if(!allocation->functions||!allocation->debug_starts||!allocation->debug_ends||!allocation->debug_flags||!offsets){error="Out of memory applying patch";goto fail;}
+	allocation->function_count=patch->function_count;allocation->functions=(hl_function*)calloc(patch->function_count,sizeof(hl_function));allocation->debug_spans=(hl_source_span**)calloc(patch->function_count,sizeof(hl_source_span*));
+	offsets=(int*)calloc(patch->function_count,sizeof(int));if(!allocation->functions||!allocation->debug_spans||!offsets){error="Out of memory applying patch";goto fail;}
 	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;dst->type=m->code->types+src->type;dst->findex=src->findex;dst->nregs=src->register_count;dst->nops=src->instruction_count;dst->regs=(hl_type**)calloc(dst->nregs,sizeof(hl_type*));dst->ops=(hl_opcode*)calloc(dst->nops,sizeof(hl_opcode));if(!dst->regs||!dst->ops){error="Out of memory applying patch";goto fail;}for(int j=0;j<dst->nregs;j++)dst->regs[j]=m->code->types+src->registers[j];for(int j=0;j<dst->nops;j++){hl_patch_instruction *s=src->instructions+j;hl_opcode *d=dst->ops+j;d->op=(hl_op)s->opcode;if(s->operand_count>0)d->p1=s->operands[0];if(s->operand_count>1)d->p2=s->operands[1];if(s->operand_count>2)d->p3=s->operands[2];if(s->operand_count==4&&d->op!=OCallN&&d->op!=OCallMethod&&d->op!=OCallThis&&d->op!=OCallClosure&&d->op!=OMakeEnum)d->extra=(int*)(int_val)s->operands[3];if(s->operand_count>3&&(d->op==OCall3||d->op==OCall4||d->op==OCallN||d->op==OCallMethod||d->op==OCallThis||d->op==OCallClosure||d->op==OMakeEnum)){int count=d->op==OCall3?2:d->op==OCall4?3:s->operand_count-3;d->extra=(int*)malloc(sizeof(int)*count);if(!d->extra){error="Out of memory applying patch";goto fail;}memcpy(d->extra,s->operands+3,sizeof(int)*count);}}}
-	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;if(src->debug_count){dst->debug=(int*)calloc(src->debug_count*2,sizeof(int));allocation->debug_starts[i]=(int*)calloc(src->debug_count,sizeof(int));allocation->debug_ends[i]=(int*)calloc(src->debug_count,sizeof(int));allocation->debug_flags[i]=(int*)calloc(src->debug_count,sizeof(int));if(!dst->debug||!allocation->debug_starts[i]||!allocation->debug_ends[i]||!allocation->debug_flags[i]){error="Out of memory applying patch debug metadata";goto fail;}for(int j=0;j<src->debug_count;j++){int wire_file=src->debug_files[j],file=find_debug_file(m->code,patch->debug_files[wire_file],patch->debug_file_lens[wire_file]);if(file<0){error="Patch debug file is not present in module";goto fail;}dst->debug[j*2]=file;dst->debug[j*2+1]=src->debug_lines[j];allocation->debug_starts[i][j]=src->debug_starts[j];allocation->debug_ends[i][j]=src->debug_ends[j];allocation->debug_flags[i][j]=src->debug_flags[j];}}}
+	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;if(src->debug_count){dst->debug=(int*)calloc(src->debug_count*2,sizeof(int));allocation->debug_spans[i]=(hl_source_span*)calloc(src->debug_count,sizeof(hl_source_span));if(!dst->debug||!allocation->debug_spans[i]){error="Out of memory applying patch debug metadata";goto fail;}for(int j=0;j<src->debug_count;j++){hl_source_span span=src->debug_spans[j];int file=find_debug_file(m->code,patch->debug_files[span.file],patch->debug_file_lens[span.file]);if(file<0){error="Patch debug file is not present in module";goto fail;}span.file=file;dst->debug[j*2]=file;dst->debug[j*2+1]=span.line;allocation->debug_spans[i][j]=span;}}}
 	combined_functions=(hl_function*)calloc(m->code->nfunctions,sizeof(hl_function));
 	if(!combined_functions){error="Out of memory applying patch";goto fail;}
 	memcpy(combined_functions,m->code->functions,sizeof(hl_function)*m->code->nfunctions);

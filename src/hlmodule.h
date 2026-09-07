@@ -128,6 +128,12 @@ typedef struct {
 } hl_patch_instruction;
 
 typedef struct {
+	int file, line, column, end_line, end_column;
+	int source_hash;
+	int start, end, flags;
+} hl_source_span;
+
+typedef struct {
 	int tag;
 	union {
 		struct {
@@ -152,11 +158,7 @@ typedef struct {
 	int *relocation_instructions;
 	int *relocation_stable_ids;
 	int debug_count;
-	int *debug_files;
-	int *debug_lines;
-	int *debug_starts;
-	int *debug_ends;
-	int *debug_flags;
+	hl_source_span *debug_spans;
 } hl_patch_function;
 
 typedef struct {
@@ -311,7 +313,7 @@ typedef struct {
 int hl_module_patch_debug_region_count( hl_module *module );
 bool hl_module_patch_debug_region_get( hl_module *module, int region, hl_patch_debug_region *out );
 bool hl_module_patch_debug_function_get( hl_module *module, int region, int function, int *function_index, hl_function **bytecode, hl_debug_infos **debug );
-bool hl_module_patch_debug_source_span_get( hl_module *module, int region, int function, int opcode, int *start, int *end, int *flags );
+bool hl_module_patch_debug_source_span_get( hl_module *module, int region, int function, int opcode, hl_source_span *out );
 void hl_module_patch_release_all( hl_module *module );
 /** Force teardown during initialization failure or process shutdown only. */
 HL_EXTERN_C HL_EXPORT void hl_module_free_shutdown( hl_module *m );

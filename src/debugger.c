@@ -134,15 +134,14 @@ static void send_patch_regions( hl_module *m ) {
 			hl_debug_infos *debug;
 			if( !hl_module_patch_debug_function_get(m,i,j,&function_index,&function,&debug) ) return;
 			send_debug_function(function,debug,function_index,true,true,m->code->function_stable_ids[function_index]);
-			int first_start,first_end,first_flags;
-			int span_count = function->nops > 0 && hl_module_patch_debug_source_span_get(m,i,j,0,&first_start,&first_end,&first_flags) ? function->nops : 0;
+			hl_source_span first_span;
+			int span_count = function->nops > 0 && hl_module_patch_debug_source_span_get(m,i,j,0,&first_span) ? function->nops : 0;
 			send(&span_count,4);
 			for(int opcode=0;opcode<span_count;opcode++) {
-				int start,end,flags;
-				if( opcode == 0 ) { start=first_start; end=first_end; flags=first_flags; }
-				else if( !hl_module_patch_debug_source_span_get(m,i,j,opcode,&start,&end,&flags) ) return;
-				send(function->debug+opcode*2,4); send(function->debug+opcode*2+1,4);
-				send(&start,4); send(&end,4); send(&flags,4);
+				hl_source_span span;
+				if( opcode == 0 ) span=first_span;
+				else if( !hl_module_patch_debug_source_span_get(m,i,j,opcode,&span) ) return;
+				send(&span,sizeof(span));
 			}
 		}
 	}
