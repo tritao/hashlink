@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define HL_RUNTIME_INIT_STABLE_ID 0x1FFFFFFF
+#define HL_RUNTIME_V2_INIT_STABLE_ID 0x1FFFFFFF
 
 void hl_debug_notify_revision( hl_module *m );
 
@@ -137,14 +137,18 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 	hl_code *code;
 	hl_module *module;
 	hl_runtime_module *runtime;
-	int identity_count, revision, i, j;
+	int identity_count, initializer_slot, entries_offset, revision, version, i, j;
 	hl_runtime_failed_retirements_retry();
 	if( out == NULL || bytes == NULL || length <= 0 || identity == NULL || identity_length < 28 ) return HL_RUNTIME_BAD_ARGUMENT;
 	*out = NULL;
-	if( memcmp(identity,"HLI",3) != 0 || identity[3] != 2 ) return HL_RUNTIME_BAD_FORMAT;
+	version = identity[3];
+	if( memcmp(identity,"HLI",3) != 0 || (version != 2 && version != 3) ) return HL_RUNTIME_BAD_FORMAT;
 	revision = (int)read_u32(identity + 20);
 	identity_count = (int)read_u32(identity + 24);
-	if( revision < 0 || identity_count < 0 || identity_count > 0x100000 || identity_length != 28 + identity_count * 8 ) return HL_RUNTIME_BAD_FORMAT;
+	entries_offset = version == 3 ? 32 : 28;
+	initializer_slot = version == 3 ? (int)read_u32(identity + 28) : -1;
+	if( revision < 0 || identity_count < 0 || identity_count > 0x100000 || initializer_slot < -1
+		|| identity_length != entries_offset + identity_count * 8 ) return HL_RUNTIME_BAD_FORMAT;
 	code = hl_code_read(bytes,length,&error);
 	if( code == NULL ) return HL_RUNTIME_BAD_FORMAT;
 	module = hl_module_alloc(code);
@@ -177,8 +181,8 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 		free(runtime->stable_ids);free(runtime->slots);free(runtime);hl_module_unload(module);return HL_RUNTIME_JIT_FAILED;
 	}
 	for(i=0;i<identity_count;i++) {
-		runtime->stable_ids[i] = (int)read_u32(identity + 28 + i * 8);
-		runtime->slots[i] = (int)read_u32(identity + 32 + i * 8);
+		runtime->stable_ids[i] = (int)read_u32(identity + entries_offset + i * 8);
+		runtime->slots[i] = (int)read_u32(identity + entries_offset + 4 + i * 8);
 		if( runtime->stable_ids[i] < 0 || find_function(module,runtime->slots[i]) == NULL ) {
 			free(runtime->stable_ids);free(runtime->slots);free(runtime);hl_module_unload(module);return HL_RUNTIME_BAD_FORMAT;
 		}
@@ -188,9 +192,20 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 	}
 	runtime->lock = hl_mutex_alloc(true);
 	hl_add_root(&runtime->lock);
-	if( resolve_stable_id(runtime,HL_RUNTIME_INIT_STABLE_ID) >= 0 ) {
+	if( version == 2 ) {
+		for(i=0;i<identity_count;i++)
+			if( runtime->stable_ids[i] == HL_RUNTIME_V2_INIT_STABLE_ID ) initializer_slot = runtime->slots[i];
+	}
+	if( initializer_slot >= 0 ) {
+		int initializer_id = -1;
+		for(i=0;i<identity_count;i++)
+			if( runtime->slots[i] == initializer_slot ) initializer_id = runtime->stable_ids[i];
+		if( initializer_id < 0 ) {
+			if( hl_runtime_module_release(runtime) != HL_RUNTIME_OK ) failed_retirement_add(runtime);
+			return HL_RUNTIME_BAD_FORMAT;
+		}
 		vdynamic *exception = NULL;
-		hl_runtime_status status = hl_runtime_module_call_void(runtime,HL_RUNTIME_INIT_STABLE_ID,&exception);
+		hl_runtime_status status = hl_runtime_module_call_void(runtime,initializer_id,&exception);
 		if( status != HL_RUNTIME_OK ) {
 			exception = NULL;
 			runtime_clear_exception_state();
