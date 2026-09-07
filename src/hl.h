@@ -635,6 +635,7 @@ typedef struct {
 	void (*free_jit_support)();
 	void (*free_runtime_retirements)();
 	void (*free_module_registry)();
+	void (*debug_module_removed)(void *module);
 	void (*vtune_init)();
 	bool (*load_plugin)( pchar *file );
 	vdynamic* (*resolve_type)( hl_type *t, hl_type *gt );

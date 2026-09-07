@@ -47,8 +47,8 @@ static hl_socket *client_socket = NULL;
 static bool debugger_connected = false;
 static bool debugger_stopped = false;
 static bool debug_protocol3 = false;
-static volatile int debug_pending_revision = 0;
-static volatile int debug_ack_revision = 0;
+static volatile int debug_pending_sequence = 0;
+static volatile int debug_ack_sequence = 0;
 static hl_mutex *debug_notify_lock = NULL;
 
 static void debug_trace( const char *event, hl_module *m, int revision, void *address, int value ) {
@@ -172,17 +172,36 @@ static void send_patch_refresh() {
    command, so it cannot interleave with MAP3. The publisher stays parked until
    breakpoint mappings have been rebound and the adapter has acknowledged. */
 void hl_debug_notify_revision( hl_module *m ) {
+	int sequence;
 	if( !debug_protocol3 || debug_notify_lock == NULL || m == NULL ) return;
 	hl_mutex_acquire(debug_notify_lock);
 	if( client_socket == NULL ) { hl_mutex_release(debug_notify_lock); return; }
-	debug_pending_revision = m->revision;
+	sequence = ++debug_pending_sequence;
 	debug_trace("rev3_sent",m,m->revision,NULL,0);
 	send("REV3",4);
 	send(&m,sizeof(void*));
 	send(&m->revision,4);
 	hl_mutex_release(debug_notify_lock);
-	while( client_socket != NULL && debug_ack_revision < m->revision ) debug_wait_tick();
+	while( client_socket != NULL && debug_ack_sequence < sequence ) debug_wait_tick();
 	debug_trace("revision_released",m,m->revision,NULL,0);
+}
+
+/* Retirement has unpublished the module and established that no registry
+   reader remains. Keep its metadata alive until the debugger has discarded
+   cached mappings and acknowledged the stable identity. */
+static void hl_debug_notify_remove( void *module ) {
+	hl_module *m = (hl_module*)module;
+	int sequence;
+	if( !debug_protocol3 || debug_notify_lock == NULL || m == NULL ) return;
+	hl_mutex_acquire(debug_notify_lock);
+	if( client_socket == NULL ) { hl_mutex_release(debug_notify_lock); return; }
+	sequence = ++debug_pending_sequence;
+	debug_trace("rem3_sent",m,m->revision,NULL,0);
+	send("REM3",4);
+	send(&m,sizeof(void*));
+	hl_mutex_release(debug_notify_lock);
+	while( client_socket != NULL && debug_ack_sequence < sequence ) debug_wait_tick();
+	debug_trace("removal_released",m,m->revision,NULL,0);
 }
 
 static void hl_debug_loop() {
@@ -209,7 +228,7 @@ static void hl_debug_loop() {
 		vbyte cmd;
 		hl_socket *s = hl_socket_accept(debug_socket);
 		if( s == NULL ) break;
-		debug_ack_revision = debug_pending_revision;
+		debug_ack_sequence = debug_pending_sequence;
 		hl_mutex_acquire(debug_notify_lock);
 		client_socket = s;
 		hl_mutex_release(debug_notify_lock);
@@ -255,9 +274,9 @@ static void hl_debug_loop() {
 			if( cmd == 'R' )
 				send_patch_refresh();
 			else if( cmd == 'A' ) {
-				if( debug_pending_revision == 0 ) send("ACK3",4);
-				debug_ack_revision = debug_pending_revision;
-				debug_trace("ack3_received",NULL,debug_ack_revision,NULL,0);
+				if( debug_pending_sequence == 0 ) send("ACK3",4);
+				debug_ack_sequence = debug_pending_sequence;
+				debug_trace("ack3_received",NULL,debug_ack_sequence,NULL,0);
 			}
 			else {
 				int count;
@@ -270,14 +289,14 @@ static void hl_debug_loop() {
 					if( !recv_all(s,&address,sizeof(void*)) || !recv_all(s,&byte,1) ) { count = -1; break; }
 					old = *(unsigned char*)address;
 					*(unsigned char*)address = byte;
-					debug_trace("breakpoint_write",NULL,debug_pending_revision,address,byte);
+					debug_trace("breakpoint_write",NULL,debug_pending_sequence,address,byte);
 					send(&old,1);
 				}
 				if( count < 0 ) break;
 			}
 			if( hl_socket_recv(s,&cmd,0,1) <= 0 ) break;
 		}
-		debug_ack_revision = debug_pending_revision;
+		debug_ack_sequence = debug_pending_sequence;
 		hl_mutex_acquire(debug_notify_lock);
 		client_socket = NULL;
 		hl_mutex_release(debug_notify_lock);
@@ -319,6 +338,7 @@ h_bool hl_module_debug( hl_module *m, int port, h_bool wait ) {
 	debug_socket = NULL;
 #	endif
 	hl_setup.is_debugger_enabled = true;
+	hl_setup.debug_module_removed = hl_debug_notify_remove;
 	return true;
 }
 
