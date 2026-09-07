@@ -109,10 +109,14 @@ static struct {
 	int requested_rate;
 	double last_adjust;
 	double last_consume;
+	unsigned long long sample_records;
+	unsigned long long sample_nanos;
+	unsigned long long generated_bytes;
 } stream = {0};
 
 enum { PROFILE_STREAM_SAMPLE = 1, PROFILE_STREAM_EVENT = 2 };
 #define PROFILE_EVENT_MODULE_REVISION 0x484C0001
+#define PROFILE_EVENT_THREAD_NAME 0x484C0002
 
 static void stream_write_u32( unsigned char *p, unsigned int value ) {
 	p[0] = (unsigned char)value; p[1] = (unsigned char)(value >> 8);
@@ -168,6 +172,7 @@ static void stream_record( int kind, int flags, double time, int tid, int value,
 	}
 	stream_append_locked(header,sizeof(header));
 	if( payload_size ) stream_append_locked(payload,payload_size);
+	stream.generated_bytes += record_size;
 	if( stream.requested_rate > 0 && time - stream.last_adjust >= 1.0 ) {
 		unsigned long long used = stream.next - stream.consumer;
 		int next_rate = data.sample_count;
@@ -315,6 +320,7 @@ static void record_data( void *ptr, int size ) {
 }
 
 static void read_thread_data( thread_handle *t ) {
+	double sample_started = hl_sys_time();
 	if( !pause_thread(t,true) )
 		return;
 	void *eip;
@@ -359,8 +365,17 @@ static void read_thread_data( thread_handle *t ) {
 	record_data(&t->tid,sizeof(int));
 	record_data(&eventId,sizeof(int));
 	record_data(data.stackOut,sizeof(void*)*count);
-	if( *t->inf->thread_name && !*t->name )
+	if( *t->inf->thread_name && !*t->name ) {
 		memcpy(t->name, t->inf->thread_name, sizeof(t->name));
+		stream_record(PROFILE_STREAM_EVENT,0,hl_sys_time(),t->tid,PROFILE_EVENT_THREAD_NAME,t->name,(unsigned int)strlen(t->name));
+	}
+	if( stream.lock ) {
+		double elapsed = hl_sys_time() - sample_started;
+		hl_mutex_acquire(stream.lock);
+		stream.sample_records++;
+		stream.sample_nanos += (unsigned long long)(elapsed * 1000000000.0);
+		hl_mutex_release(stream.lock);
+	}
 }
 
 static void profile_pause() {
@@ -510,7 +525,7 @@ void hl_profile_setup( int sample_count ) {
 #	endif
 }
 
-void hl_profile_stream_status( unsigned long long *first, unsigned long long *next, unsigned long long *dropped, int *sample_rate, int *paused, unsigned long long *consumer, int *requested_rate ) {
+void hl_profile_stream_status( unsigned long long *first, unsigned long long *next, unsigned long long *dropped, int *sample_rate, int *paused, unsigned long long *consumer, int *requested_rate, unsigned long long *sample_records, unsigned long long *sample_nanos, unsigned long long *generated_bytes ) {
 	if( stream.lock ) hl_mutex_acquire(stream.lock);
 	*first = stream.first;
 	*next = stream.next;
@@ -519,6 +534,9 @@ void hl_profile_stream_status( unsigned long long *first, unsigned long long *ne
 	*paused = data.profiling_pause > 0;
 	*consumer = stream.consumer;
 	*requested_rate = stream.requested_rate;
+	*sample_records = stream.sample_records;
+	*sample_nanos = stream.sample_nanos;
+	*generated_bytes = stream.generated_bytes;
 	if( stream.lock ) hl_mutex_release(stream.lock);
 }
 
