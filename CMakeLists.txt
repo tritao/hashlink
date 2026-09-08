@@ -304,6 +304,36 @@ if(BUILD_TESTING)
         DEPENDS ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/threads.hl
     )
 
+    if((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE) AND WITH_VM)
+        #####################
+        # crash-signals.hl
+
+        add_custom_command(OUTPUT ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/crash-signals.hl
+            COMMAND ${HAXE_COMPILER}
+                ${HAXE_HL_FLAGS}
+                -hl ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/crash-signals.hl
+                -cp ${CMAKE_SOURCE_DIR}/other/tests -main CrashSignals
+            DEPENDS
+                ${CMAKE_SOURCE_DIR}/other/tests/CrashSignals.hx
+                ${CMAKE_SOURCE_DIR}/other/tests/CrashTestNative.hx
+        )
+        add_custom_target(crash-signals.hl ALL
+            DEPENDS ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/crash-signals.hl
+        )
+
+        add_library(crash_test.hdll MODULE
+            other/tests/crash_test.c
+        )
+        set_target_properties(crash_test.hdll
+            PROPERTIES
+            PREFIX ""
+            OUTPUT_NAME crash_test
+            SUFFIX .hdll
+        )
+        target_link_libraries(crash_test.hdll libhl)
+        add_dependencies(crash-signals.hl crash_test.hdll)
+    endif()
+
     #####################
     # uvsample.hl
 
@@ -422,6 +452,17 @@ if(BUILD_TESTING)
         add_test(NAME uvsample.hl
             COMMAND hl ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/uvsample.hl 6001
         )
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE)
+            add_test(NAME crash-signals.hl
+                COMMAND sh ${CMAKE_SOURCE_DIR}/other/tests/crash_signals.sh
+                    $<TARGET_FILE:hl>
+                    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/crash-signals.hl
+            )
+            set_tests_properties(crash-signals.hl
+                PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
+            )
+        endif()
     endif()
 
     add_test(NAME hello

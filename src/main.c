@@ -239,7 +239,7 @@ static void handle_signal( int signum, siginfo_t *info, void *context ) {
 	/* This provides useful Haxe frames, but is only best-effort because symbol
 	   resolution is not async-signal-safe. SA_RESETHAND ensures that another
 	   fault while walking the stack is handled by the operating system. */
-	if( hl_get_thread() != NULL )
+	if( info != NULL && info->si_code > 0 && hl_get_thread() != NULL )
 		hl_dump_stack();
 	raise(signum);
 }
