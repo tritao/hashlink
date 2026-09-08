@@ -26,8 +26,126 @@ typedef struct {
 	unsigned char data[];
 } hl_gdb_entry;
 
+typedef struct {
+	unsigned char *data;
+	size_t size, capacity;
+} byte_buffer;
+
 static pthread_mutex_t jit_lock = PTHREAD_MUTEX_INITIALIZER;
 static size_t align8( size_t value ) { return (value + 7) & ~(size_t)7; }
+
+static bool buffer_reserve( byte_buffer *buffer, size_t size ) {
+	size_t capacity;
+	unsigned char *data;
+	if( buffer->size + size <= buffer->capacity ) return true;
+	capacity = buffer->capacity ? buffer->capacity : 256;
+	while( capacity < buffer->size + size ) capacity *= 2;
+	data = (unsigned char*)realloc(buffer->data,capacity);
+	if( !data ) return false;
+	buffer->data = data;
+	buffer->capacity = capacity;
+	return true;
+}
+
+static bool buffer_bytes( byte_buffer *buffer, const void *data, size_t size ) {
+	if( !buffer_reserve(buffer,size) ) return false;
+	memcpy(buffer->data+buffer->size,data,size);
+	buffer->size += size;
+	return true;
+}
+
+static bool buffer_u8( byte_buffer *buffer, unsigned char value ) { return buffer_bytes(buffer,&value,1); }
+static bool buffer_u16( byte_buffer *buffer, uint16_t value ) { return buffer_bytes(buffer,&value,sizeof(value)); }
+static bool buffer_u32( byte_buffer *buffer, uint32_t value ) { return buffer_bytes(buffer,&value,sizeof(value)); }
+static bool buffer_u64( byte_buffer *buffer, uint64_t value ) { return buffer_bytes(buffer,&value,sizeof(value)); }
+
+static bool buffer_uleb( byte_buffer *buffer, uint64_t value ) {
+	do {
+		unsigned char byte = value & 0x7F;
+		value >>= 7;
+		if( value ) byte |= 0x80;
+		if( !buffer_u8(buffer,byte) ) return false;
+	} while( value );
+	return true;
+}
+
+static bool buffer_sleb( byte_buffer *buffer, int64_t value ) {
+	bool more;
+	do {
+		unsigned char byte = value & 0x7F;
+		bool sign = (byte & 0x40) != 0;
+		value >>= 7;
+		more = !((value == 0 && !sign) || (value == -1 && sign));
+		if( more ) byte |= 0x80;
+		if( !buffer_u8(buffer,byte) ) return false;
+	} while( more );
+	return true;
+}
+
+static unsigned int function_offset( hl_debug_infos *debug, int opcode ) {
+	return debug->large ? (unsigned int)((int*)debug->offsets)[opcode] : (unsigned int)((unsigned short*)debug->offsets)[opcode];
+}
+
+static bool build_debug_line( hl_module *m, byte_buffer *buffer ) {
+	static const unsigned char opcode_lengths[] = { 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1 };
+	size_t unit_length_at, header_length_at, header_start;
+	uint32_t length;
+	int i, j;
+	if( !m->code->hasdebug || m->code->ndebugfiles <= 0 ) return true;
+	unit_length_at = buffer->size;
+	if( !buffer_u32(buffer,0) || !buffer_u16(buffer,4) ) return false;
+	header_length_at = buffer->size;
+	if( !buffer_u32(buffer,0) ) return false;
+	header_start = buffer->size;
+	if( !buffer_u8(buffer,1) || !buffer_u8(buffer,1) || !buffer_u8(buffer,1) ||
+		!buffer_u8(buffer,(unsigned char)-5) || !buffer_u8(buffer,14) || !buffer_u8(buffer,13) ||
+		!buffer_bytes(buffer,opcode_lengths,sizeof(opcode_lengths)) || !buffer_u8(buffer,0) ) return false;
+	for(i=0;i<m->code->ndebugfiles;i++) {
+		if( !buffer_bytes(buffer,m->code->debugfiles[i],m->code->debugfiles_lens[i]) || !buffer_u8(buffer,0) ||
+			!buffer_uleb(buffer,0) || !buffer_uleb(buffer,0) || !buffer_uleb(buffer,0) ) return false;
+	}
+	if( !buffer_u8(buffer,0) ) return false;
+	length = (uint32_t)(buffer->size - header_start);
+	memcpy(buffer->data+header_length_at,&length,sizeof(length));
+	for(i=0;i<m->code->nfunctions;i++) {
+		hl_function *function = m->code->functions+i;
+		hl_debug_infos *debug = m->jit_debug+i;
+		uint64_t previous_address = 0;
+		int current_file = 0, current_line = 1;
+		bool emitted = false;
+		if( !debug->offsets || !function->debug ) continue;
+		for(j=0;j<function->nops;j++) {
+			int file = function->debug[j*2] & 0x7FFFFFFF;
+			int line = function->debug[j*2+1];
+			unsigned int start = function_offset(debug,j), end = function_offset(debug,j+1);
+			uint64_t address;
+			if( file < 0 || file >= m->code->ndebugfiles || line <= 0 || start >= end ) continue;
+			address = (uint64_t)(uintptr_t)m->jit_code + debug->start + start;
+			if( !emitted ) {
+				if( !buffer_u8(buffer,0) || !buffer_uleb(buffer,9) || !buffer_u8(buffer,2) || !buffer_u64(buffer,address) ) return false;
+				emitted = true;
+			} else if( !buffer_u8(buffer,2) || !buffer_uleb(buffer,address-previous_address) ) return false;
+			if( current_file != file + 1 ) {
+				if( !buffer_u8(buffer,4) || !buffer_uleb(buffer,file+1) ) return false;
+				current_file = file + 1;
+			}
+			if( current_line != line ) {
+				if( !buffer_u8(buffer,3) || !buffer_sleb(buffer,line-current_line) ) return false;
+				current_line = line;
+			}
+			if( !buffer_u8(buffer,1) ) return false;
+			previous_address = address;
+		}
+		if( emitted ) {
+			uint64_t end_address = (uint64_t)(uintptr_t)m->jit_code + debug->start + function_offset(debug,function->nops);
+			if( end_address > previous_address && (!buffer_u8(buffer,2) || !buffer_uleb(buffer,end_address-previous_address)) ) return false;
+			if( !buffer_u8(buffer,0) || !buffer_uleb(buffer,1) || !buffer_u8(buffer,1) ) return false;
+		}
+	}
+	length = (uint32_t)(buffer->size - unit_length_at - 4);
+	memcpy(buffer->data+unit_length_at,&length,sizeof(length));
+	return true;
+}
 
 static int function_name( hl_function *f, char *out, int size ) {
 	hl_type_obj *obj = fun_obj(f);
@@ -37,10 +155,32 @@ static int function_name( hl_function *f, char *out, int size ) {
 }
 
 void hl_gdb_jit_register( hl_module *m ) {
-	static const char shnames[] = "\0.text\0.symtab\0.strtab\0.shstrtab\0";
-	size_t text_off, sym_off, str_off, shstr_off, shdr_off, total, string_size = 1;
+	static const char shnames[] = "\0.text\0.symtab\0.strtab\0.shstrtab\0.debug_line\0.debug_info\0.debug_abbrev\0";
+	static const unsigned char debug_abbrev[] = {
+		1, 0x11, 0,       /* DW_TAG_compile_unit, no children */
+		0x11, 0x01,       /* DW_AT_low_pc, DW_FORM_addr */
+		0x12, 0x01,       /* DW_AT_high_pc, DW_FORM_addr */
+		0x10, 0x17,       /* DW_AT_stmt_list, DW_FORM_sec_offset */
+		0x03, 0x08,       /* DW_AT_name, DW_FORM_string */
+		0x13, 0x05,       /* DW_AT_language, DW_FORM_data2 */
+		0, 0, 0
+	};
+	unsigned char debug_info[] = {
+		43, 0, 0, 0,     /* unit length */
+		4, 0,             /* DWARF version */
+		0, 0, 0, 0,      /* abbreviation offset */
+		8,                /* address size */
+		1,                /* abbreviation code */
+		0, 0, 0, 0, 0, 0, 0, 0, /* low PC */
+		0, 0, 0, 0, 0, 0, 0, 0, /* high PC */
+		0, 0, 0, 0,      /* line table offset */
+		'H','a','s','h','L','i','n','k',' ','J','I','T',0,
+		2, 0              /* DW_LANG_C */
+	};
+	size_t text_off, sym_off, str_off, shstr_off, line_off, info_off, abbrev_off, shdr_off, total, string_size = 1;
 	int i, j, count = 0;
 	char name[512];
+	byte_buffer lines = {0};
 	hl_gdb_entry *entry;
 	Elf64_Ehdr *ehdr;
 	Elf64_Shdr *sections;
@@ -54,14 +194,36 @@ void hl_gdb_jit_register( hl_module *m ) {
 		string_size += length + 1;
 		count++;
 	}
+	if( !build_debug_line(m,&lines) ) {
+		free(lines.data);
+		return;
+	}
+	{
+		uint64_t low_pc = (uint64_t)(uintptr_t)m->jit_code;
+		uint64_t high_pc = low_pc + m->codesize;
+		memcpy(debug_info+12,&low_pc,sizeof(low_pc));
+		memcpy(debug_info+20,&high_pc,sizeof(high_pc));
+	}
 	text_off = sizeof(Elf64_Ehdr);
 	sym_off = align8(text_off + m->codesize);
 	str_off = align8(sym_off + sizeof(Elf64_Sym) * (count + 1));
 	shstr_off = str_off + string_size;
-	shdr_off = align8(shstr_off + sizeof(shnames));
-	total = shdr_off + sizeof(Elf64_Shdr) * 5;
+	line_off = shstr_off + sizeof(shnames);
+	if( lines.size ) {
+		info_off = line_off + lines.size;
+		abbrev_off = info_off + sizeof(debug_info);
+		shdr_off = align8(abbrev_off + sizeof(debug_abbrev));
+		total = shdr_off + sizeof(Elf64_Shdr) * 8;
+	} else {
+		info_off = abbrev_off = line_off;
+		shdr_off = align8(line_off);
+		total = shdr_off + sizeof(Elf64_Shdr) * 5;
+	}
 	entry = (hl_gdb_entry*)calloc(1,sizeof(*entry) + total);
-	if( !entry ) return;
+	if( !entry ) {
+		free(lines.data);
+		return;
+	}
 	ehdr = (Elf64_Ehdr*)entry->data;
 	symbols = (Elf64_Sym*)(entry->data + sym_off);
 	strings = (char*)(entry->data + str_off);
@@ -81,7 +243,7 @@ void hl_gdb_jit_register( hl_module *m ) {
 	ehdr->e_ehsize = sizeof(*ehdr);
 	ehdr->e_shoff = shdr_off;
 	ehdr->e_shentsize = sizeof(*sections);
-	ehdr->e_shnum = 5;
+	ehdr->e_shnum = lines.size ? 8 : 5;
 	ehdr->e_shstrndx = 4;
 	sections[1] = (Elf64_Shdr){ .sh_name=1, .sh_type=SHT_PROGBITS, .sh_flags=SHF_ALLOC|SHF_EXECINSTR,
 		.sh_addr=(Elf64_Addr)(uintptr_t)m->jit_code, .sh_offset=text_off, .sh_size=m->codesize, .sh_addralign=16 };
@@ -90,6 +252,15 @@ void hl_gdb_jit_register( hl_module *m ) {
 	sections[3] = (Elf64_Shdr){ .sh_name=15, .sh_type=SHT_STRTAB, .sh_offset=str_off, .sh_size=string_size, .sh_addralign=1 };
 	sections[4] = (Elf64_Shdr){ .sh_name=23, .sh_type=SHT_STRTAB, .sh_offset=shstr_off, .sh_size=sizeof(shnames), .sh_addralign=1 };
 	memcpy(entry->data+shstr_off,shnames,sizeof(shnames));
+	if( lines.size ) {
+		sections[5] = (Elf64_Shdr){ .sh_name=33, .sh_type=SHT_PROGBITS, .sh_offset=line_off, .sh_size=lines.size, .sh_addralign=1 };
+		sections[6] = (Elf64_Shdr){ .sh_name=45, .sh_type=SHT_PROGBITS, .sh_offset=info_off, .sh_size=sizeof(debug_info), .sh_addralign=1 };
+		sections[7] = (Elf64_Shdr){ .sh_name=57, .sh_type=SHT_PROGBITS, .sh_offset=abbrev_off, .sh_size=sizeof(debug_abbrev), .sh_addralign=1 };
+		memcpy(entry->data+line_off,lines.data,lines.size);
+		memcpy(entry->data+info_off,debug_info,sizeof(debug_info));
+		memcpy(entry->data+abbrev_off,debug_abbrev,sizeof(debug_abbrev));
+	}
+	free(lines.data);
 	string_size = 1;
 	count = 1;
 	for(i=0;i<m->code->nfunctions;i++) if( m->jit_debug[i].offsets ) {
