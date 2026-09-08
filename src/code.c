@@ -628,8 +628,19 @@ hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg ) {
 	return c;
 }
 
-void hl_code_free( hl_code *c ) {
+void hl_code_free_function_data( hl_code *c ) {
+	if( c == NULL ) return;
 	hl_free(&c->falloc);
+}
+
+void hl_code_free( hl_code *c ) {
+	hl_code_free_function_data(c);
+}
+
+void hl_code_destroy( hl_code *c ) {
+	if( c == NULL ) return;
+	hl_code_free_function_data(c);
+	hl_free(&c->alloc);
 }
 
 static const unsigned int crc32_table[] =

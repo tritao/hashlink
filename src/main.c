@@ -109,7 +109,7 @@ static bool check_reload( vbyte *alt_file ) {
 		return false;
 	changed = hl_module_patch(m->m, code);
 	m->file_time = time;
-	hl_code_free(code);
+	hl_code_free_function_data(code);
 	return changed;
 }
 
@@ -127,11 +127,16 @@ static bool load_plugin( pchar *file ) {
 		if( t2 ) t1->obj->name = t2->obj->name;
 	}
 	hl_module *m = hl_module_alloc(code);
-	if( m == NULL )
+	if( m == NULL ) {
+		hl_code_destroy(code);
 		return false;
-	if( !hl_module_init(m,0) )
+	}
+	if( !hl_module_init(m,0) ) {
+		hl_module_free_shutdown(m);
+		hl_code_destroy(code);
 		return false;
-	hl_code_free(code);
+	}
+	hl_code_free_function_data(code);
 	vclosure cl;
 	cl.t = m->code->functions[m->functions_indexes[m->code->entrypoint]].type;
 	cl.fun = m->functions_ptrs[m->code->entrypoint];
@@ -423,21 +428,26 @@ int main(int argc, pchar *argv[]) {
 		return 1;
 	}
 	ctx.m = hl_module_alloc(ctx.code);
-	if( ctx.m == NULL )
+	if( ctx.m == NULL ) {
+		hl_code_destroy(ctx.code);
 		return 2;
-	if( !hl_module_init(ctx.m,(hot_reload?HL_MODULE_HOT_RELOAD:0) | (dump?HL_MODULE_DUMP:0) | (debug_port > 0 && !debug_opt?HL_MODULE_DEBUG:0)) )
+	}
+	if( !hl_module_init(ctx.m,(hot_reload?HL_MODULE_HOT_RELOAD:0) | (dump?HL_MODULE_DUMP:0) | (debug_port > 0 && !debug_opt?HL_MODULE_DEBUG:0)) ) {
+		hl_module_free_shutdown(ctx.m);
+		hl_code_destroy(ctx.code);
 		return 3;
+	}
 	if( hot_reload ) {
 		ctx.file_time = pfiletime(ctx.file);
 		hl_setup.reload_check = check_reload;
 	}
 	hl_setup.load_plugin = load_plugin;
 	hl_setup.resolve_type = resolve_type;
-	hl_code_free(ctx.code);
+	hl_code_free_function_data(ctx.code);
 	if( dump ) {
 		// the code has been dumped while jitting, don't run it
 		hl_module_free_shutdown(ctx.m);
-		hl_free(&ctx.code->alloc);
+		hl_code_destroy(ctx.code);
 		hl_global_free();
 		return 0;
 	}
@@ -472,7 +482,7 @@ int main(int argc, pchar *argv[]) {
 	hl_gc_major();
 #else
 	hl_module_free_shutdown(ctx.m);
-	hl_free(&ctx.code->alloc);
+	hl_code_destroy(ctx.code);
 	hl_global_free();
 #endif
 	return 0;
