@@ -225,6 +225,13 @@ else()
 endif()
 
 if (WITH_VM)
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" HL_VM_PROCESSOR)
+    if(NOT HL_VM_PROCESSOR MATCHES "^(x86_64|amd64|i[3-6]86)$")
+        message(FATAL_ERROR
+            "The HashLink VM JIT supports only x86 and x86-64 targets; "
+            "configure with -DWITH_VM=OFF for ${CMAKE_SYSTEM_PROCESSOR}"
+        )
+    endif()
     add_executable(hl
         src/code.c
         src/jit.c
