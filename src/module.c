@@ -31,6 +31,14 @@
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 #	define dlopen(l,p)		(void*)( (l) ? LoadLibraryA(l) : (HMODULE)&__ImageBase)
 #	define dlsym(h,n)		GetProcAddress((HANDLE)h,n)
+static const char *dlerror( void ) {
+	static char message[256];
+	DWORD error = GetLastError();
+	DWORD length = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,NULL,error,0,message,sizeof(message),NULL);
+	if( length == 0 ) return "unknown Windows loader error";
+	while( length > 0 && (message[length - 1] == '\r' || message[length - 1] == '\n') ) message[--length] = 0;
+	return message;
+}
 #else
 #	include <dlfcn.h>
 #endif
