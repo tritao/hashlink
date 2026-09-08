@@ -144,6 +144,12 @@ HL_PRIM void hl_dump_stack() {
 	fflush(stdout);
 }
 
+static void print_exception_line( const char *prefix, const uchar *value ) {
+	fputs(prefix,stderr);
+	fputs(hl_to_utf8(value),stderr);
+	fputc('\n',stderr);
+}
+
 static bool maybe_print_custom_stack( vdynamic *exc ) {
 	hl_type *ot = exc->t;
 	while( ot->kind == HOBJ ) {
@@ -153,7 +159,7 @@ static bool maybe_print_custom_stack( vdynamic *exc ) {
 				if( f == NULL || f->field_index < 0 ) break;
 				vdynamic *customStack = *(vdynamic**)((char*)(exc) + f->field_index);
 				if( customStack != NULL ) {
-					uprintf(USTR("%s\n"), hl_to_string(customStack));
+					print_exception_line("",hl_to_string(customStack));
 					return true;
 				}
 			}
@@ -165,13 +171,13 @@ static bool maybe_print_custom_stack( vdynamic *exc ) {
 }
 
 HL_PRIM void hl_print_uncaught_exception(vdynamic *exc) {
-	uprintf(USTR("Uncaught exception: %s\n"), hl_to_string(exc));
+	print_exception_line("Uncaught exception: ",hl_to_string(exc));
 	if (!maybe_print_custom_stack(exc)) {
 		varray *a = hl_exception_stack();
 		for (int i = 0; i < a->size; i++)
-			uprintf(USTR("Called from %s\n"), hl_aptr(a, uchar *)[i]);
+			print_exception_line("Called from ",hl_aptr(a, uchar *)[i]);
 	}
-	fflush(stdout);
+	fflush(stderr);
 }
 
 HL_PRIM varray *hl_exception_stack() {

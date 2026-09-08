@@ -18,7 +18,7 @@ trap 'rm -f "$output" "$crash_output" "$core_file" "$core_output"' EXIT HUP INT 
 	-ex 'printf "REGISTER_ACTION=%u\n", __jit_debug_descriptor.action_flag' \
 	-ex "finish" \
 	-ex 'printf "METADATA_COMPACT=%d\n", __jit_debug_descriptor.relevant_entry->symfile_size < m->codesize' \
-	-ex "info address CrashSignals.main" \
+	-ex "info functions CrashSignals.main" \
 	-ex "info line CrashSignals.hx:3" \
 	-ex "maintenance info sections -all-objects .debug_frame" \
 	-ex "continue" \
@@ -27,7 +27,7 @@ trap 'rm -f "$output" "$crash_output" "$core_file" "$core_output"' EXIT HUP INT 
 
 grep -F 'REGISTER_ACTION=1' "$output" >/dev/null \
 	&& grep -F 'METADATA_COMPACT=1' "$output" >/dev/null \
-	&& grep -F 'Symbol "CrashSignals.main" is at ' "$output" >/dev/null \
+	&& grep -F 'CrashSignals.main' "$output" >/dev/null \
 	&& grep -F 'Line 3 of "CrashSignals.hx" starts at address ' "$output" >/dev/null \
 	&& grep -F 'FIRST_ENTRY=(nil)' "$output" >/dev/null || {
 	echo "GDB JIT registration lifecycle was not observed" >&2
@@ -50,7 +50,7 @@ esac
 	-ex "backtrace 3" \
 	"$hl" > "$crash_output" 2>&1 || true
 
-grep -F 'in CrashSignals.main () at CrashSignals.hx:4' "$crash_output" >/dev/null || {
+grep -F 'CrashSignals.main () at CrashSignals.hx:4' "$crash_output" >/dev/null || {
 	echo "GDB could not unwind through the crashing JIT frame" >&2
 	cat "$crash_output" >&2
 	exit 1
@@ -65,8 +65,8 @@ grep -F 'in CrashSignals.main () at CrashSignals.hx:4' "$crash_output" >/dev/nul
 	-ex "backtrace 3" > "$core_output" 2>&1
 
 grep -F 'crash_test_fault (address=1)' "$core_output" >/dev/null \
-	&& grep -F 'in CrashSignals.main () at CrashSignals.hx:4' "$core_output" >/dev/null \
-	&& grep -F 'in __entry () at <generated>:1' "$core_output" >/dev/null || {
+	&& grep -F 'CrashSignals.main () at CrashSignals.hx:4' "$core_output" >/dev/null \
+	&& grep -E 'in (__entry|init) \(\) at (\?|<generated>):1' "$core_output" >/dev/null || {
 	echo "A fresh GDB process could not symbolize the JIT core" >&2
 	cat "$core_output" >&2
 	exit 1

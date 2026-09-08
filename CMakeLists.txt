@@ -329,6 +329,17 @@ if(BUILD_TESTING)
             DEPENDS ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/crash-signals.hl
         )
 
+        add_custom_command(OUTPUT ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/exception-reporting.hl
+            COMMAND ${HAXE_COMPILER}
+                ${HAXE_HL_FLAGS}
+                -hl ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/exception-reporting.hl
+                -cp ${CMAKE_SOURCE_DIR}/other/tests -main ExceptionReporting
+            DEPENDS ${CMAKE_SOURCE_DIR}/other/tests/ExceptionReporting.hx
+        )
+        add_custom_target(exception-reporting.hl ALL
+            DEPENDS ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/exception-reporting.hl
+        )
+
         add_library(crash_test.hdll MODULE
             other/tests/crash_test.c
         )
@@ -469,6 +480,16 @@ if(BUILD_TESTING)
             set_tests_properties(crash-signals.hl
                 PROPERTIES
                 WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
+            )
+            add_test(NAME exception-reporting.hl
+                COMMAND sh ${CMAKE_SOURCE_DIR}/other/tests/exception_reporting.sh
+                    $<TARGET_FILE:hl>
+                    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/exception-reporting.hl
+            )
+            set_tests_properties(exception-reporting.hl
+                PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
+                TIMEOUT 15
             )
         endif()
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
