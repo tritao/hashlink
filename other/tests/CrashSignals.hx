@@ -8,6 +8,7 @@ class CrashSignals {
 			sys.thread.Thread.create(CrashTestNative.stack_overflow);
 			while (true) Sys.sleep(1.0);
 		}
+		if (Sys.args()[0] == "exit") return;
 		while (true) Sys.sleep(1.0);
 	}
 }

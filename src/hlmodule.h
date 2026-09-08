@@ -265,6 +265,7 @@ typedef struct {
 	bool roots_detached;
 	unsigned char *debug_hlb;
 	int debug_hlb_size;
+	void *gdb_jit_entry;
 	hl_module_context ctx;
 #ifdef WIN64_UNWIND_TABLES
 	int unwind_table_size;

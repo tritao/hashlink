@@ -23,6 +23,7 @@
 #include <hlmodule.h>
 
 #include <jit.h>
+#include "jit_gdb.h"
 
 #ifdef HL_WIN
 #	undef _GUID
@@ -950,6 +951,7 @@ int hl_module_init( hl_module *m, int flags ) {
 		hl_module_init_constant(m, c);
 	}
 	hl_module_add(m);
+	hl_gdb_jit_register(m);
 	hl_setup.resolve_symbol = module_resolve_symbol;
 	hl_setup.capture_stack = module_capture_stack;
 	hl_setup.capture_break_context = module_capture_break_context;
@@ -1338,6 +1340,7 @@ h_bool hl_module_patch( hl_module *m1, hl_code *c ) {
 }
 
 void hl_module_free_shutdown( hl_module *m ) {
+	hl_gdb_jit_unregister(m);
 	hl_module_patch_release_all(m);
 	if( !m->roots_detached )
 		for(int i=0;i<m->code->nglobals;i++)

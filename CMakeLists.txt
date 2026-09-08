@@ -232,6 +232,7 @@ if (WITH_VM)
         src/jit_regs.c
         src/jit_x86_64.c
         src/jit_dump.c
+        src/jit_gdb.c
         src/main.c
         src/module.c
         src/hlpatch.c
@@ -462,6 +463,21 @@ if(BUILD_TESTING)
                 PROPERTIES
                 WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
             )
+        endif()
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            find_program(GDB_EXECUTABLE gdb)
+            if(GDB_EXECUTABLE)
+                add_test(NAME gdb-jit.hl
+                    COMMAND sh ${CMAKE_SOURCE_DIR}/other/tests/gdb_jit.sh
+                        ${GDB_EXECUTABLE}
+                        $<TARGET_FILE:hl>
+                        ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/crash-signals.hl
+                )
+                set_tests_properties(gdb-jit.hl PROPERTIES
+                    WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
+                    TIMEOUT 15
+                )
+            endif()
         endif()
     endif()
 
