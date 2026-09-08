@@ -17,6 +17,7 @@ trap 'rm -f "$output" "$crash_output" "$core_file" "$core_output"' EXIT HUP INT 
 	-ex "run $bytecode exit" \
 	-ex 'printf "REGISTER_ACTION=%u\n", __jit_debug_descriptor.action_flag' \
 	-ex "finish" \
+	-ex 'printf "METADATA_COMPACT=%d\n", __jit_debug_descriptor.relevant_entry->symfile_size < m->codesize' \
 	-ex "info address CrashSignals.main" \
 	-ex "info line CrashSignals.hx:3" \
 	-ex "maintenance info sections -all-objects .debug_frame" \
@@ -25,6 +26,7 @@ trap 'rm -f "$output" "$crash_output" "$core_file" "$core_output"' EXIT HUP INT 
 	"$hl" > "$output" 2>&1
 
 grep -F 'REGISTER_ACTION=1' "$output" >/dev/null \
+	&& grep -F 'METADATA_COMPACT=1' "$output" >/dev/null \
 	&& grep -F 'Symbol "CrashSignals.main" is at ' "$output" >/dev/null \
 	&& grep -F 'Line 3 of "CrashSignals.hx" starts at address ' "$output" >/dev/null \
 	&& grep -F 'FIRST_ENTRY=(nil)' "$output" >/dev/null || {

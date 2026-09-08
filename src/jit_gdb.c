@@ -219,7 +219,7 @@ void hl_gdb_jit_register( hl_module *m ) {
 		'H','a','s','h','L','i','n','k',' ','J','I','T',0,
 		2, 0              /* DW_LANG_C */
 	};
-	size_t text_off, sym_off, str_off, shstr_off, line_off, info_off, abbrev_off, frame_off, shdr_off, total, string_size = 1;
+	size_t sym_off, str_off, shstr_off, line_off, info_off, abbrev_off, frame_off, shdr_off, total, string_size = 1;
 	int frame_section;
 	int i, j, count = 0;
 	char name[512];
@@ -248,8 +248,7 @@ void hl_gdb_jit_register( hl_module *m ) {
 		memcpy(debug_info+12,&low_pc,sizeof(low_pc));
 		memcpy(debug_info+20,&high_pc,sizeof(high_pc));
 	}
-	text_off = sizeof(Elf64_Ehdr);
-	sym_off = align8(text_off + m->codesize);
+	sym_off = align8(sizeof(Elf64_Ehdr));
 	str_off = align8(sym_off + sizeof(Elf64_Sym) * (count + 1));
 	shstr_off = str_off + string_size;
 	line_off = shstr_off + sizeof(shnames);
@@ -275,7 +274,6 @@ void hl_gdb_jit_register( hl_module *m ) {
 	symbols = (Elf64_Sym*)(entry->data + sym_off);
 	strings = (char*)(entry->data + str_off);
 	sections = (Elf64_Shdr*)(entry->data + shdr_off);
-	memcpy(entry->data+text_off,m->jit_code,m->codesize);
 	memcpy(ehdr->e_ident,ELFMAG,SELFMAG);
 	ehdr->e_ident[EI_CLASS] = ELFCLASS64;
 	ehdr->e_ident[EI_DATA] = ELFDATA2LSB;
@@ -292,8 +290,8 @@ void hl_gdb_jit_register( hl_module *m ) {
 	ehdr->e_shentsize = sizeof(*sections);
 	ehdr->e_shnum = frame_section + (frames.size ? 1 : 0);
 	ehdr->e_shstrndx = 4;
-	sections[1] = (Elf64_Shdr){ .sh_name=1, .sh_type=SHT_PROGBITS, .sh_flags=SHF_ALLOC|SHF_EXECINSTR,
-		.sh_addr=(Elf64_Addr)(uintptr_t)m->jit_code, .sh_offset=text_off, .sh_size=m->codesize, .sh_addralign=16 };
+	sections[1] = (Elf64_Shdr){ .sh_name=1, .sh_type=SHT_NOBITS, .sh_flags=SHF_ALLOC|SHF_EXECINSTR,
+		.sh_addr=(Elf64_Addr)(uintptr_t)m->jit_code, .sh_size=m->codesize, .sh_addralign=16 };
 	sections[2] = (Elf64_Shdr){ .sh_name=7, .sh_type=SHT_SYMTAB, .sh_offset=sym_off,
 		.sh_size=sizeof(Elf64_Sym)*(count+1), .sh_link=3, .sh_info=1, .sh_addralign=8, .sh_entsize=sizeof(Elf64_Sym) };
 	sections[3] = (Elf64_Shdr){ .sh_name=15, .sh_type=SHT_STRTAB, .sh_offset=str_off, .sh_size=string_size, .sh_addralign=1 };
