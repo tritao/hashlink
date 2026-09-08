@@ -91,7 +91,7 @@ static bool build_debug_line( hl_module *m, byte_buffer *buffer ) {
 	size_t unit_length_at, header_length_at, header_start;
 	uint32_t length;
 	int i, j;
-	if( !m->code->hasdebug || m->code->ndebugfiles <= 0 ) return true;
+	if( m->code->ndebugfiles <= 0 ) return true;
 	unit_length_at = buffer->size;
 	if( !buffer_u32(buffer,0) || !buffer_u16(buffer,4) ) return false;
 	header_length_at = buffer->size;
@@ -317,7 +317,8 @@ void hl_gdb_jit_register( hl_module *m ) {
 		int length = function_name(m->code->functions+i,name,sizeof(name));
 		int end = m->codesize;
 		if( length >= (int)sizeof(name) ) length = sizeof(name) - 1;
-		for(j=i+1;j<m->code->nfunctions;j++) if( m->jit_debug[j].start > m->jit_debug[i].start ) { end=m->jit_debug[j].start; break; }
+		for(j=0;j<m->code->nfunctions;j++)
+			if( m->jit_debug[j].offsets && m->jit_debug[j].start > m->jit_debug[i].start && m->jit_debug[j].start < end ) end=m->jit_debug[j].start;
 		memcpy(strings+string_size,name,length+1);
 		symbols[count].st_name = string_size;
 		symbols[count].st_info = ELF64_ST_INFO(STB_GLOBAL,STT_FUNC);
@@ -340,6 +341,11 @@ void hl_gdb_jit_register( hl_module *m ) {
 	pthread_mutex_unlock(&jit_lock);
 }
 
+__attribute__((noinline)) void hl_gdb_jit_register_patch( hl_module *m ) {
+	hl_gdb_jit_register(m);
+	__asm__ volatile ("" ::: "memory");
+}
+
 void hl_gdb_jit_unregister( hl_module *m ) {
 	hl_gdb_entry *entry;
 	if( !m || !m->gdb_jit_entry ) return;
@@ -357,5 +363,6 @@ void hl_gdb_jit_unregister( hl_module *m ) {
 }
 #else
 void hl_gdb_jit_register( hl_module *m ) { (void)m; }
+void hl_gdb_jit_register_patch( hl_module *m ) { (void)m; }
 void hl_gdb_jit_unregister( hl_module *m ) { (void)m; }
 #endif
