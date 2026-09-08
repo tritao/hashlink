@@ -352,10 +352,13 @@ static void hl_read_function_identities( hl_reader *r, const unsigned char *data
 		int stable_id = hl_read_uindex(s);
 		int function_index = hl_read_uindex(s);
 		int target = -1;
+		const unsigned char *qualified_name = NULL;
+		int qualified_name_length = 0;
 		for(int j=0;j<r->code->nfunctions;j++) if(r->code->functions[j].findex == function_index) { target = j; break; }
 		for(int field=0;field<3;field++) {
 			int length = hl_read_uindex(s);
 			if( length < 0 || s->pos + length > s->size ) { ERROR("Invalid function identity string"); return; }
+			if( field == 0 ) { qualified_name = s->b + s->pos; qualified_name_length = length; }
 			s->pos += length;
 		}
 		(void)hl_read_index(s); (void)hl_read_index(s);
@@ -363,6 +366,10 @@ static void hl_read_function_identities( hl_reader *r, const unsigned char *data
 		for(int j=0;j<r->code->nfunctions;j++) if(r->code->function_stable_ids[j] == stable_id) { ERROR("Duplicate stable function identity"); return; }
 		if( s->error || target < 0 || r->code->function_stable_ids[target] >= 0 ) { ERROR("Invalid function identity"); return; }
 		r->code->function_stable_ids[target] = stable_id;
+		r->code->function_names[target] = (char*)hl_malloc(&r->code->alloc,qualified_name_length+1);
+		memcpy(r->code->function_names[target],qualified_name,qualified_name_length);
+		r->code->function_names[target][qualified_name_length] = 0;
+		r->code->function_names_lens[target] = qualified_name_length;
 	}
 	if( s->pos != s->size ) ERROR("Trailing function identity data");
 }
@@ -402,6 +409,13 @@ const char *hl_op_name( int op ) {
 	if( op < 0 || op >= OLast )
 		return "UnknownOp";
 	return hl_op_names[op];
+}
+
+const char *hl_code_function_name( hl_code *code, hl_function *function ) {
+	if( code == NULL || function == NULL || code->function_names == NULL ) return NULL;
+	for(int i=0;i<code->nfunctions;i++)
+		if( code->functions[i].findex == function->findex ) return code->function_names[i];
+	return NULL;
 }
 
 static char **hl_read_strings( hl_reader *r, int nstrings, int **out_lens ) {
@@ -551,6 +565,8 @@ hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg ) {
 	CHK_ERROR();
 	ALLOC(c->functions, hl_function, c->nfunctions);
 	ALLOC(c->function_stable_ids, int, c->nfunctions);
+	ALLOC(c->function_names, char*, c->nfunctions);
+	ALLOC(c->function_names_lens, int, c->nfunctions);
 	for(i=0;i<c->nfunctions;i++) c->function_stable_ids[i] = -1;
 	for(i=0;i<c->nfunctions;i++) {
 		hl_read_function(r,c->functions+i);

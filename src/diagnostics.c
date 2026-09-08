@@ -101,8 +101,11 @@ static unsigned int function_end( hl_debug_infos *debug, int count, int index, u
 	return end < start ? (unsigned int)start : (unsigned int)end;
 }
 
-static void function_name( hl_function *function, char *output, int capacity ) {
-	if( function->obj ) {
+static void function_name( hl_code *code, hl_function *function, char *output, int capacity ) {
+	const char *qualified = hl_code_function_name(code,function);
+	if( qualified )
+		snprintf(output,capacity,"%s",qualified);
+	else if( function->obj ) {
 		char object_name[256], field_name[256];
 		snprintf(object_name,sizeof(object_name),"%s",hl_to_utf8(function->obj->name));
 		snprintf(field_name,sizeof(field_name),"%s",hl_to_utf8(function->field.name));
@@ -135,7 +138,7 @@ static int function_location_count( hl_code *code, hl_function *function, hl_deb
 static void append_function( diag_buffer *buffer, hl_code *code, hl_function *function, hl_debug_infos *debug, unsigned int start, unsigned int size ) {
 	char name[768];
 	unsigned int length, line_count;
-	function_name(function,name,sizeof(name));
+	function_name(code,function,name,sizeof(name));
 	length = (unsigned int)strlen(name);
 	buffer_u32(buffer,(unsigned int)function->findex);
 	buffer_u32(buffer,start);

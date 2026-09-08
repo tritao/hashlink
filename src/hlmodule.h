@@ -115,6 +115,8 @@ typedef struct {
 	hl_native*	natives;
 	hl_function*functions;
 	int*        function_stable_ids;
+	char**      function_names;
+	int*        function_names_lens;
 	hl_constant*constants;
 	hl_debug_section*debugsections;
 	hl_alloc	alloc;
@@ -287,6 +289,7 @@ void hl_code_hash_remap_globals( hl_code_hash *hnew, hl_code_hash *hold );
 
 const uchar *hl_get_ustring( hl_code *c, int index );
 const char* hl_op_name( int op );
+const char *hl_code_function_name( hl_code *code, hl_function *function );
 
 typedef unsigned char h_bool;
 

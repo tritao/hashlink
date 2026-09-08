@@ -187,9 +187,11 @@ static bool build_debug_frame( hl_module *m, byte_buffer *buffer ) {
 	return true;
 }
 
-static int function_name( hl_function *f, char *out, int size ) {
+static int function_name( hl_code *code, hl_function *f, char *out, int size ) {
+	const char *qualified = hl_code_function_name(code,f);
 	hl_type_obj *obj = fun_obj(f);
 	const uchar *field = fun_field_name(f);
+	if( qualified ) return snprintf(out,size,"%s",qualified);
 	if( obj && field ) return snprintf(out,size,"%s.%s",hl_to_utf8(obj->name),hl_to_utf8(field));
 	return snprintf(out,size,"fun$%d",f->findex);
 }
@@ -229,7 +231,7 @@ void hl_gdb_jit_register( hl_module *m ) {
 	char *strings;
 	if( !m || !m->jit_code || !m->jit_debug || m->gdb_jit_entry ) return;
 	for(i=0;i<m->code->nfunctions;i++) if( m->jit_debug[i].offsets ) {
-		int length = function_name(m->code->functions+i,name,sizeof(name));
+		int length = function_name(m->code,m->code->functions+i,name,sizeof(name));
 		if( length < 0 ) return;
 		if( length >= (int)sizeof(name) ) length = sizeof(name) - 1;
 		string_size += length + 1;
@@ -314,7 +316,7 @@ void hl_gdb_jit_register( hl_module *m ) {
 	string_size = 1;
 	count = 1;
 	for(i=0;i<m->code->nfunctions;i++) if( m->jit_debug[i].offsets ) {
-		int length = function_name(m->code->functions+i,name,sizeof(name));
+		int length = function_name(m->code,m->code->functions+i,name,sizeof(name));
 		int end = m->codesize;
 		if( length >= (int)sizeof(name) ) length = sizeof(name) - 1;
 		for(j=0;j<m->code->nfunctions;j++)

@@ -164,6 +164,7 @@ static uchar *module_resolve_symbol_snapshot( hl_module **modules, int module_co
 	int pos = 0;
 	int fpos;
 	hl_function *fdebug;
+	const char *qualified;
 	int i;
 	hl_module *m = NULL;
 	for(i=0;i<module_count;i++) {
@@ -174,11 +175,15 @@ static uchar *module_resolve_symbol_snapshot( hl_module **modules, int module_co
 		return NULL;
 	if( !module_resolve_address(m,addr,&fdebug,&fpos) )
 		return NULL;
+	qualified = hl_code_function_name(m->code,fdebug);
 	// extract debug info
 	if( !m->code->hasdebug || fdebug->debug == NULL ) {
 		if( !out ) return NULL;
 		int size = *outSize;
-		if( fdebug->obj )
+		if( qualified ) {
+			pos += hl_from_utf8(out + pos,size - pos,qualified);
+			pos += usprintf(out + pos,size - pos,USTR("(opcode:%d)"),fpos);
+		} else if( fdebug->obj )
 			pos += usprintf(out,size - pos,USTR("%s.%s(opcode:%d)"),fdebug->obj->name,fdebug->field.name,fpos);
 		else
 			pos += usprintf(out,size - pos,USTR("fun$%d(opcode:%d)"),fdebug->findex,fpos);
@@ -195,7 +200,10 @@ static uchar *module_resolve_symbol_snapshot( hl_module **modules, int module_co
 	if( !out )
 		return NULL;
 	int size = *outSize;
-	if( fdebug->obj )
+	if( qualified ) {
+		pos += hl_from_utf8(out + pos,size - pos,qualified);
+		pos += usprintf(out + pos,size - pos,USTR("("));
+	} else if( fdebug->obj )
 		pos += usprintf(out,size - pos,USTR("%s.%s("),fdebug->obj->name,fdebug->field.name);
 	else if( fdebug->field.ref )
 		pos += usprintf(out,size - pos,USTR("%s.~%s.%d("),fdebug->field.ref->obj->name, fdebug->field.ref->field.name, fdebug->ref);
@@ -229,7 +237,10 @@ const char *hl_module_resolve_jit_location( void *addr ) {
 				int opcode = fpos >= 0 && fpos < fun->nops && fun->ops != NULL
 					? fun->ops[fpos].op : -1;
 				const char *opcode_name = opcode >= 0 ? hl_op_name(opcode) : "unknown";
-				if( fun->obj ) {
+				const char *qualified = hl_code_function_name(m->code,fun);
+				if( qualified )
+					snprintf(result,sizeof(result),"%s [function=%d opcode=%d instruction=%s(%d)]",qualified,fun->findex,fpos,opcode_name,opcode);
+				else if( fun->obj ) {
 					char object_name[192], field_name[192];
 					snprintf(object_name,sizeof(object_name),"%s",hl_to_utf8(fun->obj->name));
 					snprintf(field_name,sizeof(field_name),"%s",hl_to_utf8(fun->field.name));
