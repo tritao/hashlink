@@ -47,3 +47,10 @@ status=$?
 [ "$status" -eq 139 ] || fail "null dereference exited with $status instead of 139"
 grep -E "HashLink fatal signal 11, address 0x[0-9a-f]+" "$output" >/dev/null \
 	|| fail "null dereference did not report its fault address"
+
+: > "$output"
+"$hl" "$bytecode" worker-overflow > "$output" 2>&1
+status=$?
+[ "$status" -eq 139 ] || fail "worker stack overflow exited with $status instead of 139"
+grep -E "HashLink fatal signal 11, address 0x[0-9a-f]+" "$output" >/dev/null \
+	|| fail "worker stack overflow did not run the crash handler"

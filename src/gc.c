@@ -370,6 +370,7 @@ HL_API void hl_register_thread( void *stack_top ) {
 	t->stack_top = stack_top;
 	t->flags = HL_TRACK_MASK << HL_TREAD_TRACK_SHIFT;
 	current_thread = t;
+	if( hl_setup.thread_registered ) hl_setup.thread_registered();
 	hl_add_root(&t->exc_value);
 	hl_add_root(&t->exc_handler);
 
@@ -386,6 +387,7 @@ HL_API void hl_unregister_thread() {
 	hl_thread_info *t = hl_get_thread();
 	if( !t )
 		hl_fatal("Thread not registered");
+	if( hl_setup.thread_unregistered ) hl_setup.thread_unregistered();
 	hl_remove_root(&t->exc_value);
 	hl_remove_root(&t->exc_handler);
 	gc_global_lock(true);

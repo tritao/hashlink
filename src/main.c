@@ -180,7 +180,8 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 
 #define HL_CRASH_STACK_SIZE (64 * 1024)
 
-static unsigned char crash_stack[HL_CRASH_STACK_SIZE];
+HL_THREAD_STATIC_VAR unsigned char crash_stack[HL_CRASH_STACK_SIZE];
+HL_THREAD_STATIC_VAR bool crash_stack_installed = false;
 static volatile sig_atomic_t handling_signal = 0;
 
 static char *append_text( char *out, const char *text, size_t length ) {
@@ -243,12 +244,29 @@ static void handle_signal( int signum, siginfo_t *info, void *context ) {
 		hl_dump_stack();
 	raise(signum);
 }
-static void setup_handler() {
-	struct sigaction act = {0};
-	stack_t stack = {0};
+
+static void install_crash_stack() {
+	stack_t current = {0}, stack = {0};
+	if( sigaltstack(NULL,&current) != 0 || (current.ss_flags & SS_DISABLE) == 0 ) return;
 	stack.ss_sp = crash_stack;
 	stack.ss_size = sizeof(crash_stack);
+	if( sigaltstack(&stack,NULL) == 0 ) crash_stack_installed = true;
+}
+
+static void uninstall_crash_stack() {
+	stack_t current = {0}, stack = {0};
+	if( !crash_stack_installed ) return;
+	crash_stack_installed = false;
+	if( sigaltstack(NULL,&current) != 0 || current.ss_sp != crash_stack ) return;
+	stack.ss_flags = SS_DISABLE;
 	sigaltstack(&stack,NULL);
+}
+
+static void setup_handler() {
+	struct sigaction act = {0};
+	install_crash_stack();
+	hl_setup.thread_registered = install_crash_stack;
+	hl_setup.thread_unregistered = uninstall_crash_stack;
 	act.sa_sigaction = handle_signal;
 	act.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESETHAND;
 	sigemptyset(&act.sa_mask);
@@ -365,6 +383,7 @@ int main(int argc, pchar *argv[]) {
 	hl_setup.sys_nargs = argc;
 	hl_sys_init();
 	hl_register_thread(&ctx);
+	setup_handler();
 	main_ctx = &ctx;
 	ctx.file = file;
 	ctx.code = load_code(file, &error_msg, true);
@@ -398,7 +417,6 @@ int main(int argc, pchar *argv[]) {
 	cl.t = ctx.code->functions[ctx.m->functions_indexes[ctx.m->code->entrypoint]].type;
 	cl.fun = ctx.m->functions_ptrs[ctx.m->code->entrypoint];
 	cl.hasValue = 0;
-	setup_handler();
 	hl_profile_setup(profile_count);
 	if( diagnostics_port > 0 && !hl_diagnostics_start(diagnostics_port,diagnostics_public) ) {
 		fprintf(stderr,"Could not start diagnostics on port %d\n",diagnostics_port);
