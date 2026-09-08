@@ -6,7 +6,8 @@ gdb=$1
 hl=$2
 bytecode=$3
 output=$(mktemp "${TMPDIR:-/tmp}/hashlink-gdb-jit.XXXXXX")
-trap 'rm -f "$output"' EXIT HUP INT TERM
+crash_output=$(mktemp "${TMPDIR:-/tmp}/hashlink-gdb-crash.XXXXXX")
+trap 'rm -f "$output" "$crash_output"' EXIT HUP INT TERM
 
 "$gdb" -q -batch \
 	-ex "break __jit_debug_register_code" \
@@ -15,6 +16,7 @@ trap 'rm -f "$output"' EXIT HUP INT TERM
 	-ex "finish" \
 	-ex "info address .init" \
 	-ex "info line CrashSignals.hx:3" \
+	-ex "maintenance info sections -all-objects .debug_frame" \
 	-ex "continue" \
 	-ex 'printf "FIRST_ENTRY=%p\n", __jit_debug_descriptor.first_entry' \
 	"$hl" > "$output" 2>&1
@@ -25,5 +27,26 @@ grep -F 'REGISTER_ACTION=1' "$output" >/dev/null \
 	&& grep -F 'FIRST_ENTRY=(nil)' "$output" >/dev/null || {
 	echo "GDB JIT registration lifecycle was not observed" >&2
 	cat "$output" >&2
+	exit 1
+}
+
+case $(uname -m) in
+	x86_64|amd64)
+		grep -F '.debug_frame READONLY HAS_CONTENTS' "$output" >/dev/null || {
+			echo "GDB JIT unwind metadata was not observed" >&2
+			cat "$output" >&2
+			exit 1
+		}
+		;;
+esac
+
+"$gdb" -q -batch \
+	-ex "run $bytecode fault" \
+	-ex "backtrace 3" \
+	"$hl" > "$crash_output" 2>&1 || true
+
+grep -F 'in fun () at CrashSignals.hx:4' "$crash_output" >/dev/null || {
+	echo "GDB could not unwind through the crashing JIT frame" >&2
+	cat "$crash_output" >&2
 	exit 1
 }

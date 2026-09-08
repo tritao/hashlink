@@ -147,6 +147,46 @@ static bool build_debug_line( hl_module *m, byte_buffer *buffer ) {
 	return true;
 }
 
+static bool build_debug_frame( hl_module *m, byte_buffer *buffer ) {
+#if defined(__x86_64__)
+	size_t start;
+	uint32_t length;
+	int i, j;
+	start = buffer->size;
+	if( !buffer_u32(buffer,0) || !buffer_u32(buffer,UINT32_MAX) ||
+		!buffer_u8(buffer,4) || !buffer_u8(buffer,0) || !buffer_u8(buffer,8) || !buffer_u8(buffer,0) ||
+		!buffer_uleb(buffer,1) || !buffer_sleb(buffer,-8) || !buffer_uleb(buffer,16) ||
+		!buffer_u8(buffer,0x0C) || !buffer_uleb(buffer,7) || !buffer_uleb(buffer,8) ||
+		!buffer_u8(buffer,0x90) || !buffer_uleb(buffer,1) ) return false;
+	while( buffer->size & 7 ) if( !buffer_u8(buffer,0) ) return false;
+	length = (uint32_t)(buffer->size-start-4);
+	memcpy(buffer->data+start,&length,sizeof(length));
+	for(i=0;i<m->code->nfunctions;i++) {
+		hl_debug_infos *debug = m->jit_debug+i;
+		int end = m->codesize;
+		unsigned char *code;
+		if( !debug->offsets ) continue;
+		code = (unsigned char*)m->jit_code + debug->start;
+		if( debug->start < 0 || debug->start + 4 > m->codesize ||
+			code[0] != 0x55 || code[1] != 0x48 || code[2] != 0x89 || code[3] != 0xE5 ) continue;
+		for(j=0;j<m->code->nfunctions;j++)
+			if( m->jit_debug[j].offsets && m->jit_debug[j].start > debug->start && m->jit_debug[j].start < end ) end = m->jit_debug[j].start;
+		start = buffer->size;
+		if( !buffer_u32(buffer,0) || !buffer_u32(buffer,0) ||
+			!buffer_u64(buffer,(uint64_t)(uintptr_t)code) || !buffer_u64(buffer,(uint64_t)(end-debug->start)) ||
+			!buffer_u8(buffer,0x41) || !buffer_u8(buffer,0x0E) || !buffer_uleb(buffer,16) ||
+			!buffer_u8(buffer,0x86) || !buffer_uleb(buffer,2) ||
+			!buffer_u8(buffer,0x43) || !buffer_u8(buffer,0x0D) || !buffer_uleb(buffer,6) ) return false;
+		while( buffer->size & 7 ) if( !buffer_u8(buffer,0) ) return false;
+		length = (uint32_t)(buffer->size-start-4);
+		memcpy(buffer->data+start,&length,sizeof(length));
+	}
+#else
+	(void)m;
+#endif
+	return true;
+}
+
 static int function_name( hl_function *f, char *out, int size ) {
 	hl_type_obj *obj = fun_obj(f);
 	const uchar *field = fun_field_name(f);
@@ -155,7 +195,7 @@ static int function_name( hl_function *f, char *out, int size ) {
 }
 
 void hl_gdb_jit_register( hl_module *m ) {
-	static const char shnames[] = "\0.text\0.symtab\0.strtab\0.shstrtab\0.debug_line\0.debug_info\0.debug_abbrev\0";
+	static const char shnames[] = "\0.text\0.symtab\0.strtab\0.shstrtab\0.debug_line\0.debug_info\0.debug_abbrev\0.debug_frame\0";
 	static const unsigned char debug_abbrev[] = {
 		1, 0x11, 0,       /* DW_TAG_compile_unit, no children */
 		0x11, 0x01,       /* DW_AT_low_pc, DW_FORM_addr */
@@ -177,10 +217,11 @@ void hl_gdb_jit_register( hl_module *m ) {
 		'H','a','s','h','L','i','n','k',' ','J','I','T',0,
 		2, 0              /* DW_LANG_C */
 	};
-	size_t text_off, sym_off, str_off, shstr_off, line_off, info_off, abbrev_off, shdr_off, total, string_size = 1;
+	size_t text_off, sym_off, str_off, shstr_off, line_off, info_off, abbrev_off, frame_off, shdr_off, total, string_size = 1;
+	int frame_section;
 	int i, j, count = 0;
 	char name[512];
-	byte_buffer lines = {0};
+	byte_buffer lines = {0}, frames = {0};
 	hl_gdb_entry *entry;
 	Elf64_Ehdr *ehdr;
 	Elf64_Shdr *sections;
@@ -194,8 +235,9 @@ void hl_gdb_jit_register( hl_module *m ) {
 		string_size += length + 1;
 		count++;
 	}
-	if( !build_debug_line(m,&lines) ) {
+	if( !build_debug_line(m,&lines) || !build_debug_frame(m,&frames) ) {
 		free(lines.data);
+		free(frames.data);
 		return;
 	}
 	{
@@ -212,16 +254,19 @@ void hl_gdb_jit_register( hl_module *m ) {
 	if( lines.size ) {
 		info_off = line_off + lines.size;
 		abbrev_off = info_off + sizeof(debug_info);
-		shdr_off = align8(abbrev_off + sizeof(debug_abbrev));
-		total = shdr_off + sizeof(Elf64_Shdr) * 8;
+		frame_off = abbrev_off + sizeof(debug_abbrev);
+		frame_section = 8;
 	} else {
 		info_off = abbrev_off = line_off;
-		shdr_off = align8(line_off);
-		total = shdr_off + sizeof(Elf64_Shdr) * 5;
+		frame_off = line_off;
+		frame_section = 5;
 	}
+	shdr_off = align8(frame_off + frames.size);
+	total = shdr_off + sizeof(Elf64_Shdr) * (frame_section + (frames.size ? 1 : 0));
 	entry = (hl_gdb_entry*)calloc(1,sizeof(*entry) + total);
 	if( !entry ) {
 		free(lines.data);
+		free(frames.data);
 		return;
 	}
 	ehdr = (Elf64_Ehdr*)entry->data;
@@ -243,7 +288,7 @@ void hl_gdb_jit_register( hl_module *m ) {
 	ehdr->e_ehsize = sizeof(*ehdr);
 	ehdr->e_shoff = shdr_off;
 	ehdr->e_shentsize = sizeof(*sections);
-	ehdr->e_shnum = lines.size ? 8 : 5;
+	ehdr->e_shnum = frame_section + (frames.size ? 1 : 0);
 	ehdr->e_shstrndx = 4;
 	sections[1] = (Elf64_Shdr){ .sh_name=1, .sh_type=SHT_PROGBITS, .sh_flags=SHF_ALLOC|SHF_EXECINSTR,
 		.sh_addr=(Elf64_Addr)(uintptr_t)m->jit_code, .sh_offset=text_off, .sh_size=m->codesize, .sh_addralign=16 };
@@ -260,7 +305,12 @@ void hl_gdb_jit_register( hl_module *m ) {
 		memcpy(entry->data+info_off,debug_info,sizeof(debug_info));
 		memcpy(entry->data+abbrev_off,debug_abbrev,sizeof(debug_abbrev));
 	}
+	if( frames.size ) {
+		sections[frame_section] = (Elf64_Shdr){ .sh_name=71, .sh_type=SHT_PROGBITS, .sh_offset=frame_off, .sh_size=frames.size, .sh_addralign=8 };
+		memcpy(entry->data+frame_off,frames.data,frames.size);
+	}
 	free(lines.data);
+	free(frames.data);
 	string_size = 1;
 	count = 1;
 	for(i=0;i<m->code->nfunctions;i++) if( m->jit_debug[i].offsets ) {
