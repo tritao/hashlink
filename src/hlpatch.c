@@ -332,29 +332,14 @@ static unsigned int hash_type_prefix( hl_module *module, int count ) {
 	return hash;
 }
 
+#define OP_BEGIN static const signed char opcode_operand_counts[] = {
+#define OP(o,a,b,c) c == VAR_ARGS ? -1 : b == AR ? c : (a != X) + (b != X) + (c != X),
+#define OP_END };
+#include "opcodes.h"
+
 static int opcode_operands( int opcode ) {
-	switch( opcode ) {
-	case OLabel: return 0;
-	case OMov: case OInt: case OFloat: case OBool: case OBytes: case OString: case OCall0: case OStaticClosure:
-	case OGetGlobal: case OSetGlobal: case OGetThis: case OSetThis: case ONull: case OArraySize: case ONew: case OType:
-	case OToDyn: case OToSFloat: case OToUFloat: case OToInt: case OSafeCast: case OUnsafeCast: case OToVirtual:
-	case OEnumAlloc: case OEnumIndex: case OJTrue: case OJFalse: case OJNull: case OJNotNull: case ORet:
-	case OThrow: case ORethrow: case OTrap: case OEndTrap:
-		return opcode == ONull || opcode == ONew || opcode == ORet || opcode == OThrow || opcode == ORethrow || opcode == OEndTrap ? 1 : 2;
-	case OAdd: case OSub: case OMul: case OSDiv: case OUDiv: case OSMod: case OUMod: case OShl: case OSShr: case OUShr:
-	case OAnd: case OOr: case OXor: case OCall1: case OInstanceClosure: case OField: case OSetField: case OGetArray:
-	case OSetArray: case OJSLt: case OJSGte: case OJSGt: case OJSLte: case OJULt: case OJUGte: case OJNotLt:
-	case OJNotGte: case OJEq: case OJNotEq:
-		return 3;
-	case OCall2: case OEnumField: return 4;
-	case OCall3: return 5;
-	case OCall4: return 6;
-	case OCallN: case OCallMethod: case OCallThis: case OCallClosure: case OMakeEnum: case OSwitch: return -1;
-	case OVirtualClosure: return 3;
-	case ONeg: case ONot: case OIncr: case ODecr: case ONullCheck: return 2;
-	case OJAlways: return 1;
-	default: return -1;
-	}
+	if( opcode < 0 || opcode >= OLast ) return -2;
+	return opcode_operand_counts[opcode];
 }
 
 void hl_patch_free( hl_patch *patch ) {
