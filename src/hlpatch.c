@@ -344,9 +344,9 @@ static int opcode_operands( int opcode ) {
 	case OAdd: case OSub: case OMul: case OSDiv: case OUDiv: case OSMod: case OUMod: case OShl: case OSShr: case OUShr:
 	case OAnd: case OOr: case OXor: case OCall1: case OInstanceClosure: case OField: case OSetField: case OGetArray:
 	case OSetArray: case OJSLt: case OJSGte: case OJSGt: case OJSLte: case OJULt: case OJUGte: case OJNotLt:
-	case OJNotGte: case OJEq: case OJNotEq: case OEnumField:
+	case OJNotGte: case OJEq: case OJNotEq:
 		return 3;
-	case OCall2: return 4;
+	case OCall2: case OEnumField: return 4;
 	case OCall3: return 5;
 	case OCall4: return 6;
 	case OCallN: case OCallMethod: case OCallThis: case OCallClosure: case OMakeEnum: case OSwitch: return -1;
@@ -502,7 +502,8 @@ static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function 
 		case OFloat:if(!valid_reg(f,p[0])||p[1]<0||p[1]>=patch->base_float_count+patch->float_count){*error="Invalid Float operands";return false;}break;
 		case OString:if(!valid_reg(f,p[0])||p[1]<0||p[1]>=patch->base_string_count+patch->string_count){*error="Invalid String operands";return false;}break;
 		case OBool:if(!valid_reg(f,p[0])||(p[1]!=0&&p[1]!=1)){*error="Invalid Bool operands";return false;}break;
-		case OAdd:case OSub:case OMul:case OSDiv:if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||!valid_reg(f,p[2])){*error="Invalid arithmetic operands";return false;}break;
+		case OAdd:case OSub:case OMul:case OSDiv:case OSMod:case OShl:case OSShr:case OUShr:case OAnd:case OOr:case OXor:
+			if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||!valid_reg(f,p[2])){*error="Invalid arithmetic operands";return false;}break;
 		case OCall0:case OCall1:case OCall2:case OCall3:case OCall4:
 			if(!valid_reg(f,p[0])||p[1]<0||p[1]>=m->code->nfunctions+m->code->nnatives||m->functions_ptrs[p[1]]==NULL){*error="Invalid call target";return false;}
 			for(int k=2;k<op->operand_count;k++) if(!valid_reg(f,p[k])){*error="Invalid call argument";return false;}
@@ -556,7 +557,13 @@ static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function 
 		case OType:
 			if(!valid_reg(f,p[0])||p[1]<0||p[1]>=type_count){*error="Invalid type literal";return false;}
 			break;
-		case ONull:case OGetGlobal:case OSetGlobal:case OGetThis:case OSetThis:case OToDyn:case OToSFloat:case OToUFloat:case OToInt:case OSafeCast:case OUnsafeCast:case OToVirtual:
+		case OGetGlobal:
+			if(!valid_reg(f,p[0])||p[1]<0||p[1]>=m->code->nglobals){*error="Invalid global read";return false;}
+			break;
+		case OSetGlobal:
+			if(p[0]<0||p[0]>=m->code->nglobals||!valid_reg(f,p[1])){*error="Invalid global write";return false;}
+			break;
+		case ONull:case OGetThis:case OSetThis:case OToDyn:case OToSFloat:case OToUFloat:case OToInt:case OSafeCast:case OUnsafeCast:case OToVirtual:
 			if(!valid_reg(f,p[0])||(op->operand_count>1&&!valid_reg(f,p[1]))){*error="Invalid unary operation";return false;}
 			break;
 		case OJTrue:if(!valid_reg(f,p[0])||i+1+p[1]<0||i+1+p[1]>=f->instruction_count){*error="Invalid conditional branch";return false;}break;
