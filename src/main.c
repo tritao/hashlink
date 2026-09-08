@@ -175,24 +175,89 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 
 #if defined(HL_LINUX) || defined(HL_MAC)
 #include <signal.h>
-static void handle_signal( int signum ) {
-	signal(signum, SIG_DFL);
-	printf("SIGNAL %d[%s]\n",signum,strsignal(signum));
-	if( hl_get_thread() != NULL ) {
-		hl_dump_stack();
+#include <stdint.h>
+#include <unistd.h>
+
+#define HL_CRASH_STACK_SIZE (64 * 1024)
+
+static unsigned char crash_stack[HL_CRASH_STACK_SIZE];
+static volatile sig_atomic_t handling_signal = 0;
+
+static char *append_text( char *out, const char *text, size_t length ) {
+	while( length-- ) *out++ = *text++;
+	return out;
+}
+
+static char *append_uint( char *out, unsigned int value ) {
+	char digits[16];
+	int count = 0;
+	do {
+		digits[count++] = (char)('0' + value % 10);
+		value /= 10;
+	} while( value );
+	while( count ) *out++ = digits[--count];
+	return out;
+}
+
+static char *append_pointer( char *out, const void *pointer ) {
+	static const char hex[] = "0123456789abcdef";
+	uintptr_t value = (uintptr_t)pointer;
+	int shift = (int)(sizeof(value) * 8) - 4;
+	*out++ = '0';
+	*out++ = 'x';
+	while( shift > 0 && ((value >> shift) & 15) == 0 ) shift -= 4;
+	for(; shift >= 0; shift -= 4)
+		*out++ = hex[(value >> shift) & 15];
+	return out;
+}
+
+static void handle_signal( int signum, siginfo_t *info, void *context ) {
+	static const char prefix[] = "HashLink fatal signal ";
+	static const char address[] = ", address ";
+	static const char external[] = ", sent externally";
+	char message[128], *out = message;
+	(void)context;
+
+	if( handling_signal ) {
+		raise(signum);
+		return;
 	}
-	fflush(stdout);
+	handling_signal = 1;
+	out = append_text(out,prefix,sizeof(prefix) - 1);
+	out = append_uint(out,(unsigned int)signum);
+	if( info != NULL && info->si_code > 0 ) {
+		out = append_text(out,address,sizeof(address) - 1);
+		out = append_pointer(out,info->si_addr);
+	} else
+		out = append_text(out,external,sizeof(external) - 1);
+	*out++ = '\n';
+	{
+		ssize_t written = write(STDERR_FILENO,message,(size_t)(out - message));
+		(void)written;
+	}
+
+	/* This provides useful Haxe frames, but is only best-effort because symbol
+	   resolution is not async-signal-safe. SA_RESETHAND ensures that another
+	   fault while walking the stack is handled by the operating system. */
+	if( hl_get_thread() != NULL )
+		hl_dump_stack();
 	raise(signum);
 }
 static void setup_handler() {
-	struct sigaction act;
-	act.sa_sigaction = NULL;
-	act.sa_handler = handle_signal;
-	act.sa_flags = 0;
+	struct sigaction act = {0};
+	stack_t stack = {0};
+	stack.ss_sp = crash_stack;
+	stack.ss_size = sizeof(crash_stack);
+	sigaltstack(&stack,NULL);
+	act.sa_sigaction = handle_signal;
+	act.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESETHAND;
 	sigemptyset(&act.sa_mask);
 	signal(SIGPIPE, SIG_IGN);
 	sigaction(SIGSEGV,&act,NULL);
-	sigaction(SIGTERM,&act,NULL);
+	sigaction(SIGBUS,&act,NULL);
+	sigaction(SIGILL,&act,NULL);
+	sigaction(SIGFPE,&act,NULL);
+	sigaction(SIGABRT,&act,NULL);
 }
 #else
 static void setup_handler() {
