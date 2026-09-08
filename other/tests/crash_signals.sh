@@ -38,19 +38,23 @@ run_signal() {
 }
 
 run_signal TERM 143 ""
-run_signal SEGV 139 "HashLink fatal signal 11, sent externally"
-run_signal ABRT 134 "HashLink fatal signal 6, sent externally"
+run_signal SEGV 139 "HashLink fatal error: SIGSEGV (signal 11), sent externally, pid"
+run_signal ABRT 134 "HashLink fatal error: SIGABRT (signal 6), sent externally, pid"
 
 : > "$output"
 "$hl" "$bytecode" fault > "$output" 2>&1
 status=$?
 [ "$status" -eq 139 ] || fail "null dereference exited with $status instead of 139"
-grep -E "HashLink fatal signal 11, address 0x[0-9a-f]+" "$output" >/dev/null \
+grep -E "HashLink fatal error: SIGSEGV \(signal 11\) at 0x[0-9a-f]+, pid [0-9]+" "$output" >/dev/null \
 	|| fail "null dereference did not report its fault address"
+if [ "$(uname -s)" = Linux ]; then
+	grep -E "Inspect a retained core with: coredumpctl debug [0-9]+" "$output" >/dev/null \
+		|| fail "null dereference did not report core inspection guidance"
+fi
 
 : > "$output"
 "$hl" "$bytecode" worker-overflow > "$output" 2>&1
 status=$?
 [ "$status" -eq 139 ] || fail "worker stack overflow exited with $status instead of 139"
-grep -E "HashLink fatal signal 11, address 0x[0-9a-f]+" "$output" >/dev/null \
+grep -E "HashLink fatal error: SIGSEGV \(signal 11\) at 0x[0-9a-f]+, pid [0-9]+" "$output" >/dev/null \
 	|| fail "worker stack overflow did not run the crash handler"

@@ -23,8 +23,10 @@ status=$?
 [ ! -s "$stdout" ] || fail "main-thread exception was written to stdout"
 grep -F 'Uncaught exception: main exception' "$stderr" >/dev/null \
 	|| fail "main-thread exception message was missing"
-grep -F 'ExceptionReporting.main(' "$stderr" >/dev/null \
+grep -F '  at ExceptionReporting.main (ExceptionReporting.hx:3)' "$stderr" >/dev/null \
 	|| fail "main-thread exception frame was missing"
+grep -F '  at <entry> (<generated>:1)' "$stderr" >/dev/null \
+	|| fail "generated entry frame was not normalized"
 
 : >"$stdout"
 : >"$stderr"
@@ -42,5 +44,5 @@ kill -TERM "$pid" 2>/dev/null || true
 wait "$pid" 2>/dev/null || true
 [ "$found" = true ] || fail "worker-thread exception message was missing"
 [ ! -s "$stdout" ] || fail "worker-thread exception was written to stdout"
-grep -F 'ExceptionReporting.' "$stderr" >/dev/null \
+grep -F '  at ExceptionReporting.' "$stderr" >/dev/null \
 	|| fail "worker-thread exception frame was missing"

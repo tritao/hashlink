@@ -189,6 +189,12 @@ static char *append_text( char *out, const char *text, size_t length ) {
 	return out;
 }
 
+static size_t text_length( const char *text ) {
+	const char *start = text;
+	while( *text ) text++;
+	return (size_t)(text - start);
+}
+
 static char *append_uint( char *out, unsigned int value ) {
 	char digits[16];
 	int count = 0;
@@ -212,11 +218,27 @@ static char *append_pointer( char *out, const void *pointer ) {
 	return out;
 }
 
+static const char *signal_name( int signum ) {
+	switch( signum ) {
+	case SIGSEGV: return "SIGSEGV";
+	case SIGBUS: return "SIGBUS";
+	case SIGILL: return "SIGILL";
+	case SIGFPE: return "SIGFPE";
+	case SIGABRT: return "SIGABRT";
+	default: return "UNKNOWN";
+	}
+}
+
 static void handle_signal( int signum, siginfo_t *info, void *context ) {
-	static const char prefix[] = "HashLink fatal signal ";
-	static const char address[] = ", address ";
+	static const char prefix[] = "HashLink fatal error: ";
+	static const char signal_prefix[] = " (signal ";
+	static const char address[] = ") at ";
 	static const char external[] = ", sent externally";
-	char message[128], *out = message;
+	static const char pid_prefix[] = ", pid ";
+#ifdef HL_LINUX
+	static const char core_hint[] = "Inspect a retained core with: coredumpctl debug ";
+#endif
+	char message[256], *out = message;
 	(void)context;
 
 	if( handling_signal ) {
@@ -225,13 +247,27 @@ static void handle_signal( int signum, siginfo_t *info, void *context ) {
 	}
 	handling_signal = 1;
 	out = append_text(out,prefix,sizeof(prefix) - 1);
+	{
+		const char *name = signal_name(signum);
+		out = append_text(out,name,text_length(name));
+	}
+	out = append_text(out,signal_prefix,sizeof(signal_prefix) - 1);
 	out = append_uint(out,(unsigned int)signum);
 	if( info != NULL && info->si_code > 0 ) {
 		out = append_text(out,address,sizeof(address) - 1);
 		out = append_pointer(out,info->si_addr);
-	} else
+	} else {
+		*out++ = ')';
 		out = append_text(out,external,sizeof(external) - 1);
+	}
+	out = append_text(out,pid_prefix,sizeof(pid_prefix) - 1);
+	out = append_uint(out,(unsigned int)getpid());
 	*out++ = '\n';
+#ifdef HL_LINUX
+	out = append_text(out,core_hint,sizeof(core_hint) - 1);
+	out = append_uint(out,(unsigned int)getpid());
+	*out++ = '\n';
+#endif
 	{
 		ssize_t written = write(STDERR_FILENO,message,(size_t)(out - message));
 		(void)written;

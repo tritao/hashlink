@@ -150,6 +150,41 @@ static void print_exception_line( const char *prefix, const uchar *value ) {
 	fputc('\n',stderr);
 }
 
+static bool frame_name_equals( const char *name, size_t length, const char *expected ) {
+	return strlen(expected) == length && memcmp(name,expected,length) == 0;
+}
+
+static void print_exception_frame( const uchar *value ) {
+	const char *frame = hl_to_utf8(value), *name = frame, *location = strrchr(frame,'(');
+	size_t name_length, location_length;
+	if( location == NULL ) {
+		fprintf(stderr,"  at %s\n",frame);
+		return;
+	}
+	name_length = (size_t)(location - name);
+	if( name_length > 0 && name[0] == '$' ) {
+		name++;
+		name_length--;
+	}
+	if( frame_name_equals(name,name_length,".init") || frame_name_equals(name,name_length,"init") || frame_name_equals(name,name_length,"__entry") ) {
+		name = "<entry>";
+		name_length = sizeof("<entry>") - 1;
+	}
+	location++;
+	location_length = strlen(location);
+	if( location_length > 0 && location[location_length - 1] == ')' ) location_length--;
+	fputs("  at ",stderr);
+	fwrite(name,1,name_length,stderr);
+	fputs(" (",stderr);
+	if( location_length > 0 && location[0] == '?' ) {
+		fputs("<generated>",stderr);
+		location++;
+		location_length--;
+	}
+	fwrite(location,1,location_length,stderr);
+	fputs(")\n",stderr);
+}
+
 static bool maybe_print_custom_stack( vdynamic *exc ) {
 	hl_type *ot = exc->t;
 	while( ot->kind == HOBJ ) {
@@ -175,7 +210,7 @@ HL_PRIM void hl_print_uncaught_exception(vdynamic *exc) {
 	if (!maybe_print_custom_stack(exc)) {
 		varray *a = hl_exception_stack();
 		for (int i = 0; i < a->size; i++)
-			print_exception_line("Called from ",hl_aptr(a, uchar *)[i]);
+			print_exception_frame(hl_aptr(a, uchar *)[i]);
 	}
 	fflush(stderr);
 }
