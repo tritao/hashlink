@@ -61,7 +61,7 @@ static void *hl_dlopen( const char *name, int flags ) {
 	}
 	return (void*)module;
 }
-#	define dlopen(l,p)		hl_dlopen((l),(p))
+#	define dlopen(l,p)		hl_dlopen((l),0)
 #	define dlsym(h,n)		GetProcAddress((HANDLE)h,n)
 static const char *dlerror( void ) {
 	static char message[256];
