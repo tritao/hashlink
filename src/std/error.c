@@ -109,7 +109,15 @@ HL_PRIM void hl_throw( vdynamic *v ) {
 	if( trap == t->trap_uncaught ) t->trap_uncaught = NULL;
 	t->flags &= ~HL_EXC_RETHROW;
 	if( t->exc_handler && call_handler ) hl_dyn_call_safe(t->exc_handler,&v,1,&call_handler);
-	if( hl_setup.throw_jump == NULL ) hl_setup.throw_jump = longjmp;
+	if( hl_setup.throw_jump == NULL ) {
+#ifdef HL_VCC
+		/* MSVC's debug longjmp performs an SEH unwind through JIT frames and
+		   rejects them when no per-function unwind table is registered. */
+		hl_setup.throw_jump = _longjmp;
+#else
+		hl_setup.throw_jump = longjmp;
+#endif
+	}
 	hl_setup.throw_jump(trap->buf,1);
 	HL_UNREACHABLE;
 }
