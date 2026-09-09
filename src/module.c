@@ -387,7 +387,18 @@ static int module_capture_stack( void **stack, int size ) {
 	hl_module_registry_snapshot_free(modules,module_count);
 	return count;
 #else
+#if defined(HL_WIN_DESKTOP)
+	/* The generic stack-word scan is not safe on MSVC's guarded stacks. The
+	   operating system API bounds the walk and returns whatever native frames
+	   are available even when JIT unwind tables are disabled. */
+	if( stack == NULL ) {
+		void *temporary[HL_EXC_MAX_STACK];
+		return CaptureStackBackTrace(2,HL_EXC_MAX_STACK,temporary,NULL);
+	}
+	return CaptureStackBackTrace(2,size,stack,NULL);
+#else
 	return hl_module_capture_stack_range(hl_get_thread()->stack_top, (void**)&stack, stack, size);
+#endif
 #endif
 }
 
