@@ -29,7 +29,39 @@
 #	undef _GUID
 #	include <windows.h>
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
-#	define dlopen(l,p)		(void*)( (l) ? LoadLibraryA(l) : (HMODULE)&__ImageBase)
+static void *hl_dlopen( const char *name, int flags ) {
+	HMODULE module;
+	int length;
+	wchar_t *wide;
+	DWORD error;
+	(void)flags;
+	if( name == NULL ) return (void*)(HMODULE)&__ImageBase;
+	/* Haxe library names are UTF-8; use the wide Win32 loader so a module
+	   next to a non-ASCII checkout remains loadable. */
+	length = MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,name,-1,NULL,0);
+	if( length == 0 ) return NULL;
+	wide = (wchar_t*)malloc((size_t)length * sizeof(wchar_t));
+	if( wide == NULL ) {
+		SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+		return NULL;
+	}
+	if( MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,name,-1,wide,length) == 0 ) {
+		error = GetLastError();
+		free(wide);
+		SetLastError(error);
+		return NULL;
+	}
+	module = LoadLibraryW(wide);
+	if( module == NULL ) {
+		error = GetLastError();
+		free(wide);
+		SetLastError(error);
+	} else {
+		free(wide);
+	}
+	return (void*)module;
+}
+#	define dlopen(l,p)		hl_dlopen((l),(p))
 #	define dlsym(h,n)		GetProcAddress((HANDLE)h,n)
 static const char *dlerror( void ) {
 	static char message[256];
