@@ -2456,6 +2456,11 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 			break;
 		}
 		int elem_sz = hl_type_size(f->regs[op->p1]);
+		// Match the portable emitter: typed arrays check bounds before
+		// reading from the backing allocation.
+		load_vreg(ctx, A64_X0, op->p2);
+		load_vreg(ctx, A64_X1, op->p3);
+		emit_call_native_ptr(ctx, (void*)hl_array_check);
 		load_vreg(ctx, A64_X9, op->p2);    // array ptr
 		// varray stores elements in its separate backing allocation. The
 		// public data pointer skips the GC type word at HL_WSIZE.
@@ -2529,6 +2534,11 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 			break;
 		}
 		int elem_sz = hl_type_size(f->regs[op->p3]);
+		// OSetArray grows the logical array before storing, including for an
+		// initially empty array. Negative indices are rejected by the helper.
+		load_vreg(ctx, A64_X0, op->p1);
+		load_vreg(ctx, A64_X1, op->p2);
+		emit_call_native_ptr(ctx, (void*)hl_array_ensure);
 		load_vreg(ctx, A64_X9, op->p1);    // array ptr
 		// Match hl_aptr(): load the backing allocation, then skip its GC
 		// type word before applying the element index.
