@@ -1100,6 +1100,11 @@ void hl_jit_free( jit_ctx *ctx, h_bool can_reset ) {
 
 static void hl_jit_init_module( jit_ctx *ctx, hl_module *m ) {
 	ctx->m = m;
+	ctx->debug = m->jit_debug;
+	if( ctx->debug == NULL && m->code->nfunctions > 0 ) {
+		ctx->debug = (hl_debug_infos*)calloc((size_t)m->code->nfunctions, sizeof(hl_debug_infos));
+		m->jit_debug = ctx->debug;
+	}
 	hl_free(&ctx->galloc);
 	hl_alloc_init(&ctx->galloc);
 }
@@ -2588,6 +2593,33 @@ int hl_jit_function( jit_ctx *ctx, hl_module *m, hl_function *f ) {
 		if( is_target[i] ) cache_clear();
 		jit_opcode(ctx, f->ops + i, i);
 	}
+	/* Keep the module's address-to-function map usable for diagnostics and
+	   patch ownership. The opcode offsets are relative to this function. */
+	if( ctx->debug != NULL ) {
+		int fid = (int)(f - m->code->functions);
+		hl_debug_infos *dbg = ctx->debug + fid;
+		free(dbg->offsets);
+		free(dbg->opcodes);
+		dbg->offsets = NULL;
+		dbg->opcodes = NULL;
+		dbg->start = ctx->functionPos;
+		dbg->large = true;
+		if( f->nops > 0 ) {
+			dbg->offsets = malloc(sizeof(int) * (size_t)f->nops);
+			dbg->opcodes = (unsigned char*)malloc((size_t)f->nops);
+			if( dbg->offsets != NULL && dbg->opcodes != NULL ) {
+				for( int i = 0; i < f->nops; i++ ) {
+					((int*)dbg->offsets)[i] = ctx->opsPos[i] - ctx->functionPos;
+					dbg->opcodes[i] = (unsigned char)f->ops[i].op;
+				}
+			} else {
+				free(dbg->offsets);
+				free(dbg->opcodes);
+				dbg->offsets = NULL;
+				dbg->opcodes = NULL;
+			}
+		}
+	}
 
 	// resolve intra-function jumps
 	jlist *j = ctx->jumps;
@@ -2692,6 +2724,13 @@ void *hl_jit_code( jit_ctx *ctx, hl_module *m, int *codesize, hl_debug_infos **d
 }
 
 void hl_jit_patch_method( void *old_fun, void **new_fun_table ) {
-	// stub: live module reload unsupported
-	(void)old_fun; (void)new_fun_table;
+	/* Keep stable function entries valid across reloads. A 16-byte literal
+	   trampoline loads the address of the indirection slot and branches to its
+	   current target. This matches module_init_patch_entries' stride. */
+	unsigned char *code = (unsigned char*)old_fun;
+	uint32_t ins[2] = { 0x58000050u, 0xD61F0200u }; /* ldr x16,#8; br x16 */
+	hl_jit_write_begin();
+	memcpy(code, ins, sizeof(ins));
+	memcpy(code + sizeof(ins), &new_fun_table, sizeof(new_fun_table));
+	hl_jit_write_end(code, 16);
 }

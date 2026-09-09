@@ -238,7 +238,11 @@ endif()
 
 if (WITH_VM)
     if(HL_JIT_AARCH64)
-        set(_HL_JIT_SRC src/jit_arm64.c)
+        set(_HL_JIT_SRC
+            src/jit_arm64.c
+            src/jit_arm64_compat.c
+            src/jit_gdb.c
+        )
     else()
         string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" HL_VM_PROCESSOR)
         if(NOT HL_VM_PROCESSOR MATCHES "^(x86_64|amd64|i[3-6]86)$")
