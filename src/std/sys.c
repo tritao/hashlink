@@ -70,6 +70,7 @@ typedef struct stat pstat;
 #ifdef HL_MAC
 #	include <sys/syslimits.h>
 #	include <limits.h>
+#	include <mach/mach.h>
 #	include <mach-o/dyld.h>
 #endif
 
@@ -462,7 +463,16 @@ HL_PRIM double hl_sys_thread_cpu_time() {
 	if( !GetThreadTimes(GetCurrentThread(),&unused,&unused,&unused,&utime) )
 		return 0.;
 	return ((double)utime.dwHighDateTime) * 65.536 * 6.5536 + (((double)utime.dwLowDateTime) / 10000000);
-#elif defined(HL_MAC) || defined(HL_CONSOLE)
+#elif defined(HL_MAC)
+	mach_port_t thread = mach_thread_self();
+	thread_basic_info_data_t info;
+	mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+	kern_return_t result = thread_info(thread, THREAD_BASIC_INFO, (thread_info_t)&info, &count);
+	mach_port_deallocate(mach_task_self(), thread);
+	if( result != KERN_SUCCESS )
+		return 0.;
+	return info.user_time.seconds + info.user_time.microseconds * 1e-6 + info.system_time.seconds + info.system_time.microseconds * 1e-6;
+#elif defined(HL_CONSOLE)
 	hl_error("sys_thread_cpu_time not implemented on this platform");
 	return 0.;
 #else
