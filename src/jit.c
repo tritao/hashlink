@@ -98,6 +98,7 @@ void hl_jit_define_function( jit_ctx *ctx, int start, int size ) {
 	if( fid >= ctx->mod->unwind_table_size ) jit_assert();
 	ctx->mod->unwind_table[fid].BeginAddress = start;
 	ctx->mod->unwind_table[fid].EndAddress = start + size;
+	ctx->mod->unwind_table[fid].UnwindData = ctx->unwind_data_offset;
 #endif
 }
 
@@ -139,6 +140,10 @@ void hl_jit_init( jit_ctx *ctx, hl_module *m ) {
 	jit_code_reserve(ctx,64);
 #	define B(v)	ctx->output[ctx->out_pos++] = v
 #	define UW(offs,code,inf)	B(offs); B((code) | (inf) << 4)
+	/* A zero UnwindData RVA is treated as an absent record by Windows. Keep
+	   the record at a non-zero, 4-byte-aligned offset in the JIT image. */
+	while( ctx->out_pos < 16 ) B(0);
+	ctx->unwind_data_offset = ctx->out_pos;
 	B((version) | (flags) << 3);
 	B(SizeOfProlog);
 	B(CountOfCodes);

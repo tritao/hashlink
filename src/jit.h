@@ -252,6 +252,9 @@ struct _jit_ctx {
 	int special_code_size;
 	// accum output
 	int fdef_index;
+#ifdef WIN64_UNWIND_TABLES
+	int unwind_data_offset;
+#endif
 	int out_pos;
 	int out_max;
 	unsigned char *output;
