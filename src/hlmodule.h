@@ -220,7 +220,7 @@ typedef struct {
 #if defined(HL_64) && defined(HL_WIN)
 //	always enable custom longjmp (Intel CET)
 #	define JIT_CUSTOM_LONGJUMP
-#	if !defined(HL_CONSOLE) && !defined(HL_DISABLE_WIN64_UNWIND_TABLES)
+#	if !defined(HL_CONSOLE)
 #		define WIN64_UNWIND_TABLES
 #	endif
 #endif
