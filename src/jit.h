@@ -213,6 +213,9 @@ typedef struct {
 	int c2hl;
 	int hl2c;
 	int trampoline;
+#ifdef JIT_CUSTOM_LONGJUMP
+	int longjump;
+#endif
 } jit_special_funs;
 
 struct _jit_ctx {

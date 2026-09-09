@@ -381,6 +381,9 @@ static void *hl_jit_code_finalize( jit_ctx *ctx, hl_module *m, int *codesize, hl
 			arg_fp_count = ctx->cfg.floats.nargs;
 			call_jit_c2hl = (unsigned char*)jit_support_code + ctx->code_funs.c2hl;
 			call_jit_hl2c = (unsigned char*)jit_support_code + ctx->code_funs.hl2c;
+#ifdef JIT_CUSTOM_LONGJUMP
+			hl_setup.throw_jump = (void(*)(jmp_buf, int))((unsigned char*)jit_support_code + ctx->code_funs.longjump);
+#endif
 			hl_setup.free_jit_support = hl_jit_free_support;
 		}
 	}

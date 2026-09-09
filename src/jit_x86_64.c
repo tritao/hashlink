@@ -1923,6 +1923,35 @@ void hl_codegen_init( jit_ctx *jit ) {
 
 	flush_function(ctx, jit->code_funs.hl2c);
 
+#ifdef JIT_CUSTOM_LONGJUMP
+	/* The MSVC debug CRT validates the current stack before performing its
+	   longjmp. That validation cannot see through dynamically generated JIT
+	   frames, so restore the saved setjmp state directly and return to the
+	   saved instruction pointer. The layout matches the Win64 jmp_buf used by
+	   setjmp in the MSVC CRT. */
+	jit->code_funs.longjump = jit->out_pos + byte_count(ctx->code);
+	ereg jump_buffer = cfg->regs.arg[0];
+	ereg jump_value = cfg->regs.arg[1];
+	EMIT(_MOV,R(RAX),jump_value,M_I32);
+	EMIT(_MOV,R(RDX),MK_ADDR(REG_REG(jump_buffer),0x00),M_PTR);
+	EMIT(_MOV,R(RBX),MK_ADDR(REG_REG(jump_buffer),0x08),M_PTR);
+	EMIT(_MOV,R(RSP),MK_ADDR(REG_REG(jump_buffer),0x10),M_PTR);
+	EMIT(_MOV,R(RBP),MK_ADDR(REG_REG(jump_buffer),0x18),M_PTR);
+	EMIT(_MOV,R(RSI),MK_ADDR(REG_REG(jump_buffer),0x20),M_PTR);
+	EMIT(_MOV,R(RDI),MK_ADDR(REG_REG(jump_buffer),0x28),M_PTR);
+	EMIT(_MOV,R(R12),MK_ADDR(REG_REG(jump_buffer),0x30),M_PTR);
+	EMIT(_MOV,R(R13),MK_ADDR(REG_REG(jump_buffer),0x38),M_PTR);
+	EMIT(_MOV,R(R14),MK_ADDR(REG_REG(jump_buffer),0x40),M_PTR);
+	EMIT(_MOV,R(R15),MK_ADDR(REG_REG(jump_buffer),0x48),M_PTR);
+	EMIT(LDMXCSR,MK_ADDR(REG_REG(jump_buffer),0x58),UNUSED,M_NONE);
+	EMIT(FLDCW,MK_ADDR(REG_REG(jump_buffer),0x5C),UNUSED,M_NONE);
+	for(int i=0;i<10;i++)
+		EMIT(MOVSD,MMX(i + 6),MK_ADDR(REG_REG(jump_buffer),0x60 + i * 16),M_F64);
+	EMIT(_PUSH,MK_ADDR(REG_REG(jump_buffer),0x50),UNUSED,M_PTR);
+	EMIT(_RET,UNUSED,UNUSED,M_NONE);
+	flush_function(ctx, jit->code_funs.longjump);
+#endif
+
 	// generate the trampoline, entered with [rsp] = call site and R11 = the native
 	if( jit->mod->debug ) {
 		int shadow = IS_WINCALL64 ? 0x20 : 0;
