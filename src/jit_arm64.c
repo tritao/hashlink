@@ -578,11 +578,18 @@ static void a64_brk( jit_ctx *ctx, uint16_t imm16 ) {
 
 static void *call_jit_c2hl_native = NULL;
 
-// Stub get_wrapper. NULL is safe for the inline hl_wrapper_call path that
-// hl_dyn_call_obj uses (it reads wrappedFun->fun, not cl.fun).
+// Function casts produce a wrapper closure with hasValue == 2. The generic
+// HashLink wrapper entry point is emitted by the x86 backend, but this
+// backend handles those calls inline in OCallClosure below. Keep a non-null
+// marker here so hl_make_fun_wrapper can construct the wrapper; OCallClosure
+// recognizes hasValue == 2 and calls hl_wrapper_call with spilled arguments.
+static void *wrapper_marker_arm64( void ) {
+	return NULL;
+}
+
 static void *get_wrapper_arm64( hl_type *t ) {
 	(void)t;
-	return NULL;
+	return (void*)wrapper_marker_arm64;
 }
 
 static void *callback_c2hl_arm64( void *_f, hl_type *t, void **args, vdynamic *ret ) {
@@ -1837,8 +1844,14 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 			a64_add_imm(ctx, A64_SP_OR_ZR, A64_SP_OR_ZR, total, 1);
 			break;
 		}
-		// hasValue at offset 16
+		// Function casts produce a wrapper closure (hasValue == 2). Its
+		// marker entry cannot be called with the typed ABI, so marshal the
+		// spilled vreg slots through HashLink's generic wrapper helper.
 		load_vreg(ctx, A64_X16, op->p2);
+		a64_ldr_imm(ctx, A64_X9, A64_X16, 16, 4, 0);
+		a64_cmp_imm(ctx, A64_X9, 2, 0);
+		int jwrapper = a64_bcond(ctx, A64_EQ, 0);
+		// hasValue at offset 16
 		a64_ldr_imm(ctx, A64_X9, A64_X16, 16, 4, 0);
 		a64_cmp_imm(ctx, A64_X9, 0, 0);
 		int jnz = a64_bcond(ctx, A64_NE, 0);
@@ -1898,6 +1911,49 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 			if( vreg_is_fp(f, op->p1) ) store_vreg_fp(ctx, A64_V0, op->p1);
 			else store_vreg(ctx, A64_X0, op->p1);
 		}
+		int jafter_wrapper = a64_b(ctx, 0);
+		a64_patch_branch(ctx, jwrapper, BUF_POS());
+		// Pass addresses of the vreg slots. hl_wrapper_call expects pointer
+		// arguments to be represented by the address of their slot, while
+		// primitive arguments are read directly from that same slot.
+		int nargs = op->p3;
+		int args_size = nargs * 8;
+		int ret_off = args_size;
+		int total = args_size + 16; // vdynamic return scratch
+		if( total & 15 ) total += 16 - (total & 15);
+		if( total ) a64_sub_imm(ctx, A64_SP_OR_ZR, A64_SP_OR_ZR, total, 1);
+		for( int i = 0; i < nargs; i++ ) {
+			int off = vreg_offset(op->extra[i]);
+			if( off >= -4095 && off <= 4095 ) {
+				if( off < 0 ) a64_sub_imm(ctx, A64_X9, A64_FP, -off, 1);
+				else          a64_add_imm(ctx, A64_X9, A64_FP, off, 1);
+			} else {
+				a64_mov_imm64(ctx, A64_X9, off);
+				a64_add_reg(ctx, A64_X9, A64_FP, A64_X9, 1);
+			}
+			a64_str_imm(ctx, A64_X9, A64_SP_OR_ZR, i * 8, 8);
+		}
+		load_vreg(ctx, A64_X0, op->p2);
+		a64_add_imm(ctx, A64_X1, A64_SP_OR_ZR, 0, 1);
+		a64_add_imm(ctx, A64_X2, A64_SP_OR_ZR, ret_off, 1);
+		emit_call_native_ptr(ctx, (void*)hl_wrapper_call);
+		if( op->p1 >= 0 && f->regs[op->p1]->kind != HVOID ) {
+			hl_type *dt = f->regs[op->p1];
+			if( vreg_is_fp(f, op->p1) ) {
+				a64_add_imm(ctx, A64_X9, A64_SP_OR_ZR, ret_off, 1);
+				a64_ldr_fp(ctx, A64_V16, A64_X9, 8, dt->kind == HF64);
+				store_vreg_fp(ctx, A64_V16, op->p1);
+			} else if( dt->kind == HUI8 || dt->kind == HUI16 || dt->kind == HI32 ||
+					dt->kind == HBOOL || dt->kind == HI64 || dt->kind == HGUID ) {
+				a64_add_imm(ctx, A64_X9, A64_SP_OR_ZR, ret_off, 1);
+				a64_ldr_imm(ctx, A64_X9, A64_X9, 8, vreg_size(f, op->p1), 0);
+				store_vreg(ctx, A64_X9, op->p1);
+			} else {
+				store_vreg(ctx, A64_X0, op->p1);
+			}
+		}
+		if( total ) a64_add_imm(ctx, A64_SP_OR_ZR, A64_SP_OR_ZR, total, 1);
+		a64_patch_branch(ctx, jafter_wrapper, BUF_POS());
 		break;
 	}
 
@@ -1987,8 +2043,16 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 
 	// ---------------- Box primitives into Dynamic ----------------
 	case OToDyn: {
-		// hl_alloc_dynamic(t), store value at offset 8 (ptr source: NULL stays NULL)
 		hl_type *st = f->regs[op->p2];
+		// Dynamic values already have the vdynamic-compatible header. Copy
+		// them directly; boxing an HFUN/HOBJ here would make the dynamic
+		// object's payload look like a closure pointer during a later cast.
+		if( hl_is_dynamic(st) ) {
+			load_vreg(ctx, A64_X9, op->p2);
+			store_vreg(ctx, A64_X9, op->p1);
+			break;
+		}
+		// hl_alloc_dynamic(t), store value at offset 8 (ptr source: NULL stays NULL)
 		int is_ptr = hl_is_ptr(st);
 		int sz = vreg_size(f, op->p2);
 		int is_fp = vreg_is_fp(f, op->p2);
