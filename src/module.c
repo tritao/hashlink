@@ -388,14 +388,12 @@ static int module_capture_stack( void **stack, int size ) {
 	return count;
 #else
 #if defined(HL_WIN_DESKTOP)
-	/* The generic stack-word scan is not safe on MSVC's guarded stacks. The
-	   operating system API bounds the walk and returns whatever native frames
-	   are available even when JIT unwind tables are disabled. */
-	if( stack == NULL ) {
-		void *temporary[HL_EXC_MAX_STACK];
-		return CaptureStackBackTrace(2,HL_EXC_MAX_STACK,temporary,NULL);
-	}
-	return CaptureStackBackTrace(2,size,stack,NULL);
+	/* The generic stack-word scan is not safe on MSVC's guarded stacks, and
+	   CaptureStackBackTrace cannot walk JIT frames without unwind tables. Keep
+	   the exception value/exit status reliable while omitting native frames. */
+	(void)stack;
+	(void)size;
+	return 0;
 #else
 	return hl_module_capture_stack_range(hl_get_thread()->stack_top, (void**)&stack, stack, size);
 #endif
