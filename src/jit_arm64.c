@@ -2392,10 +2392,12 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 			break;
 		}
 		int elem_sz = hl_type_size(f->regs[op->p1]);
-		int header = (int)sizeof(varray);
 		load_vreg(ctx, A64_X9, op->p2);    // array ptr
+		// varray stores elements in its separate backing allocation. The
+		// public data pointer skips the GC type word at HL_WSIZE.
+		a64_ldr_imm(ctx, A64_X9, A64_X9, (int)offsetof(varray, data), 8, 0);
 		load_vreg(ctx, A64_X10, op->p3);   // index
-		// addr = ptr + idx*elem_sz + header
+		// addr = data + idx*elem_sz + HL_WSIZE
 		if( elem_sz == 1 ) {
 			a64_add_reg(ctx, A64_X9, A64_X9, A64_X10, 1);
 		} else {
@@ -2410,7 +2412,7 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 			}
 			a64_add_reg(ctx, A64_X9, A64_X9, A64_X10, 1);
 		}
-		a64_add_imm(ctx, A64_X9, A64_X9, header, 1);
+		a64_add_imm(ctx, A64_X9, A64_X9, HL_WSIZE, 1);
 		if( vreg_is_fp(f, op->p1) ) {
 			a64_ldr_fp(ctx, A64_V16, A64_X9, 0, f->regs[op->p1]->kind == HF64);
 			store_vreg_fp(ctx, A64_V16, op->p1);
@@ -2463,8 +2465,10 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 			break;
 		}
 		int elem_sz = hl_type_size(f->regs[op->p3]);
-		int header = (int)sizeof(varray);
 		load_vreg(ctx, A64_X9, op->p1);    // array ptr
+		// Match hl_aptr(): load the backing allocation, then skip its GC
+		// type word before applying the element index.
+		a64_ldr_imm(ctx, A64_X9, A64_X9, (int)offsetof(varray, data), 8, 0);
 		load_vreg(ctx, A64_X10, op->p2);   // index
 		if( elem_sz == 1 ) {
 			a64_add_reg(ctx, A64_X9, A64_X9, A64_X10, 1);
@@ -2480,7 +2484,7 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 			}
 			a64_add_reg(ctx, A64_X9, A64_X9, A64_X10, 1);
 		}
-		a64_add_imm(ctx, A64_X9, A64_X9, header, 1);
+		a64_add_imm(ctx, A64_X9, A64_X9, HL_WSIZE, 1);
 		if( vreg_is_fp(f, op->p3) ) {
 			load_vreg_fp(ctx, A64_V16, op->p3);
 			a64_str_fp(ctx, A64_V16, A64_X9, 0, f->regs[op->p3]->kind == HF64);
