@@ -859,6 +859,17 @@ static void op_call_fun( jit_ctx *ctx, int dst, int findex, int count, int *args
 	if( is_native ) {
 		// resolved pointer in functions_ptrs
 		void *fp = ctx->m->functions_ptrs[findex];
+		if( fp == NULL ) {
+			int native_index = fid - ctx->m->code->nfunctions;
+			if( native_index >= 0 && native_index < ctx->m->code->nnatives ) {
+				hl_native *native = ctx->m->code->natives + native_index;
+				fprintf(stderr, "HashLink: unresolved native %s.%s (findex %d)\n",
+					native->lib, native->name, findex);
+			} else {
+				fprintf(stderr, "HashLink: unresolved native findex %d\n", findex);
+			}
+			hl_fatal("unresolved native function");
+		}
 		a64_mov_imm64(ctx, A64_X16, (int64_t)(intptr_t)fp);
 		a64_blr(ctx, A64_X16);
 	} else if( ctx->m->functions_ptrs[findex] != NULL ) {
