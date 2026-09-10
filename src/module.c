@@ -542,13 +542,7 @@ static void null_function() {
 
 static bool module_init_patch_entries( hl_module *m ) {
 	int count = m->code->nfunctions + m->code->nnatives;
-	/* AArch64 patch trampolines need room for a slot load, target load,
-	   branch, and an eight-byte literal. */
-#if defined(__aarch64__)
-	int stride = 24;
-#else
-	int stride = 16;
-#endif
+	int stride = HL_JIT_PATCH_ENTRY_STRIDE;
 	m->patch_targets = (void**)calloc(count,sizeof(void*));
 	m->patch_entry_code_size = count * stride;
 	m->patch_entry_code = hl_alloc_executable_memory(m->patch_entry_code_size);

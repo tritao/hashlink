@@ -26,6 +26,13 @@
 #include <hlsystem.h>
 #include "opcodes.h"
 
+/* Size reserved for each stable function entry used by patchable modules. */
+#if defined(__aarch64__)
+#define HL_JIT_PATCH_ENTRY_STRIDE 24
+#else
+#define HL_JIT_PATCH_ENTRY_STRIDE 16
+#endif
+
 typedef struct {
 	const char *lib;
 	const char *name;

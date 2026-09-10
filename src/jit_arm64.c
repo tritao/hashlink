@@ -879,6 +879,16 @@ static void op_call_fun( jit_ctx *ctx, int dst, int findex, int count, int *args
 		}
 		a64_mov_imm64(ctx, A64_X16, (int64_t)(intptr_t)fp);
 		a64_blr(ctx, A64_X16);
+	} else if( ctx->m->staging_patch ) {
+		/* Patch JITs are built from a live module whose function pointers are
+		   absolute addresses, not offsets into the new code image. Call through
+		   the stable entry so patched functions continue to follow their slot. */
+		void *fp = ctx->m->patch_targets
+			? (void*)((unsigned char*)ctx->m->patch_entry_code + findex * HL_JIT_PATCH_ENTRY_STRIDE)
+			: ctx->m->functions_ptrs[findex];
+		if( fp == NULL ) hl_fatal("unresolved staged function");
+		a64_mov_imm64(ctx, A64_X16, (int64_t)(intptr_t)fp);
+		a64_blr(ctx, A64_X16);
 	} else if( ctx->m->functions_ptrs[findex] != NULL ) {
 		// HL->HL: staged BL patched in hl_jit_code
 		int pos = a64_bl(ctx, 0);
@@ -1203,17 +1213,29 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 
 	// ---------------- Globals ----------------
 	case OGetGlobal: {
+		hl_type *gt = f->regs[op->p1];
 		void *addr = m->globals_data + m->globals_indexes[op->p2];
 		a64_mov_imm64(ctx, A64_X9, (int64_t)(intptr_t)addr);
-		a64_ldr_imm(ctx, A64_X9, A64_X9, 0, 8, 0);
-		store_vreg(ctx, A64_X9, op->p1);
+		if( gt->kind == HF32 || gt->kind == HF64 ) {
+			a64_ldr_fp(ctx, A64_V16, A64_X9, 0, gt->kind == HF64);
+			store_vreg_fp(ctx, A64_V16, op->p1);
+		} else {
+			a64_ldr_imm(ctx, A64_X9, A64_X9, 0, hl_type_size(gt), 0);
+			store_vreg(ctx, A64_X9, op->p1);
+		}
 		break;
 	}
 	case OSetGlobal: {
+		hl_type *gt = f->regs[op->p2];
 		void *addr = m->globals_data + m->globals_indexes[op->p1];
-		load_vreg(ctx, A64_X9, op->p2);
 		a64_mov_imm64(ctx, A64_X10, (int64_t)(intptr_t)addr);
-		a64_str_imm(ctx, A64_X9, A64_X10, 0, 8);
+		if( gt->kind == HF32 || gt->kind == HF64 ) {
+			load_vreg_fp(ctx, A64_V16, op->p2);
+			a64_str_fp(ctx, A64_V16, A64_X10, 0, gt->kind == HF64);
+		} else {
+			load_vreg(ctx, A64_X9, op->p2);
+			a64_str_imm(ctx, A64_X9, A64_X10, 0, hl_type_size(gt));
+		}
 		break;
 	}
 
@@ -2818,7 +2840,7 @@ void *hl_jit_code( jit_ctx *ctx, hl_module *m, int *codesize, hl_debug_infos **d
 }
 
 void hl_jit_patch_method( void *old_fun, void **new_fun_table ) {
-	/* Keep stable function entries valid across reloads. A 16-byte literal
+	/* Keep stable function entries valid across reloads. A 20-byte literal
 	   trampoline loads the indirection slot, follows it to the current target,
 	   and branches there. This matches module_init_patch_entries' stride. */
 	unsigned char *code = (unsigned char*)old_fun;
