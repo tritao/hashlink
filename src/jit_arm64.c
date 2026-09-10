@@ -88,8 +88,11 @@ static void jit_buf( jit_ctx *ctx ) {
 //  branch targets and after calls.
 // -----------------------------------------------------------------------
 
-static int8_t reg_owner_gpr[32];
-static int8_t reg_owner_fp[32];
+// Vreg indices are not bounded to int8_t (the self-hosting compiler has
+// functions with hundreds of vregs). Keep the full index to avoid wrapped
+// owners producing false cache hits and stale register values.
+static int reg_owner_gpr[32];
+static int reg_owner_fp[32];
 
 // HL_JIT_NO_CACHE=1 disables the peephole cache (A/B / regression chasing)
 static int cache_disabled = -1;
@@ -123,7 +126,7 @@ static inline void claim_gpr( a64_greg r, int vi ) {
 		if( reg_owner_gpr[i] == vi ) reg_owner_gpr[i] = -1;
 		if( reg_owner_fp[i]  == vi ) reg_owner_fp[i]  = -1;
 	}
-	reg_owner_gpr[r & 0x1f] = (int8_t)vi;
+	reg_owner_gpr[r & 0x1f] = vi;
 }
 static inline void claim_fp( a64_vreg v, int vi ) {
 	if( vi < 0 ) return;
@@ -131,7 +134,7 @@ static inline void claim_fp( a64_vreg v, int vi ) {
 		if( reg_owner_gpr[i] == vi ) reg_owner_gpr[i] = -1;
 		if( reg_owner_fp[i]  == vi ) reg_owner_fp[i]  = -1;
 	}
-	reg_owner_fp[v & 0x1f] = (int8_t)vi;
+	reg_owner_fp[v & 0x1f] = vi;
 }
 static inline int find_gpr( int vi ) {
 	if( vi < 0 || is_cache_disabled() ) return -1;
