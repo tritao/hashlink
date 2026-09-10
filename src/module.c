@@ -542,7 +542,13 @@ static void null_function() {
 
 static bool module_init_patch_entries( hl_module *m ) {
 	int count = m->code->nfunctions + m->code->nnatives;
+	/* AArch64 patch trampolines need room for a slot load, target load,
+	   branch, and an eight-byte literal. */
+#if defined(__aarch64__)
+	int stride = 24;
+#else
 	int stride = 16;
+#endif
 	m->patch_targets = (void**)calloc(count,sizeof(void*));
 	m->patch_entry_code_size = count * stride;
 	m->patch_entry_code = hl_alloc_executable_memory(m->patch_entry_code_size);
@@ -622,6 +628,12 @@ static void *resolve_library( const char *lib, bool is_opt ) {
 
 	if( strcmp(lib,"builtin") == 0 )
 		return dlopen(NULL,RTLD_LAZY);
+
+	/* Android packages the Haxeon intrinsics into the host shared library. */
+#if defined(HL_ANDROID) && defined(HAXEON_ANDROID_HOST)
+	if( strcmp(lib,"haxeon_runtime") == 0 )
+		return RTLD_DEFAULT;
+#endif
 
 	if( strcmp(lib,"std") == 0 ) {
 #	ifdef HL_WIN

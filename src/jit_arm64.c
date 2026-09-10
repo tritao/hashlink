@@ -1913,9 +1913,9 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 		}
 		int jafter_wrapper = a64_b(ctx, 0);
 		a64_patch_branch(ctx, jwrapper, BUF_POS());
-		// Pass addresses of the vreg slots. hl_wrapper_call expects pointer
-		// arguments to be represented by the address of their slot, while
-		// primitive arguments are read directly from that same slot.
+		// Match hl_wrapper_call's argument representation: pointer-typed
+		// arguments are passed by value in the argument array, while
+		// primitives are represented by pointers to their vreg slots.
 		int nargs = op->p3;
 		int args_size = nargs * 8;
 		int ret_off = args_size;
@@ -1923,13 +1923,18 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 		if( total & 15 ) total += 16 - (total & 15);
 		if( total ) a64_sub_imm(ctx, A64_SP_OR_ZR, A64_SP_OR_ZR, total, 1);
 		for( int i = 0; i < nargs; i++ ) {
-			int off = vreg_offset(op->extra[i]);
-			if( off >= -4095 && off <= 4095 ) {
-				if( off < 0 ) a64_sub_imm(ctx, A64_X9, A64_FP, -off, 1);
-				else          a64_add_imm(ctx, A64_X9, A64_FP, off, 1);
+			hl_type *at = f->regs[op->extra[i]];
+			if( hl_is_ptr(at) ) {
+				load_vreg(ctx, A64_X9, op->extra[i]);
 			} else {
-				a64_mov_imm64(ctx, A64_X9, off);
-				a64_add_reg(ctx, A64_X9, A64_FP, A64_X9, 1);
+				int off = vreg_offset(op->extra[i]);
+				if( off >= -4095 && off <= 4095 ) {
+					if( off < 0 ) a64_sub_imm(ctx, A64_X9, A64_FP, -off, 1);
+					else          a64_add_imm(ctx, A64_X9, A64_FP, off, 1);
+				} else {
+					a64_mov_imm64(ctx, A64_X9, off);
+					a64_add_reg(ctx, A64_X9, A64_FP, A64_X9, 1);
+				}
 			}
 			a64_str_imm(ctx, A64_X9, A64_SP_OR_ZR, i * 8, 8);
 		}
@@ -2814,12 +2819,12 @@ void *hl_jit_code( jit_ctx *ctx, hl_module *m, int *codesize, hl_debug_infos **d
 
 void hl_jit_patch_method( void *old_fun, void **new_fun_table ) {
 	/* Keep stable function entries valid across reloads. A 16-byte literal
-	   trampoline loads the address of the indirection slot and branches to its
-	   current target. This matches module_init_patch_entries' stride. */
+	   trampoline loads the indirection slot, follows it to the current target,
+	   and branches there. This matches module_init_patch_entries' stride. */
 	unsigned char *code = (unsigned char*)old_fun;
-	uint32_t ins[2] = { 0x58000050u, 0xD61F0200u }; /* ldr x16,#8; br x16 */
+	uint32_t ins[3] = { 0x58000070u, 0xF9400210u, 0xD61F0200u }; /* ldr x16,#12; ldr x16,[x16]; br x16 */
 	hl_jit_write_begin();
 	memcpy(code, ins, sizeof(ins));
 	memcpy(code + sizeof(ins), &new_fun_table, sizeof(new_fun_table));
-	hl_jit_write_end(code, 16);
+	hl_jit_write_end(code, 20);
 }
