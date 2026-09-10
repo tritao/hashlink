@@ -1757,6 +1757,19 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 
 	// ---------------- Closures ----------------
 	case OStaticClosure: {
+		if( m->staging_patch ) {
+			// Patch code must return a GC-owned closure.  The normal path can
+			// keep its static closure in the module arena, but a staged patch is
+			// built into temporary code and its closure must survive after the
+			// staging context is released.
+			hl_type *fnt = m->code->functions[m->functions_indexes[op->p2]].type;
+			void *fp = staged_function_target(ctx, op->p2);
+			a64_mov_imm64(ctx, A64_X0, (int64_t)(intptr_t)fnt);
+			a64_mov_imm64(ctx, A64_X1, (int64_t)(intptr_t)fp);
+			emit_call_native_ptr(ctx, (void*)hl_alloc_closure_void);
+			store_vreg(ctx, A64_X0, op->p1);
+			break;
+		}
 		// alloc a module-lifetime vclosure; chain on closure_list so
 		// hl_jit_code patches c->fun from findex to absolute address
 		int fid = op->p2;
