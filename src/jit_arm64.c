@@ -2741,13 +2741,16 @@ int hl_jit_function( jit_ctx *ctx, hl_module *m, hl_function *f ) {
 		dbg->start = ctx->functionPos;
 		dbg->large = true;
 		if( f->nops > 0 ) {
-			dbg->offsets = malloc(sizeof(int) * (size_t)f->nops);
+			/* Keep a sentinel end offset: DWARF line generation and symbol
+			   sizing both query offset[nops]. */
+			dbg->offsets = malloc(sizeof(int) * (size_t)(f->nops + 1));
 			dbg->opcodes = (unsigned char*)malloc((size_t)f->nops);
 			if( dbg->offsets != NULL && dbg->opcodes != NULL ) {
 				for( int i = 0; i < f->nops; i++ ) {
 					((int*)dbg->offsets)[i] = ctx->opsPos[i] - ctx->functionPos;
 					dbg->opcodes[i] = (unsigned char)f->ops[i].op;
 				}
+				((int*)dbg->offsets)[f->nops] = BUF_POS() - ctx->functionPos;
 			} else {
 				free(dbg->offsets);
 				free(dbg->opcodes);

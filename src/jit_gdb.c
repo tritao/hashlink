@@ -1,6 +1,6 @@
 #include "jit_gdb.h"
 
-#if defined(HL_LINUX) && defined(HL_64) && defined(__x86_64__)
+#if defined(HL_LINUX) && defined(HL_64) && (defined(__x86_64__) || defined(__aarch64__))
 #include <elf.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -279,7 +279,13 @@ void hl_gdb_jit_register( hl_module *m ) {
 	ehdr->e_ident[EI_DATA] = ELFDATA2LSB;
 	ehdr->e_ident[EI_VERSION] = EV_CURRENT;
 	ehdr->e_type = ET_EXEC;
+	/* The JIT interface is architecture-neutral, but GDB validates the
+	   machine encoded in each in-memory ELF image. */
+#if defined(__aarch64__)
+	ehdr->e_machine = EM_AARCH64;
+#else
 	ehdr->e_machine = EM_X86_64;
+#endif
 	ehdr->e_version = EV_CURRENT;
 	ehdr->e_ehsize = sizeof(*ehdr);
 	ehdr->e_shoff = shdr_off;
