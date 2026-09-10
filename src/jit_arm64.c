@@ -859,6 +859,12 @@ static int prepare_call_args( jit_ctx *ctx, int count, int *args ) {
 	return stack_bytes;
 }
 
+static void *staged_function_target( jit_ctx *ctx, int findex ) {
+	if( ctx->m->staging_patch && ctx->m->patch_targets )
+		return (unsigned char*)ctx->m->patch_entry_code + findex * HL_JIT_PATCH_ENTRY_STRIDE;
+	return ctx->m->functions_ptrs[findex];
+}
+
 static void op_call_fun( jit_ctx *ctx, int dst, int findex, int count, int *args ) {
 	int fid = ctx->m->functions_indexes[findex];
 	int is_native = fid >= ctx->m->code->nfunctions;
@@ -883,9 +889,7 @@ static void op_call_fun( jit_ctx *ctx, int dst, int findex, int count, int *args
 		/* Patch JITs are built from a live module whose function pointers are
 		   absolute addresses, not offsets into the new code image. Call through
 		   the stable entry so patched functions continue to follow their slot. */
-		void *fp = ctx->m->patch_targets
-			? (void*)((unsigned char*)ctx->m->patch_entry_code + findex * HL_JIT_PATCH_ENTRY_STRIDE)
-			: ctx->m->functions_ptrs[findex];
+		void *fp = staged_function_target(ctx, findex);
 		if( fp == NULL ) hl_fatal("unresolved staged function");
 		a64_mov_imm64(ctx, A64_X16, (int64_t)(intptr_t)fp);
 		a64_blr(ctx, A64_X16);
@@ -2801,7 +2805,9 @@ void *hl_jit_code( jit_ctx *ctx, hl_module *m, int *codesize, hl_debug_infos **d
 			// patch the 4-instr MOVZ+3xMOVK chain to function fid's address
 			int fid = IMM64_FINDEX(c->target);
 			void *fp = m->functions_ptrs[fid];
-			uint64_t abs_addr = (uint64_t)(uintptr_t)((unsigned char*)code + (intptr_t)fp);
+			uint64_t abs_addr = m->staging_patch && m->patch_targets
+				? (uint64_t)(uintptr_t)((unsigned char*)m->patch_entry_code + fid * HL_JIT_PATCH_ENTRY_STRIDE)
+				: (uint64_t)(uintptr_t)((unsigned char*)code + (intptr_t)fp);
 			uint32_t *slot = base + (c->pos >> 2);
 			for( int k = 0; k < 4; k++ ) {
 				uint16_t chunk = (uint16_t)((abs_addr >> (k*16)) & 0xffff);
@@ -2819,7 +2825,10 @@ void *hl_jit_code( jit_ctx *ctx, hl_module *m, int *codesize, hl_debug_infos **d
 			vclosure *next = (vclosure*)cls->value;
 			int fidx = (int)(intptr_t)cls->fun;
 			void *fabs = m->functions_ptrs[fidx];
-			cls->fun = (fabs == NULL) ? NULL : ((unsigned char*)code + (intptr_t)fabs);
+			if( m->staging_patch && m->patch_targets )
+				fabs = (unsigned char*)m->patch_entry_code + fidx * HL_JIT_PATCH_ENTRY_STRIDE;
+			cls->fun = (fabs == NULL || (m->staging_patch && m->patch_targets))
+				? fabs : (unsigned char*)code + (intptr_t)fabs;
 			cls->value = NULL;
 			cls = next;
 		}
