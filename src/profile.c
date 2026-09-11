@@ -510,6 +510,28 @@ static void profile_resume() {
 	hl_condition_release(data.waitCond);
 }
 
+static void profile_resume_remote() {
+	if( data.waitCond == NULL ) return;
+	hl_condition_acquire(data.waitCond);
+	if( stream.remote_paused ) {
+		stream.remote_paused = false;
+		data.profiling_pause--;
+		hl_condition_broadcast(data.waitCond);
+	}
+	hl_condition_release(data.waitCond);
+}
+
+static void profile_pause_remote() {
+	if( data.waitCond == NULL ) return;
+	hl_condition_acquire(data.waitCond);
+	if( !stream.remote_paused ) {
+		stream.remote_paused = true;
+		data.profiling_pause++;
+		hl_condition_broadcast(data.waitCond);
+	}
+	hl_condition_release(data.waitCond);
+}
+
 static void hl_profile_loop( void *_ ) {
 	double next = hl_sys_time();
 	double next_gc_stats = next;
@@ -624,8 +646,7 @@ void hl_profile_setup( int sample_count ) {
 	if( data.sample_count ) return;
 	if( sample_count < 0 ) {
 		// was not started with --profile : pause until we get start event
-		profile_pause();
-		stream.remote_paused = true;
+		profile_pause_remote();
 		return;
 	}
 	data.sample_count = sample_count;
@@ -649,6 +670,16 @@ void hl_profile_setup( int sample_count ) {
 #	endif
 	hl_thread_start(hl_profile_loop,NULL,false);
 #	endif
+}
+
+void hl_profile_wait_for_start( void ) {
+	#	if defined(HL_THREADS) && (defined(HL_WIN_DESKTOP) || defined(HL_LINUX) || defined (HL_MAC))
+	if( data.waitCond == NULL ) return;
+	hl_condition_acquire(data.waitCond);
+	while( stream.remote_paused )
+		hl_condition_wait(data.waitCond);
+	hl_condition_release(data.waitCond);
+	#	endif
 }
 
 void hl_profile_stream_status( unsigned long long *first, unsigned long long *next, unsigned long long *dropped, int *sample_rate, int *paused, unsigned long long *consumer, int *requested_rate, unsigned long long *sample_records, unsigned long long *sample_nanos, unsigned long long *generated_bytes ) {
@@ -702,11 +733,9 @@ bool hl_profile_stream_configure( int sample_rate, bool enabled ) {
 			stream.last_consume = stream.last_adjust;
 			hl_mutex_release(stream.lock);
 		}
-		if( stream.remote_paused ) profile_resume();
-		stream.remote_paused = false;
-	} else if( data.sample_count && !stream.remote_paused ) {
-		profile_pause();
-		stream.remote_paused = true;
+		profile_resume_remote();
+	} else if( data.sample_count ) {
+		profile_pause_remote();
 	}
 	return true;
 }
