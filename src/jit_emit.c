@@ -553,6 +553,9 @@ static void emit_store_reg( emit_ctx *ctx, vreg *to, ereg v ) {
 }
 
 static ereg emit_native_call( emit_ctx *ctx, void *native_ptr, ereg args[], int nargs, hl_type *ret ) {
+	if( native_ptr == NULL ) {
+		jit_error("unresolved native function");
+	}
 	einstr *e = emit_instr(ctx, CALL_PTR);
 	e->mode = (unsigned char)(ret ? hl_type_mode(ret) : M_NORET);
 	e->value = (int_val)native_ptr;
@@ -703,7 +706,7 @@ static void seal_block( emit_ctx *ctx, emit_block *b ) {
 
 static ereg emit_call_fid( emit_ctx *ctx, int findex, ereg *args, int nargs, emit_mode mode ) {
 	einstr *e;
-	if( ctx->mod->patchable ) {
+	if( ctx->mod->patchable || ctx->mod->staging_patch ) {
 		/* Patchable bytecode calls go through the module table, allowing a
 		   transaction to redirect existing callers without rewriting code. */
 		ereg target = LOAD_MEM_PTR(LOAD_CONST_PTR(ctx->mod->functions_ptrs), findex * HL_WSIZE);
@@ -725,9 +728,18 @@ static void emit_call_fun( emit_ctx *ctx, vreg *dst, int findex, int count, int 
 	ereg *args = get_tmp_args(ctx, count);
 	for(int i=0;i<count;i++)
 		args[i] = LOAD(R(args_regs[i]));
-	if( isNative )
+	if( isNative ) {
+		if( m->functions_ptrs[findex] == NULL ) {
+			int native_index = fid - m->code->nfunctions;
+			if( native_index >= 0 && native_index < m->code->nnatives ) {
+				hl_native *native = m->code->natives + native_index;
+				hl_fatal3("HashLink: unresolved native %s.%s (findex %d)", native->lib, native->name, findex);
+			} else {
+				hl_fatal1("HashLink: unresolved native findex %d", findex);
+			}
+		}
 		STORE(dst, emit_native_call(ctx, m->functions_ptrs[findex], args, count, dst->t));
-	else {
+	} else {
 		ereg out = emit_call_fid(ctx,findex,args,count,hl_type_mode(dst->t));
 		if( out ) STORE(dst, out);
 	}

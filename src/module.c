@@ -418,6 +418,44 @@ static int module_capture_stack( void **stack, int size ) {
 	}
 	hl_module_registry_snapshot_free(modules,module_count);
 	return count;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+	// AArch64 JIT frames use the platform frame-pointer chain.  Scanning the
+	// raw stack is unreliable here because callee-saved register spills can
+	// look like (frame, return-address) pairs.
+	void *stack_top = hl_get_thread()->stack_top;
+	void **fp = (void **)__builtin_frame_address(0);
+	int module_count;
+	hl_module **modules = hl_module_registry_snapshot(&module_count);
+	int count = 0;
+	while( fp && (void *)fp < stack_top ) {
+		void *lr = fp[1];
+		void *next_fp = fp[0];
+		for(int i=0;i<module_count;i++) {
+			hl_module *m = modules[i];
+			if( !module_contains_trace_address(m,lr) ) continue;
+			// Patch entries are outside jit_code and have no opcode map. For
+			// normal JIT code, keep the special support-code prologue out of
+			// the reported range just as the stack scanner does.
+			if( m->jit_debug && lr >= m->jit_code && lr < (void*)((char*)m->jit_code + m->codesize) ) {
+				unsigned char *code = m->jit_code + m->jit_debug[0].start;
+				int code_size = m->codesize - m->jit_debug[0].start;
+				if( lr < (void *)code || lr >= (void *)(code + code_size) ) continue;
+			}
+			if( stack ) {
+				if( count == size ) {
+					hl_module_registry_snapshot_free(modules,module_count);
+					return count;
+				}
+				stack[count] = lr;
+			}
+			count++;
+			break;
+		}
+		if( next_fp == NULL || next_fp <= (void *)fp || next_fp >= stack_top ) break;
+		fp = (void **)next_fp;
+	}
+	hl_module_registry_snapshot_free(modules,module_count);
+	return count;
 #else
 	return hl_module_capture_stack_range(hl_get_thread()->stack_top, (void**)&stack, stack, size);
 #endif
@@ -547,7 +585,9 @@ static bool module_init_patch_entries( hl_module *m ) {
 	m->patch_entry_code_size = count * stride;
 	m->patch_entry_code = hl_alloc_executable_memory(m->patch_entry_code_size);
 	if( m->patch_targets == NULL || m->patch_entry_code == NULL ) return false;
+	hl_jit_write_begin();
 	memset(m->patch_entry_code,0xCC,m->patch_entry_code_size);
+	hl_jit_write_end(m->patch_entry_code,m->patch_entry_code_size);
 	for(int i=0;i<m->code->nfunctions;i++) {
 		int slot = m->code->functions[i].findex;
 		void *target = m->functions_ptrs[slot];
