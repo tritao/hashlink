@@ -258,6 +258,7 @@ static void *callback_c2hl( void *f, hl_type *t, void **args, vdynamic *ret ) {
 		void *regs[MAX_ARGS];
 		void *stack[MAX_ARGS];
 	} vargs;
+	memset(&vargs,0,sizeof(vargs));
 	int rp = 0, fp = 0, sp = 0;
 	for(int i=0;i<t->fun->nargs;i++) {
 		hl_type *at = t->fun->args[i];
@@ -286,6 +287,11 @@ static void *callback_c2hl( void *f, hl_type *t, void **args, vdynamic *ret ) {
 		else
 			vargs.stack[sp++] = (void*)iv;
 	}
+	// The AArch64 c2hl trampoline needs the unpadded count while the x86
+	// trampoline keeps receiving the ABI-padded size.  The final stack slot is
+	// reserved for this metadata; at most eight arguments can spill when the
+	// two AAPCS64 register classes are full.
+	vargs.stack[MAX_ARGS - 1] = (void *)(int_val)sp;
 	if( sp & 1 ) sp++; // align stack
 	switch( t->fun->ret->kind ) {
 	case HUI8:
@@ -365,18 +371,22 @@ static void *hl_jit_code_finalize( jit_ctx *ctx, hl_module *m, int *codesize, hl
 	if( size & 4095 ) size += 4096 - (size&4095);
 	unsigned char *code = (unsigned char*)hl_alloc_executable_memory(size);
 	if( code == NULL ) return NULL;
+	hl_jit_write_begin();
 	memcpy(code,ctx->output,size);
 	*codesize = size;
 	*debug = m->jit_debug;
 	ctx->final_code = code;
 	hl_emit_final(ctx);
-	hl_codegen_final(ctx);
+		hl_codegen_final(ctx);
+	hl_jit_write_end(code,size);
 	if( publish_wrappers ) {
 		if( jit_support_code == NULL ) {
 			jit_support_code_size = (ctx->special_code_size + 4095) & ~4095;
 			jit_support_code = hl_alloc_executable_memory(jit_support_code_size);
 			if( jit_support_code == NULL ) return NULL;
+			hl_jit_write_begin();
 			memcpy(jit_support_code,ctx->final_code,ctx->special_code_size);
+			hl_jit_write_end(jit_support_code,jit_support_code_size);
 			arg_reg_count = ctx->cfg.regs.nargs;
 			arg_fp_count = ctx->cfg.floats.nargs;
 			call_jit_c2hl = (unsigned char*)jit_support_code + ctx->code_funs.c2hl;
@@ -403,6 +413,7 @@ void *hl_jit_patch_code( jit_ctx *ctx, hl_module *m, int *codesize, hl_debug_inf
 	return hl_jit_code_finalize(ctx,m,codesize,debug,NULL,false);
 }
 
+#if !defined(__aarch64__) && !defined(_M_ARM64)
 void hl_jit_patch_method( void*fun, void**newt ) {
 	unsigned char *code = (unsigned char*)fun;
 	unsigned long long target = (unsigned long long)(int_val)newt;
@@ -431,3 +442,4 @@ void hl_jit_patch_method( void*fun, void**newt ) {
 	*code++ = 0xFF;
 	*code++ = 0x20;
 }
+#endif

@@ -103,10 +103,47 @@ static ereg get_call_reg( regs_ctx *ctx, call_regs regs, emit_mode m ) {
 	return r;
 }
 
-static int get_stack_size( emit_mode m ) {
+static int get_stack_size( regs_ctx *ctx, emit_mode m ) {
 	int size = hl_emit_mode_sizes[m];
 	if( size < HL_WSIZE ) size = HL_WSIZE;
+	int min = ctx->jit->cfg.stack_arg_size;
+	if( min && size < min ) size = min;
 	return size;
+}
+
+static int get_persist_slot_size( regs_ctx *ctx ) {
+	return ctx->jit->cfg.persist_reg_size ? ctx->jit->cfg.persist_reg_size : HL_WSIZE;
+}
+
+// Compute native-ABI stack argument offsets for CALL_PTR. Returns the total
+// allocation, rounded to the ABI stack alignment, and writes -1 for arguments
+// passed in registers.
+static int compute_native_stack_layout( regs_ctx *ctx, einstr *e, ereg *args, int *offsets ) {
+	call_regs cregs = {0};
+	int offs = 0;
+	int layout = ctx->jit->cfg.native_stack_layout;
+	for(int k=0;k<e->nargs;k++) {
+		value_info *v = REG_IS_VAL(args[k]) ? VAL_REG(args[k]) : NULL;
+		emit_mode mode = v ? v->mode : M_I32;
+		ereg r = get_call_reg(ctx,cregs,mode);
+		if( !IS_NULL(r) ) {
+			offsets[k] = -1;
+			continue;
+		}
+		int size = hl_emit_mode_sizes[mode];
+		if( size <= 0 ) size = HL_WSIZE;
+		if( layout == NATIVE_STACK_LAYOUT_APPLE_ARM64 ) {
+			int align = size;
+			offs = (offs + align - 1) & ~(align - 1);
+			offsets[k] = offs;
+			offs += size;
+		} else {
+			offsets[k] = offs;
+			offs += HL_WSIZE;
+		}
+	}
+	if( offs & 15 ) offs = (offs + 15) & ~15;
+	return offs;
 }
 
 static void regs_write_instr( regs_ctx *ctx, einstr *e, ereg out ) {
@@ -491,11 +528,12 @@ static void regs_assign_regs( regs_ctx *ctx ) {
 				values_add(ctx->scratch,v);
 			}
 		}
-		if( IS_NULL(r) || IS_WINCALL64 ) {
-			// use existing stack storage
-			v->stack_pos = (args_count++ + 2) * HL_WSIZE;
-			if( IS_NULL(r) ) v->reg = MK_STACK_REG(v->stack_pos);
-		}
+	if( IS_NULL(r) || IS_WINCALL64 ) {
+		// use existing stack storage
+		int stride = ctx->jit->cfg.stack_arg_size ? ctx->jit->cfg.stack_arg_size : HL_WSIZE;
+		v->stack_pos = 2 * HL_WSIZE + args_count++ * stride;
+		if( IS_NULL(r) ) v->reg = MK_STACK_REG(v->stack_pos);
+	}
 	}
 	// assign registers
 	int write_index = 1;
@@ -608,8 +646,9 @@ static void regs_assign_regs( regs_ctx *ctx ) {
 	}
 	// assign stack regs
 	int nvalues = jit->value_count + jit->phi_count;
-	int persists_size = (ctx->persists_uses[0] + ctx->persists_uses[1]) * 8;
-	ctx->stack_offset = persists_size + jit_pad_size(persists_size,jit->cfg.stack_align);
+	int persist_count = ctx->persists_uses[0] + ctx->persists_uses[1];
+	int persist_size = persist_count * get_persist_slot_size(ctx);
+	ctx->stack_offset = persist_size + jit_pad_size(persist_size,jit->cfg.stack_align);
 	for(int i=0;i<nvalues;i++) {
 		value_info *v = ctx->values + i;
 		if( v->reg == UNUSED ) v->reg = MK_STACK_REG(v->stack_pos);
@@ -720,9 +759,15 @@ static void regs_emit_instrs( regs_ctx *ctx ) {
 	int write_index = 1;
 	ctx->pos_map[0] = 0;
 
-	int persists_size = (ctx->persists_uses[0] + ctx->persists_uses[1]) * 8;
-	int stack_offset = ctx->stack_size + ctx->stack_offset - persists_size;
-	int push_size = HL_WSIZE * 2 + persists_size; // RIP + RBP save
+	int persist_count = ctx->persists_uses[0] + ctx->persists_uses[1];
+	int persist_size = persist_count * get_persist_slot_size(ctx);
+	int stack_offset = ctx->stack_size + ctx->stack_offset - persist_size;
+	// Keep the alignment calculation in terms of the target's saved-register
+	// slot while retaining the logical offsets used by the debugger and shared
+	// IR. AArch64 saves each GPR/D register in one 8-byte slot and rounds the
+	// aggregate frame to the ABI's 16-byte alignment.
+	int persist_slot = get_persist_slot_size(ctx);
+	int push_size = HL_WSIZE * 2 + persist_count * persist_slot; // FP/LR + saved registers
 	if( jit->cfg.stack_align ) {
 		int align = (stack_offset + push_size) % jit->cfg.stack_align;
 		if( align ) stack_offset += jit->cfg.stack_align - align;
@@ -749,20 +794,40 @@ static void regs_emit_instrs( regs_ctx *ctx ) {
 			call_regs regs = {0};
 			int stack_args = 0;
 			int stack_bits = 0;
+			bool native_layout = (e.op == CALL_PTR && ctx->jit->cfg.native_stack_layout != NATIVE_STACK_LAYOUT_HL);
+			int native_offsets[256];
+			int native_total = 0;
+			if( native_layout ) {
+				if( e.nargs > (int)(sizeof(native_offsets) / sizeof(native_offsets[0])) )
+					jit_error("too many native call args");
+				native_total = compute_native_stack_layout(ctx,&e,args,native_offsets);
+			}
 			for(int k=0;k<e.nargs;k++) {
 				value_info *v = REG_IS_VAL(args[k]) ? VAL_REG(args[k]) : NULL;
 				emit_mode mode = v ? v->mode : M_I32;
 				ereg r = get_call_reg(ctx,regs,mode);
 				if( IS_NULL(r) ) {
-					stack_args += get_stack_size(mode);
-					stack_bits |= 1 << k;
+					if( !native_layout ) {
+						stack_args += get_stack_size(ctx,mode);
+						stack_bits |= 1 << k;
+					}
 				} else if( !v || r != v->reg ) {
 					int_arr_add(ctx->pack_movs,r);
 					int_arr_add(ctx->pack_movs,v ? v->reg : args[k]);
 					int_arr_add(ctx->pack_movs,mode);
 				}
 			}
-			if( stack_args > 0 ) {
+			if( native_layout && native_total > 0 ) {
+				regs_emit(ctx,UNUSED,STACK_OFFS,UNUSED,UNUSED,M_PTR,-native_total);
+				for(int k=0;k<e.nargs;k++) {
+					if( native_offsets[k] < 0 ) continue;
+					value_info *v = REG_IS_VAL(args[k]) ? VAL_REG(args[k]) : NULL;
+					emit_mode mode = v ? v->mode : M_I32;
+					ereg src_reg = v ? v->reg : args[k];
+					regs_emit(ctx,UNUSED,STORE,ctx->jit->cfg.stack_reg,src_reg,mode,native_offsets[k]);
+				}
+				instr_stack_offset = native_total;
+			} else if( stack_args > 0 ) {
 				int offset = 0;
 				if( jit->cfg.stack_align ) {
 					int align = stack_args % jit->cfg.stack_align;
@@ -856,6 +921,19 @@ static void regs_emit_instrs( regs_ctx *ctx ) {
 				ereg ret = REG_CFG(REG_MODE(e.mode))->ret;
 				if( e.a != ret )
 					regs_emit_mov(ctx, ret, e.a, e.mode);
+			}
+			if( ctx->jit->cfg.clear_stack_on_return && stack_offset ) {
+				// A conservative stack scan can retain a managed value from a
+				// returned JIT frame until the caller reuses its slots. Clear the
+				// local frame while SP still addresses its bottom; saved registers
+				// and FP/LR live above stack_offset.
+				int clear = 0;
+				while( clear + HL_WSIZE <= stack_offset ) {
+					regs_emit(ctx,UNUSED,STORE,ctx->jit->cfg.stack_reg,MK_CONST(0),M_PTR,clear);
+					clear += HL_WSIZE;
+				}
+				if( clear < stack_offset )
+					regs_emit(ctx,UNUSED,STORE,ctx->jit->cfg.stack_reg,MK_CONST(0),M_I32,clear);
 			}
 #			ifdef WIN64_UNWIND_TABLES
 			// if we have our stack offset just after a call, the unwind algorithm

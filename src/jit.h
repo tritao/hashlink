@@ -197,12 +197,31 @@ typedef struct {
 	ereg *arg;
 } reg_config;
 
+// HL-to-native stack argument layouts. HL-to-HL calls use the internal HL
+// convention; CALL_PTR can request the platform C ABI when it differs.
+typedef enum {
+	NATIVE_STACK_LAYOUT_HL = 0,
+	NATIVE_STACK_LAYOUT_AAPCS64,
+	NATIVE_STACK_LAYOUT_APPLE_ARM64,
+} native_stack_layout_kind;
+
 typedef struct {
 	reg_config regs;
 	reg_config floats;
 	ereg stack_reg;
 	ereg stack_pos;
 	int stack_align;
+	// Minimum bytes consumed by one stack-passed HL argument. AArch64 uses
+	// 8-byte value slots and rounds the aggregate call area to stack_align.
+	int stack_arg_size;
+	// Bytes consumed by one callee-saved register in the machine prologue.
+	// This can differ from HL_WSIZE when the backend uses aligned save slots.
+	int persist_reg_size;
+	// Layout for CALL_PTR stack arguments. The default is the HL convention.
+	int native_stack_layout;
+	// Conservative GC targets dead JIT stack slots. Targets may request that
+	// their local frame is scrubbed before the epilogue restores the caller.
+	int clear_stack_on_return;
 	int debug_prefix_size;
 	ereg req_bit_shifts;
 	ereg req_div_a;

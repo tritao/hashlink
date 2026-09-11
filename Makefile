@@ -41,7 +41,17 @@ STD = src/std/array.o src/std/buffer.o src/std/bytes.o src/std/cast.o src/std/da
 	src/std/socket.o src/std/string.o src/std/sys.o src/std/types.o src/std/ucs2.o src/std/thread.o src/std/process.o \
 	src/std/track.o
 
-HL_OBJ = src/code.o src/hlpatch.o src/hlruntime.o src/jit.o src/jit_emit.o src/jit_regs.o src/jit_x86_64.o src/jit_dump.o src/jit_gdb.o src/main.o src/module.o src/debugger.o src/diagnostics.o src/diagnostics_transport.o src/profile.o
+ifneq ($(filter arm64 aarch64,$(ARCH)),)
+ifeq ($(HL_JIT_AARCH64_OLD),1)
+HL_JIT_OBJ = src/jit_arm64.o src/jit_arm64_compat.o src/jit_gdb.o
+else
+HL_JIT_OBJ = src/jit.o src/jit_emit.o src/jit_regs.o src/jit_aarch64.o src/jit_aarch64_emit.o src/jit_dump.o src/jit_gdb.o
+endif
+else
+HL_JIT_OBJ = src/jit.o src/jit_emit.o src/jit_regs.o src/jit_x86_64.o src/jit_dump.o src/jit_gdb.o
+endif
+
+HL_OBJ = src/code.o src/hlpatch.o src/hlruntime.o $(HL_JIT_OBJ) src/main.o src/module.o src/debugger.o src/diagnostics.o src/diagnostics_transport.o src/profile.o
 HLPROF_LIVE = hlprof-live$(EXE_SUFFIX)
 ifeq ($(OS),Windows_NT)
 HLPROF_LIVE_LDLIBS = -lws2_32
@@ -208,7 +218,8 @@ ARCH = arm64
 endif
 
 # Linux
-ifneq ($(ARCH),arm64)
+ifneq ($(filter arm64 aarch64,$(ARCH)),)
+else
 CFLAGS += -m$(MARCH)
 endif
 CFLAGS += -fPIC -pthread -fno-omit-frame-pointer
@@ -247,18 +258,12 @@ HL = hl$(EXE_SUFFIX)
 HLC = hlc$(EXE_SUFFIX)
 
 all: $(LIBHL) libs $(HLPROF_LIVE)
-ifeq ($(ARCH),arm64)
-	$(warning HashLink vm is not supported on arm64, skipping)
-else
 all: $(HL)
-endif
 
 install:
 	$(UNAME)==Darwin && ${MAKE} uninstall
 	mkdir -p $(INSTALL_BIN_DIR)
-ifneq ($(ARCH),arm64)
 	cp $(HL) $(INSTALL_BIN_DIR)
-endif
 	cp $(HLPROF_LIVE) $(INSTALL_BIN_DIR)
 	mkdir -p $(INSTALL_LIB_DIR)
 	cp *.hdll $(INSTALL_LIB_DIR)

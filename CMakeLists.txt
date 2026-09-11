@@ -31,6 +31,9 @@ if(APPLE AND CMAKE_OSX_ARCHITECTURES)
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
     set(HL_JIT_AARCH64 ON)
 endif()
+option(HL_JIT_AARCH64_OLD
+    "Use the legacy direct HL-bytecode AArch64 JIT instead of the HL2 IR backend"
+    OFF)
 # 32-bit ARM still has no JIT backend — fall back to disabling the VM there.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^arm$|^armv7" AND NOT HL_JIT_AARCH64)
     set(WITH_VM_DEFAULT OFF)
@@ -238,11 +241,23 @@ endif()
 
 if (WITH_VM)
     if(HL_JIT_AARCH64)
-        set(_HL_JIT_SRC
-            src/jit_arm64.c
-            src/jit_arm64_compat.c
-            src/jit_gdb.c
-        )
+        if(HL_JIT_AARCH64_OLD)
+            set(_HL_JIT_SRC
+                src/jit_arm64.c
+                src/jit_arm64_compat.c
+                src/jit_gdb.c
+            )
+        else()
+            set(_HL_JIT_SRC
+                src/jit.c
+                src/jit_emit.c
+                src/jit_regs.c
+                src/jit_aarch64.c
+                src/jit_aarch64_emit.c
+                src/jit_dump.c
+                src/jit_gdb.c
+            )
+        endif()
     else()
         string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" HL_VM_PROCESSOR)
         if(NOT HL_VM_PROCESSOR MATCHES "^(x86_64|amd64|i[3-6]86)$")
