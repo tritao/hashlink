@@ -1872,7 +1872,12 @@ static void emit_hl2c_trampoline( code_ctx *ctx ) {
 	encode_ldp_stp(ctx, 0x01, 1, 0x12, 12, (Arm64Reg)5, SP_REG, (Arm64Reg)4); // STP D4,D5, [SP, #96]
 	encode_ldp_stp(ctx, 0x01, 1, 0x12, 14, (Arm64Reg)7, SP_REG, (Arm64Reg)6); // STP D6,D7, [SP, #112]
 
-	// X9 = closure (still in X0 — copy to keep X0 alive across loads).
+	// Preserve the wrapper closure while the incoming argument registers are
+	// reloaded below. X0 is both the closure on entry and the first wrapper
+	// argument, so it cannot remain live across the register reload sequence.
+	// X8 is otherwise unused by this trampoline and is caller-saved by AAPCS64.
+	emit_mov_gpr(ctx, X8, X0, 1);
+	// X9 = closure -> type metadata.
 	emit_mov_gpr(ctx, X9, X0, 1);
 	// X9 = X9->t            ; LDR X9, [X9, #0]
 	encode_ldr_str_imm(ctx, 3, 0, 1, 0, X9, X9);
@@ -1914,8 +1919,8 @@ static void emit_hl2c_trampoline( code_ctx *ctx ) {
 	patch_helper_branch(ctx, jdone_default, after_select);
 
 	// Set up wrapper args:
-	// X0 (closure)  — already in X0 across the type-walk because the LDR chain
-	//                 above used X9 only.  ✓
+	// X0 (closure)  — restore the value saved in X8 before the wrapper call.
+	emit_mov_gpr(ctx, X0, X8, 1);
 	// X1 = caller stack args = X29 + 16 (skip saved fp+lr).
 	encode_add_sub_imm(ctx, 1, 0, 0, 0, 16, FP, X1);
 	// X2 = &spilled regs = SP.
