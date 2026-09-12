@@ -102,6 +102,11 @@ static socket_t open_socket( const char *host,const char *port ) {
 	for(it=list;it;it=it->ai_next){result=(socket_t)socket(it->ai_family,it->ai_socktype,it->ai_protocol);if(result==INVALID_SOCKET)continue;if(connect(result,it->ai_addr,(int)it->ai_addrlen)==0)break;CLOSE_SOCKET(result);result=INVALID_SOCKET;}
 	freeaddrinfo(list);return result;
 }
+static socket_t open_socket_until( const char *host,const char *port,int timeout_seconds ) {
+	double deadline=monotime()+timeout_seconds;socket_t result;
+	do{result=open_socket(host,port);if(result!=INVALID_SOCKET)return result;if(monotime()>=deadline)break;sleep_ms(100);}while(1);
+	return INVALID_SOCKET;
+}
 static int request_service( socket_t s,unsigned char service,unsigned char type,uint32_t id,const void *body,uint32_t size,unsigned char **reply,uint32_t *reply_size ) {
 	unsigned char h[16];h[0]=service;h[1]=type;h[2]=h[3]=0;put32(h+4,id);put32(h+8,size);put32(h+12,0);
 	if(!send_all(s,h,16)||(size&&!send_all(s,body,size))||!recv_all(s,h,16))return 0;
@@ -207,7 +212,7 @@ static int consume( symbols *s,unsigned char *pending,size_t *length,uint64_t *s
 		pos+=body+4;if(metadata_dirty&&*metadata_dirty)break;}
 	if(pos){memmove(pending,pending+pos,*length-pos);*length-=pos;}return 1;
 }
-static void usage( const char *p ){fprintf(stderr,"Usage:\n  %s [--host HOST] [--rate HZ] [--alloc-interval N] [--interval MS] [--duration SEC] [--top N] [--lines] [--raw-leaf] [--output FILE] PORT\n  %s report [--top N] [--lines] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format folded [--lines] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format perfetto [--lines] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n",p,p,p,p);}
+static void usage( const char *p ){fprintf(stderr,"Usage:\n  %s [--host HOST] [--rate HZ] [--alloc-interval N] [--interval MS] [--duration SEC] [--connect-timeout SEC] [--top N] [--lines] [--raw-leaf] [--output FILE] PORT\n  %s report [--top N] [--lines] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format folded [--lines] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format perfetto [--lines] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n",p,p,p,p);}
 
 static int offline( int argc,char **argv,int exporting ) {
 	const char *path=NULL,*output_path=NULL;int top=15,code=1,complete=0,format=0,show_lines=0,raw_leaf=0,perfetto_first=1,metadata_dirty=0;FILE *file=NULL,*perfetto=NULL;symbols table={0};folded_table folded_stacks={0};unsigned char header[24],record_header[16],*payload=NULL,*pending=NULL;size_t pending_len=0,pending_cap=512*1024;uint64_t samples=0,unresolved=0,dropped=0,cursor=0,last_time=0,reported_dropped=0,start_ns=0,end_ns=UINT64_MAX;int have_cursor=0;double time_origin=-1;
@@ -250,16 +255,19 @@ done:
 }
 
 int main( int argc,char **argv ) {
-	const char *host="127.0.0.1",*port=NULL,*output_path=NULL;int rate=1000,allocation_interval=0,interval=1000,duration=0,top=15,code=1,show_lines=0,raw_leaf=0,metadata_dirty=0;socket_t sock=INVALID_SOCKET;symbols table={0};capture output={0};
+	const char *host="127.0.0.1",*port=NULL,*output_path=NULL;int rate=1000,allocation_interval=0,interval=1000,duration=0,connect_timeout=0,top=15,code=1,show_lines=0,raw_leaf=0,metadata_dirty=0;socket_t sock=INVALID_SOCKET;symbols table={0};capture output={0};
 	unsigned char hello[16],config[12],read_body[12],*reply=NULL,*pending=NULL;uint32_t reply_size,id=1;uint64_t cursor=0,dropped=0,samples=0,unresolved=0;size_t pending_len=0;double started,next_report,next_metadata;
 	if(argc>1&&!strcmp(argv[1],"report"))return offline(argc,argv,0);
 	if(argc>1&&!strcmp(argv[1],"export"))return offline(argc,argv,1);
-	for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")){usage(argv[0]);return 0;}else if(!strcmp(argv[i],"--host")&&++i<argc)host=argv[i];else if(!strcmp(argv[i],"--rate")&&++i<argc)rate=atoi(argv[i]);else if(!strcmp(argv[i],"--alloc-interval")&&++i<argc)allocation_interval=atoi(argv[i]);else if(!strcmp(argv[i],"--interval")&&++i<argc)interval=atoi(argv[i]);else if(!strcmp(argv[i],"--duration")&&++i<argc)duration=atoi(argv[i]);else if(!strcmp(argv[i],"--top")&&++i<argc)top=atoi(argv[i]);else if(!strcmp(argv[i],"--lines"))show_lines=1;else if(!strcmp(argv[i],"--raw-leaf"))raw_leaf=1;else if(!strcmp(argv[i],"--output")&&++i<argc)output_path=argv[i];else if(argv[i][0]=='-'||port){usage(argv[0]);return 2;}else port=argv[i];}
-	if(!port||rate<=0||allocation_interval<0||interval<=0||duration<0||top<=0){usage(argv[0]);return 2;}
+	for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")){usage(argv[0]);return 0;}else if(!strcmp(argv[i],"--host")&&++i<argc)host=argv[i];else if(!strcmp(argv[i],"--rate")&&++i<argc)rate=atoi(argv[i]);else if(!strcmp(argv[i],"--alloc-interval")&&++i<argc)allocation_interval=atoi(argv[i]);else if(!strcmp(argv[i],"--interval")&&++i<argc)interval=atoi(argv[i]);else if(!strcmp(argv[i],"--duration")&&++i<argc)duration=atoi(argv[i]);else if(!strcmp(argv[i],"--connect-timeout")&&++i<argc)connect_timeout=atoi(argv[i]);else if(!strcmp(argv[i],"--top")&&++i<argc)top=atoi(argv[i]);else if(!strcmp(argv[i],"--lines"))show_lines=1;else if(!strcmp(argv[i],"--raw-leaf"))raw_leaf=1;else if(!strcmp(argv[i],"--output")&&++i<argc)output_path=argv[i];else if(argv[i][0]=='-'||port){usage(argv[0]);return 2;}else port=argv[i];}
+	if(!port||rate<=0||allocation_interval<0||interval<=0||duration<0||connect_timeout<0||top<=0){usage(argv[0]);return 2;}
 #ifdef _WIN32
 	{WSADATA w;if(WSAStartup(MAKEWORD(2,2),&w)){fprintf(stderr,"Winsock initialization failed\n");return 1;}}
 #endif
-	sock=open_socket(host,port);if(sock==INVALID_SOCKET){fprintf(stderr,"Could not connect to %s:%s\n",host,port);goto done;}
+	#ifndef _WIN32
+	signal(SIGPIPE,SIG_IGN);
+	#endif
+	sock=open_socket_until(host,port,connect_timeout);if(sock==INVALID_SOCKET){fprintf(stderr,"Could not connect to %s:%s\n",host,port);goto done;}
 	if(!recv_all(sock,hello,16)||memcmp(hello,"HLDI",4)||u16(hello+4)!=1||(u16(hello+6)&3)!=3){fprintf(stderr,"Endpoint lacks HLDI/1 profiler symbols\n");goto done;}
 	if(u16(hello+6)&4){const char *token=getenv("HL_DIAGNOSTICS_TOKEN");if(!token||!*token||!request_service(sock,0,2,id++,token,(uint32_t)strlen(token),&reply,&reply_size)){fprintf(stderr,"HLDI authentication failed; set HL_DIAGNOSTICS_TOKEN\n");goto done;}free(reply);reply=NULL;}
 	if(!capture_open(&output,output_path,u32(hello+12),(uint32_t)rate)){fprintf(stderr,"Could not open capture file %s\n",output_path);goto done;}
@@ -272,7 +280,7 @@ int main( int argc,char **argv ) {
 #endif
 	started=monotime();next_report=started+interval/1000.0;next_metadata=started+5.0;
 	while(!interrupted&&(!duration||monotime()-started<duration)){
-		put64(read_body,cursor);put32(read_body+8,256*1024);if(!request(sock,P_READ,id++,read_body,12,&reply,&reply_size)||reply_size<16){fprintf(stderr,"Profiler connection closed\n");goto done;}
+		put64(read_body,cursor);put32(read_body+8,256*1024);if(!request(sock,P_READ,id++,read_body,12,&reply,&reply_size)||reply_size<16){fprintf(stderr,"Profiler target disconnected; finalizing capture\n");code=0;goto done;}
 		if(!capture_record_parts(&output,2,read_body,8,reply,reply_size)){fprintf(stderr,"Capture write failed\n");goto done;}cursor=u64(reply);dropped=u64(reply+8);if(pending_len+reply_size-16>512*1024){fprintf(stderr,"Local buffer overflow\n");goto done;}memcpy(pending+pending_len,reply+16,reply_size-16);pending_len+=reply_size-16;free(reply);reply=NULL;
 		if(!consume(&table,pending,&pending_len,&samples,&unresolved,NULL,show_lines,raw_leaf,&metadata_dirty,NULL,NULL,NULL,0)){fprintf(stderr,"Malformed profile record\n");goto done;}
 		if(metadata_dirty){if(!fetch_symbols(sock,&table,id++,&output)){fprintf(stderr,"Metadata refresh failed\n");goto done;}metadata_dirty=0;if(!consume(&table,pending,&pending_len,&samples,&unresolved,NULL,show_lines,raw_leaf,&metadata_dirty,NULL,NULL,NULL,0)){fprintf(stderr,"Malformed profile record\n");goto done;}}
