@@ -25,6 +25,8 @@
 #include <jit.h>
 #include "jit_gdb.h"
 
+HL_API void *hl_atomic_store_ptr( void **address, void *value );
+
 #ifdef HL_WIN
 #	undef _GUID
 #	include <windows.h>
@@ -1164,7 +1166,7 @@ h_bool hl_module_patch_slots( hl_module *target, hl_module *generation, const in
 
 	for(i=0;i<count;i++) {
 		hl_jit_patch_method(target->functions_ptrs[indices[i]],target->functions_ptrs + indices[i]);
-		target->functions_ptrs[indices[i]] = generation->functions_ptrs[indices[i]];
+		hl_atomic_store_ptr(target->functions_ptrs + indices[i],generation->functions_ptrs[indices[i]]);
 	}
 	return true;
 }
