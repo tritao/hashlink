@@ -381,6 +381,8 @@ typedef enum {
 	HL_RUNTIME_BAD_FUNCTION, HL_RUNTIME_EXCEPTION, HL_RUNTIME_RETIRE_BLOCKED
 } hl_runtime_status;
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out );
+/** Initialize a runtime wrapper from externally owned Haxe metadata. The caller owns code. */
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load_code( hl_code *code, const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int stable_id, int *result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_void( hl_runtime_module *runtime, int stable_id, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_bytes( hl_runtime_module *runtime, int stable_id, vbyte **result, vdynamic **exception );

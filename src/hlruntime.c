@@ -132,14 +132,12 @@ static unsigned int read_u32( const unsigned char *p ) {
 	return p[0] | (p[1] << 8) | (p[2] << 16) | ((unsigned int)p[3] << 24);
 }
 
-hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out ) {
-	char *error = NULL;
-	hl_code *code;
+static hl_runtime_status hl_runtime_module_load_code_internal( hl_code *code, const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out, bool initialize ) {
 	hl_module *module;
 	hl_runtime_module *runtime;
 	int identity_count, initializer_slot, entries_offset, revision, version, i, j;
 	hl_runtime_failed_retirements_retry();
-	if( out == NULL || bytes == NULL || length <= 0 || identity == NULL || identity_length < 28 ) return HL_RUNTIME_BAD_ARGUMENT;
+	if( out == NULL || code == NULL || bytes == NULL || length <= 0 || identity == NULL || identity_length < 28 ) return HL_RUNTIME_BAD_ARGUMENT;
 	*out = NULL;
 	version = identity[3];
 	if( memcmp(identity,"HLI",3) != 0 || (version != 2 && version != 3) ) return HL_RUNTIME_BAD_FORMAT;
@@ -149,8 +147,6 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 	initializer_slot = version == 3 ? (int)read_u32(identity + 28) : -1;
 	if( revision < 0 || identity_count < 0 || identity_count > 0x100000 || initializer_slot < -1
 		|| identity_length != entries_offset + identity_count * 8 ) return HL_RUNTIME_BAD_FORMAT;
-	code = hl_code_read(bytes,length,&error);
-	if( code == NULL ) return HL_RUNTIME_BAD_FORMAT;
 	module = hl_module_alloc(code);
 	if( module != NULL ) {
 		module->debug_hlb = (unsigned char*)malloc(length);
@@ -161,10 +157,8 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 	}
 	if( module == NULL || module->debug_hlb == NULL || !hl_module_init(module,HL_MODULE_PATCHABLE) ) {
 		if( module != NULL ) hl_module_free_shutdown(module);
-		hl_code_free(code);
 		return HL_RUNTIME_JIT_FAILED;
 	}
-	hl_code_free(code);
 	runtime = (hl_runtime_module*)malloc(sizeof(hl_runtime_module));
 	if( runtime == NULL ) {
 		hl_module_unload(module);
@@ -204,21 +198,39 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 			if( hl_runtime_module_release(runtime) != HL_RUNTIME_OK ) failed_retirement_add(runtime);
 			return HL_RUNTIME_BAD_FORMAT;
 		}
-		vdynamic *exception = NULL;
-		hl_runtime_status status = hl_runtime_module_call_void(runtime,initializer_id,&exception);
-		if( status != HL_RUNTIME_OK ) {
-			exception = NULL;
-			runtime_clear_exception_state();
-			/* Unpublish now, but do not reclaim JIT metadata while the failed
-			   initializer's native call frames can still retain raw pointers. */
-			hl_module_retire_prepare(runtime->module);
-			failed_retirement_add(runtime);
-			return status;
+		if( initialize ) {
+			vdynamic *exception = NULL;
+			hl_runtime_status status = hl_runtime_module_call_void(runtime,initializer_id,&exception);
+			if( status != HL_RUNTIME_OK ) {
+				exception = NULL;
+				runtime_clear_exception_state();
+				/* Unpublish now, but do not reclaim JIT metadata while the failed
+				   initializer's native call frames can still retain raw pointers. */
+				hl_module_retire_prepare(runtime->module);
+				failed_retirement_add(runtime);
+				return status;
+			}
 		}
 	}
 	*out = runtime;
 	hl_debug_notify_revision(module);
 	return HL_RUNTIME_OK;
+}
+
+hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out ) {
+	char *error = NULL;
+	hl_code *code = NULL;
+	hl_runtime_status status;
+	if( bytes == NULL || length <= 0 ) return HL_RUNTIME_BAD_ARGUMENT;
+	code = hl_code_read(bytes,length,&error);
+	if( code == NULL ) return HL_RUNTIME_BAD_FORMAT;
+	status = hl_runtime_module_load_code_internal(code,bytes,length,identity,identity_length,out,true);
+	hl_code_free(code);
+	return status;
+}
+
+hl_runtime_status hl_runtime_module_load_code( hl_code *code, const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out ) {
+	return hl_runtime_module_load_code_internal(code,bytes,length,identity,identity_length,out,false);
 }
 
 static int resolve_stable_id( hl_runtime_module *runtime, int stable_id ) {
