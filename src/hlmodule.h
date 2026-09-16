@@ -238,6 +238,33 @@ typedef struct {
 	hl_source_snapshot *source_snapshots;
 } hl_patch;
 
+/** Haxe-owned decoded patch model passed directly to the native JIT boundary. */
+typedef struct {
+	unsigned char *module_id;
+	int base_revision;
+	int revision;
+	unsigned int int_prefix_hash, float_prefix_hash, string_prefix_hash, type_prefix_hash;
+	int base_int_count;
+	int int_count;
+	int *ints;
+	int float_count;
+	int base_float_count;
+	double *floats;
+	int string_count;
+	int base_string_count;
+	char **strings;
+	int *string_lens;
+	int type_count;
+	int base_type_count;
+	int function_count;
+	hl_patch_function *functions;
+	int debug_file_count;
+	char **debug_files;
+	int *debug_file_lens;
+	int source_snapshot_count;
+	hl_source_snapshot *source_snapshots;
+} hl_patch_input;
+
 HL_EXTERN_C HL_EXPORT hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error_msg );
 HL_EXTERN_C HL_EXPORT void hl_patch_free( hl_patch *patch );
 
@@ -459,6 +486,10 @@ HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp_capture_meta
 	int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug, hl_patch_code **published_code );
 /** Apply an HLP using Haxe-owned metadata and stable-ID resolution. */
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp_capture_metadata_resolution( hl_runtime_module *runtime, const unsigned char *bytes, int length,
+	int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug,
+	hl_patch_resolution *haxe_resolution, hl_patch_code **published_code );
+/** Apply a Haxe-decoded patch model without reparsing its HLP wire bytes. */
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp_capture_metadata_input( hl_runtime_module *runtime, hl_patch_input *input,
 	int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug,
 	hl_patch_resolution *haxe_resolution, hl_patch_code **published_code );
 HL_EXTERN_C HL_EXPORT const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id );

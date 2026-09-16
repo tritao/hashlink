@@ -310,6 +310,47 @@ static bool apply_haxe_patch_resolution( hl_runtime_module *runtime, hl_patch *p
 	return true;
 }
 
+static bool patch_from_haxe_input( hl_patch *patch, hl_patch_input *input ) {
+	if( patch == NULL || input == NULL || input->module_id == NULL || input->base_revision < 0 || input->revision <= input->base_revision
+		|| input->base_int_count < 0 || input->int_count < 0 || (input->int_count > 0 && input->ints == NULL)
+		|| input->float_count < 0 || input->base_float_count < 0 || (input->float_count > 0 && input->floats == NULL)
+		|| input->string_count < 0 || input->base_string_count < 0
+		|| (input->string_count > 0 && (input->strings == NULL || input->string_lens == NULL))
+		|| input->type_count < 0 || input->base_type_count < 0 || input->function_count <= 0 || input->functions == NULL
+		|| input->debug_file_count < 0 || (input->debug_file_count > 0 && (input->debug_files == NULL || input->debug_file_lens == NULL))
+		|| input->source_snapshot_count < 0
+		|| (input->source_snapshot_count > 0 && input->source_snapshots == NULL) ) return false;
+	memset(patch,0,sizeof(*patch));
+	memcpy(patch->module_id,input->module_id,16);
+	patch->base_revision = input->base_revision;
+	patch->revision = input->revision;
+	patch->int_prefix_hash = input->int_prefix_hash;
+	patch->float_prefix_hash = input->float_prefix_hash;
+	patch->string_prefix_hash = input->string_prefix_hash;
+	patch->type_prefix_hash = input->type_prefix_hash;
+	patch->base_int_count = input->base_int_count;
+	patch->int_count = input->int_count;
+	patch->ints = input->ints;
+	patch->float_count = input->float_count;
+	patch->base_float_count = input->base_float_count;
+	patch->floats = input->floats;
+	patch->string_count = input->string_count;
+	patch->base_string_count = input->base_string_count;
+	patch->strings = (char**)input->strings;
+	patch->string_lens = input->string_lens;
+	patch->type_count = input->type_count;
+	patch->base_type_count = input->base_type_count;
+	patch->types = NULL;
+	patch->function_count = input->function_count;
+	patch->functions = input->functions;
+	patch->debug_file_count = input->debug_file_count;
+	patch->debug_files = (char**)input->debug_files;
+	patch->debug_file_lens = input->debug_file_lens;
+	patch->source_snapshot_count = input->source_snapshot_count;
+	patch->source_snapshots = input->source_snapshots;
+	return true;
+}
+
 const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id ) {
 	int slot;
 	void *address;
@@ -505,6 +546,36 @@ hl_runtime_status hl_runtime_module_apply_hlp_capture_metadata_resolution( hl_ru
 	}
 	applied = hl_module_apply_patch_capture_metadata_resolution(runtime->module,patch,&error,published_code,haxe_type_count,haxe_functions,haxe_function_count,haxe_pools,haxe_debug,haxe_resolution);
 	hl_patch_free(patch);
+	hl_mutex_release(runtime->lock);
+	if( applied ) {
+		hl_profile_stream_notify_revision(runtime->module->diagnostics_id,runtime->module->revision);
+		hl_debug_notify_revision(runtime->module);
+		return HL_RUNTIME_OK;
+	}
+	if( error != NULL && strcmp(error,"Stale patch revision") == 0 ) return HL_RUNTIME_STALE_PATCH;
+	return HL_RUNTIME_INCOMPATIBLE;
+}
+
+hl_runtime_status hl_runtime_module_apply_hlp_capture_metadata_input( hl_runtime_module *runtime, hl_patch_input *input, int haxe_type_count,
+	hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug, hl_patch_resolution *haxe_resolution,
+	hl_patch_code **published_code ) {
+	const char *error = NULL;
+	hl_patch patch;
+	h_bool applied;
+	if( published_code != NULL ) *published_code = NULL;
+	if( runtime == NULL || input == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
+	if( !patch_from_haxe_input(&patch,input) ) return HL_RUNTIME_BAD_FORMAT;
+	hl_mutex_acquire(runtime->lock);
+	if( memcmp(runtime->module_id,patch.module_id,16) != 0 ) {
+		hl_mutex_release(runtime->lock);
+		return HL_RUNTIME_INCOMPATIBLE;
+	}
+	if( haxe_resolution == NULL || !apply_haxe_patch_resolution(runtime,&patch,haxe_resolution) ) {
+		hl_mutex_release(runtime->lock);
+		return HL_RUNTIME_INCOMPATIBLE;
+	}
+	applied = hl_module_apply_patch_capture_metadata_resolution(runtime->module,&patch,&error,published_code,haxe_type_count,haxe_functions,
+		haxe_function_count,haxe_pools,haxe_debug,haxe_resolution);
 	hl_mutex_release(runtime->lock);
 	if( applied ) {
 		hl_profile_stream_notify_revision(runtime->module->diagnostics_id,runtime->module->revision);

@@ -689,7 +689,7 @@ h_bool hl_module_apply_patch_capture_metadata_resolution( hl_module *m, hl_patch
 	if(m->revision!=patch->base_revision||patch->revision<=patch->base_revision){error="Stale patch revision";goto fail;}
 	if(patch->base_int_count!=m->code->nints||patch->base_float_count!=m->code->nfloats||patch->base_string_count!=m->code->nstrings||patch->base_type_count!=m->code->ntypes){error="Patch symbol base does not match module";goto fail;}
 	if(patch->int_prefix_hash!=hash_int_prefix(m->code,patch->base_int_count)||patch->float_prefix_hash!=hash_float_prefix(m->code,patch->base_float_count)||patch->string_prefix_hash!=hash_string_prefix(m->code,patch->base_string_count)||patch->type_prefix_hash!=hash_type_prefix(m,patch->base_type_count)){error="Patch symbol prefix hash does not match module";goto fail;}
-	if(!validate_patch_types(m,patch,patch->base_string_count+patch->string_count,&error))goto fail;
+	if(haxe_type_count < 0 && !validate_patch_types(m,patch,patch->base_string_count+patch->string_count,&error))goto fail;
 	for(int i=0;i<patch->function_count;i++){for(int j=0;j<i;j++)if(patch->functions[j].findex==patch->functions[i].findex){error="Duplicate stable function slot";goto fail;}if(!validate_function(m,patch,patch->functions+i,&error))goto fail;}
 	if(haxe_debug != NULL && !validate_haxe_patch_debug(m,patch,haxe_debug,&error))goto fail;
 	if(haxe_resolution != NULL) {
