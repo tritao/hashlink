@@ -250,6 +250,13 @@ static void **gc_root_owners = NULL;
 static int gc_roots_count = 0;
 static int gc_roots_max = 0;
 
+typedef struct _gc_weak_root gc_weak_root;
+struct _gc_weak_root {
+	void **slot;
+	gc_weak_root *next;
+};
+static gc_weak_root *gc_weak_roots = NULL;
+
 HL_API hl_thread_info *hl_get_thread() {
 	return current_thread;
 }
@@ -337,6 +344,55 @@ HL_PRIM void hl_remove_root( void *v ) {
 			gc_root_owners[i] = gc_root_owners[gc_roots_count];
 			break;
 		}
+	gc_global_lock(false);
+}
+
+HL_API void hl_add_weak_root( void *r ) {
+	gc_weak_root *weak;
+	if( r == NULL ) return;
+	gc_global_lock(true);
+	for(weak=gc_weak_roots;weak;weak=weak->next)
+		if( weak->slot == (void**)r ) {
+			gc_global_lock(false);
+			return;
+		}
+	weak = (gc_weak_root*)malloc(sizeof(gc_weak_root));
+	if( weak == NULL ) out_of_memory("weak roots");
+	weak->slot = (void**)r;
+	weak->next = gc_weak_roots;
+	gc_weak_roots = weak;
+	gc_global_lock(false);
+}
+
+HL_API void hl_remove_weak_root( void *v ) {
+	gc_weak_root **cursor;
+	gc_weak_root *weak;
+	if( v == NULL ) return;
+	gc_global_lock(true);
+	cursor = &gc_weak_roots;
+	while( *cursor != NULL && (*cursor)->slot != (void**)v )
+		cursor = &(*cursor)->next;
+	if( *cursor != NULL ) {
+		weak = *cursor;
+		*cursor = weak->next;
+		free(weak);
+	}
+	gc_global_lock(false);
+}
+
+HL_API void *hl_weak_root_get( void *r ) {
+	void *value;
+	if( r == NULL ) return NULL;
+	gc_global_lock(true);
+	value = *(void**)r;
+	gc_global_lock(false);
+	return value;
+}
+
+HL_API void hl_weak_root_set( void *r, void *value ) {
+	if( r == NULL ) return;
+	gc_global_lock(true);
+	*(void**)r = value;
 	gc_global_lock(false);
 }
 
@@ -933,6 +989,17 @@ static void gc_mark() {
 				hl_fatal("assert");
 		}
 	}
+	for(gc_weak_root *weak=gc_weak_roots;weak;weak=weak->next) {
+		void *p = *weak->slot;
+		gc_pheader *page;
+		int bid;
+		if( p == NULL ) continue;
+		page = GC_GET_PAGE(p);
+		bid = page == NULL || !INPAGE(p,page) ? -1 : gc_allocator_get_block_id(page,p);
+		if( bid < 0 || (page->bmp[bid>>3] & (1<<(bid&7))) == 0 )
+			*weak->slot = NULL;
+	}
+
 	gc_sweep_owned_allocs();
 	gc_allocator_after_mark();
 }
