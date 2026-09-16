@@ -11,19 +11,27 @@ struct _hl_runtime_module {
 	hl_mutex *lock;
 	unsigned char module_id[16];
 	int identity_count;
-	int *stable_ids;
-	int *slots;
+	const int *stable_ids;
+	const int *slots;
+	bool borrowed_identity;
 	struct _hl_runtime_module *retirement_next;
 };
 
 static hl_runtime_module *failed_retirements = NULL;
 static hl_mutex *failed_retirements_lock = NULL;
 
+static void runtime_identity_free( hl_runtime_module *runtime ) {
+	if( runtime == NULL || runtime->borrowed_identity ) return;
+	free((void*)runtime->stable_ids);
+	free((void*)runtime->slots);
+	runtime->stable_ids = NULL;
+	runtime->slots = NULL;
+}
+
 static void runtime_wrapper_free( hl_runtime_module *runtime ) {
 	hl_remove_root(&runtime->lock);
 	hl_mutex_free(runtime->lock);
-	free(runtime->stable_ids);
-	free(runtime->slots);
+	runtime_identity_free(runtime);
 	free(runtime);
 }
 
@@ -197,20 +205,23 @@ static hl_runtime_status hl_runtime_module_load_code_manifest_internal( hl_code 
 	runtime->module->revision = manifest->revision;
 	memcpy(runtime->module_id,manifest->module_id,16);
 	runtime->identity_count = manifest->identity_count;
-	runtime->stable_ids = (int*)malloc(sizeof(int) * manifest->identity_count);
-	runtime->slots = (int*)malloc(sizeof(int) * manifest->identity_count);
+	runtime->borrowed_identity = manifest->encoded_entries == NULL;
+	runtime->stable_ids = runtime->borrowed_identity ? manifest->stable_ids : (const int*)malloc(sizeof(int) * manifest->identity_count);
+	runtime->slots = runtime->borrowed_identity ? manifest->slots : (const int*)malloc(sizeof(int) * manifest->identity_count);
 	runtime->retirement_next = NULL;
 	if( (manifest->identity_count > 0) && (runtime->stable_ids == NULL || runtime->slots == NULL) ) {
-		free(runtime->stable_ids);free(runtime->slots);free(runtime);hl_module_unload(module);return HL_RUNTIME_JIT_FAILED;
+		runtime_identity_free(runtime);free(runtime);hl_module_unload(module);return HL_RUNTIME_JIT_FAILED;
 	}
 	for(i=0;i<manifest->identity_count;i++) {
-		runtime->stable_ids[i] = manifest_stable_id(manifest,i);
-		runtime->slots[i] = manifest_slot(manifest,i);
+		if( !runtime->borrowed_identity ) {
+			((int*)runtime->stable_ids)[i] = manifest_stable_id(manifest,i);
+			((int*)runtime->slots)[i] = manifest_slot(manifest,i);
+		}
 		if( runtime->stable_ids[i] < 0 || find_function(module,runtime->slots[i]) == NULL ) {
-			free(runtime->stable_ids);free(runtime->slots);free(runtime);hl_module_unload(module);return HL_RUNTIME_BAD_FORMAT;
+			runtime_identity_free(runtime);free(runtime);hl_module_unload(module);return HL_RUNTIME_BAD_FORMAT;
 		}
 		for(j=0;j<i;j++) if( runtime->stable_ids[j] == runtime->stable_ids[i] || runtime->slots[j] == runtime->slots[i] ) {
-			free(runtime->stable_ids);free(runtime->slots);free(runtime);hl_module_unload(module);return HL_RUNTIME_BAD_FORMAT;
+			runtime_identity_free(runtime);free(runtime);hl_module_unload(module);return HL_RUNTIME_BAD_FORMAT;
 		}
 	}
 	runtime->lock = hl_mutex_alloc(true);

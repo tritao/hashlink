@@ -446,7 +446,10 @@ typedef enum {
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out );
 /** Initialize a runtime wrapper from externally owned Haxe metadata. The caller owns code. */
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load_code( hl_code *code, const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out );
-/** Initialize a runtime wrapper from externally owned Haxe metadata and an already decoded manifest. */
+/**
+ * Initialize a runtime wrapper from externally owned Haxe metadata and an already decoded manifest.
+ * The stable_ids and slots arrays are borrowed until the runtime wrapper is released.
+ */
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load_code_manifest( hl_code *code, const unsigned char *bytes, int length, const unsigned char *module_id,
 	int module_id_length, int revision, const int *stable_ids, const int *slots, int identity_count, int initializer_slot, hl_runtime_module **out );
 /** Materialize one Haxe-owned constant through an external runtime wrapper. */
