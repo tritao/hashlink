@@ -136,6 +136,18 @@ typedef struct {
 	int *operands;
 } hl_patch_instruction;
 
+/** C-layout scalar pools prepared by Haxe for one cumulative patch state. */
+typedef struct {
+	int int_count;
+	int float_count;
+	int string_count;
+	int *ints;
+	double *floats;
+	char **strings;
+	int *string_lens;
+	uchar **ustrings;
+} hl_patch_pools;
+
 typedef struct {
 	int file, line, column, end_line, end_column;
 	int source_hash;
@@ -325,7 +337,7 @@ HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch_capture_types( hl_module *mod
 	hl_patch_code **published_code, int haxe_type_count );
 /** Apply a patch using Haxe-owned type records and patched function descriptors. */
 HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch_capture_metadata( hl_module *module, hl_patch *patch, const char **error_msg,
-	hl_patch_code **published_code, int haxe_type_count, hl_function *haxe_functions, int haxe_function_count );
+	hl_patch_code **published_code, int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools );
 /** Release one external owner of a published hot-reload JIT allocation. */
 HL_EXTERN_C HL_EXPORT h_bool hl_patch_code_release( hl_patch_code *code );
 /** Read the immutable revision carried by a retained JIT allocation. */
@@ -417,7 +429,7 @@ HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp_capture_type
 	int haxe_type_count, hl_patch_code **published_code );
 /** Apply an HLP using Haxe-owned type records and patched function descriptors. */
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp_capture_metadata( hl_runtime_module *runtime, const unsigned char *bytes, int length,
-	int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_code **published_code );
+	int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_code **published_code );
 HL_EXTERN_C HL_EXPORT const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_debug_region_count( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_hlp_summary( const unsigned char *bytes, int length, int *base_revision, int *revision, int *function_count );
