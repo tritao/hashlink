@@ -20,6 +20,8 @@ struct _hl_patch_code {
 	hl_source_snapshot *source_snapshots;
 	void *gdb_jit_entry;
 	hl_patch_code *next_retired;
+	int external_references;
+	int detached;
 };
 
 static hl_function *find_live_function( hl_module *m, int findex ) {
@@ -57,8 +59,19 @@ static void patch_code_free( hl_patch_code *code ) {
 
 void hl_module_patch_release_all( hl_module *m ) {
 	if(!m||!m->patch_owners)return;
-	for(int i=0;i<m->code->nfunctions+m->code->nnatives;i++){hl_patch_code *owner=m->patch_owners[i];if(owner){m->patch_owners[i]=NULL;if(--owner->references==0)patch_code_free(owner);}}
-	while(m->retired_patch_code){hl_patch_code *owner=m->retired_patch_code;m->retired_patch_code=owner->next_retired;patch_code_free(owner);}
+	for(int i=0;i<m->code->nfunctions+m->code->nnatives;i++){hl_patch_code *owner=m->patch_owners[i];if(owner){m->patch_owners[i]=NULL;if(--owner->references==0){if(owner->external_references==0)patch_code_free(owner);else owner->detached=1;}}}
+	while(m->retired_patch_code){hl_patch_code *owner=m->retired_patch_code;m->retired_patch_code=owner->next_retired;if(owner->external_references==0)patch_code_free(owner);else owner->detached=1;}
+}
+
+h_bool hl_patch_code_release( hl_patch_code *code ) {
+	if( code == NULL || code->external_references <= 0 ) return false;
+	code->external_references--;
+	if( code->external_references == 0 && code->detached ) patch_code_free(code);
+	return true;
+}
+
+int hl_patch_code_revision( hl_patch_code *code ) {
+	return code == NULL ? -1 : code->revision;
 }
 
 int hl_module_patch_allocation_count( hl_module *m ) {
@@ -620,7 +633,12 @@ static bool stage_patch_types( hl_module *m, hl_patch *patch, uchar **strings, v
 }
 
 h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_msg ) {
+	return hl_module_apply_patch_capture(m,patch,error_msg,NULL);
+}
+
+h_bool hl_module_apply_patch_capture( hl_module *m, hl_patch *patch, const char **error_msg, hl_patch_code **published_code ) {
 	const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;hl_code code;hl_module temp;
+	if( published_code != NULL ) *published_code = NULL;
 	if(!m||!patch||!m->patchable){error="Module is not patchable";goto fail;}
 	if(patch->function_count<=0){error="Patch contains no functions";goto fail;}
 	if(m->revision!=patch->base_revision||patch->revision<=patch->base_revision){error="Stale patch revision";goto fail;}
@@ -662,13 +680,13 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	if(type_allocation_count){int needed=m->patch_type_allocation_count+type_allocation_count;if(needed>m->patch_type_allocation_capacity){int capacity=needed<16?16:needed*2;void **owners=(void**)realloc(m->patch_type_allocations,sizeof(void*)*capacity);if(!owners){error="Out of memory publishing patch types";goto fail;}m->patch_type_allocations=owners;m->patch_type_allocation_capacity=capacity;}}
 	for(int i=0;i<type_allocation_count;i++)m->patch_type_allocations[m->patch_type_allocation_count++]=type_allocations[i];
 	free(type_allocations);type_allocations=NULL;type_allocation_count=0;for(int i=m->code->ntypes;i<code.ntypes;i++)m->code->types[i].gc_owner=m;m->code->ntypes=code.ntypes;
-	for(int i=0;i<patch->function_count;i++){int slot=allocation->functions[i].findex;hl_patch_code *old=m->patch_owners[slot];void *target=(unsigned char*)allocation->code+offsets[i];if(m->patch_targets){if(old==NULL)hl_jit_patch_method(m->patch_targets[slot],m->patch_targets+slot);m->patch_targets[slot]=target;}else{hl_jit_patch_method(m->functions_ptrs[slot],m->functions_ptrs+slot);m->functions_ptrs[slot]=target;}m->patch_owners[slot]=allocation;allocation->references++;if(old&&--old->references==0){if(m->patch_targets)patch_code_free(old);else{old->next_retired=m->retired_patch_code;m->retired_patch_code=old;}}}
+	for(int i=0;i<patch->function_count;i++){int slot=allocation->functions[i].findex;hl_patch_code *old=m->patch_owners[slot];void *target=(unsigned char*)allocation->code+offsets[i];if(m->patch_targets){if(old==NULL)hl_jit_patch_method(m->patch_targets[slot],m->patch_targets+slot);m->patch_targets[slot]=target;}else{hl_jit_patch_method(m->functions_ptrs[slot],m->functions_ptrs+slot);m->functions_ptrs[slot]=target;}m->patch_owners[slot]=allocation;allocation->references++;if(old&&--old->references==0){if(m->patch_targets){if(old->external_references==0)patch_code_free(old);else old->detached=1;}else{old->next_retired=m->retired_patch_code;m->retired_patch_code=old;}}}
 	if(m->patch_ustrings==NULL)m->patch_initial_string_count=patch->base_string_count;
 	free(m->patch_ints);free(m->patch_floats);free(m->patch_strings);free(m->patch_string_lens);free(m->patch_ustrings);free(m->patch_string_data);
 	m->patch_ints=combined_ints;m->patch_floats=combined_floats;m->patch_strings=combined_strings;m->patch_string_lens=combined_string_lens;m->patch_ustrings=combined_ustrings;m->patch_string_data=combined_string_data;
 	m->code->ints=combined_ints;m->code->nints=code.nints;m->code->floats=combined_floats;m->code->nfloats=code.nfloats;m->code->strings=combined_strings;m->code->strings_lens=combined_string_lens;m->code->ustrings=combined_ustrings;m->code->nstrings=code.nstrings;
 	combined_ints=NULL;combined_floats=NULL;combined_strings=NULL;combined_string_lens=NULL;combined_ustrings=NULL;combined_string_data=NULL;
-	m->revision=patch->revision;m->patch_jit_count+=patch->function_count;free(offsets);if(error_msg)*error_msg=NULL;return true;
+	m->revision=patch->revision;m->patch_jit_count+=patch->function_count;if(published_code!=NULL){allocation->external_references++;*published_code=allocation;}free(offsets);if(error_msg)*error_msg=NULL;return true;
 fail:
 	if(jit) hl_jit_free(jit,false);
 	free(combined_functions);
