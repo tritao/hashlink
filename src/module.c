@@ -799,6 +799,17 @@ static void hl_module_init_indexes( hl_module *m, bool haxe_metadata ) {
 	fent->field.name = USTR("init");
 }
 
+/* Haxe owns object layout and descriptors, but executable prototype tables
+   must be built only after the module's finalized JIT entrypoints exist. */
+static void hl_module_init_haxe_object_prototypes( hl_module *m ) {
+	int i;
+	for(i=0;i<m->code->ntypes;i++) {
+		hl_type *t = m->code->types + i;
+		if( t->kind == HOBJ || t->kind == HSTRUCT )
+			hl_get_obj_proto(t);
+	}
+}
+
 #ifdef HL_VTUNE
 #include <jitprofiling.h>
 #define VTUNE_OFFSET(dbg,j)	((int)(dbg->large ? ((int*)dbg->offsets)[j] : ((unsigned short*)dbg->offsets)[j]))
@@ -1044,6 +1055,7 @@ int hl_module_init( hl_module *m, int flags ) {
 		m->functions_ptrs[f->findex] = ((unsigned char*)m->jit_code) + ((int_val)m->functions_ptrs[f->findex]);
 	}
 	if( m->patchable && !module_init_patch_entries(m) ) return 0;
+	if( (flags & HL_MODULE_HAXE_METADATA) != 0 ) hl_module_init_haxe_object_prototypes(m);
 	// INIT constants
 	for(i=0;i<m->code->nconstants;i++) {
 		hl_constant *c = m->code->constants + i;
