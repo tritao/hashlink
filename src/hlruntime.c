@@ -557,26 +557,22 @@ hl_runtime_status hl_runtime_module_apply_hlp_capture_metadata_resolution( hl_ru
 }
 
 hl_runtime_status hl_runtime_module_apply_hlp_capture_metadata_input( hl_runtime_module *runtime, hl_patch_input *input, int haxe_type_count,
-	hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug, hl_patch_resolution *haxe_resolution,
+	hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug,
 	hl_patch_code **published_code ) {
 	const char *error = NULL;
 	hl_patch patch;
 	h_bool applied;
 	if( published_code != NULL ) *published_code = NULL;
 	if( runtime == NULL || input == NULL || haxe_type_count < 0 || haxe_function_count < 0 || haxe_functions == NULL
-		|| haxe_pools == NULL || haxe_debug == NULL || haxe_resolution == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
+		|| haxe_pools == NULL || haxe_debug == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
 	if( !patch_from_haxe_input(&patch,input) ) return HL_RUNTIME_BAD_FORMAT;
 	hl_mutex_acquire(runtime->lock);
 	if( memcmp(runtime->module_id,patch.module_id,16) != 0 ) {
 		hl_mutex_release(runtime->lock);
 		return HL_RUNTIME_INCOMPATIBLE;
 	}
-	if( haxe_resolution == NULL || !apply_haxe_patch_resolution(runtime,&patch,haxe_resolution) ) {
-		hl_mutex_release(runtime->lock);
-		return HL_RUNTIME_INCOMPATIBLE;
-	}
-	applied = hl_module_apply_patch_capture_metadata_resolution(runtime->module,&patch,&error,published_code,haxe_type_count,haxe_functions,
-		haxe_function_count,haxe_pools,haxe_debug,haxe_resolution);
+	applied = hl_module_apply_patch_capture_metadata(runtime->module,&patch,&error,published_code,haxe_type_count,haxe_functions,
+		haxe_function_count,haxe_pools,haxe_debug);
 	hl_mutex_release(runtime->lock);
 	if( applied ) {
 		hl_profile_stream_notify_revision(runtime->module->diagnostics_id,runtime->module->revision);

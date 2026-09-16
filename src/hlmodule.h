@@ -491,7 +491,7 @@ HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp_capture_meta
 /** Apply a Haxe-decoded patch model without reparsing its HLP wire bytes. */
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp_capture_metadata_input( hl_runtime_module *runtime, hl_patch_input *input,
 	int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug,
-	hl_patch_resolution *haxe_resolution, hl_patch_code **published_code );
+	hl_patch_code **published_code );
 HL_EXTERN_C HL_EXPORT const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_debug_region_count( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_hlp_summary( const unsigned char *bytes, int length, int *base_revision, int *revision, int *function_count );
