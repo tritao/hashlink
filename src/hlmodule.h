@@ -320,6 +320,9 @@ HL_EXTERN_C HL_EXPORT h_bool hl_module_patch_generation( hl_module *target, hl_m
 HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch( hl_module *module, hl_patch *patch, const char **error_msg );
 /** Apply a patch and retain the newly published JIT allocation for an external owner. */
 HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch_capture( hl_module *module, hl_patch *patch, const char **error_msg, hl_patch_code **published_code );
+/** Apply a patch whose compatible appended type records were prepared by Haxeon. */
+HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch_capture_types( hl_module *module, hl_patch *patch, const char **error_msg,
+	hl_patch_code **published_code, int haxe_type_count );
 /** Release one external owner of a published hot-reload JIT allocation. */
 HL_EXTERN_C HL_EXPORT h_bool hl_patch_code_release( hl_patch_code *code );
 /** Read the immutable revision carried by a retained JIT allocation. */
@@ -406,6 +409,9 @@ HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_validate_call( hl_runt
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const unsigned char *bytes, int length );
 /** Apply an HLP and retain its published JIT allocation for an external owner. */
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp_capture( hl_runtime_module *runtime, const unsigned char *bytes, int length, hl_patch_code **published_code );
+/** Apply an HLP whose compatible appended type records were prepared by Haxeon. */
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp_capture_types( hl_runtime_module *runtime, const unsigned char *bytes, int length,
+	int haxe_type_count, hl_patch_code **published_code );
 HL_EXTERN_C HL_EXPORT const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_debug_region_count( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_hlp_summary( const unsigned char *bytes, int length, int *base_revision, int *revision, int *function_count );

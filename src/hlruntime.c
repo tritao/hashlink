@@ -438,6 +438,10 @@ hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const
 }
 
 hl_runtime_status hl_runtime_module_apply_hlp_capture( hl_runtime_module *runtime, const unsigned char *bytes, int length, hl_patch_code **published_code ) {
+	return hl_runtime_module_apply_hlp_capture_types(runtime,bytes,length,-1,published_code);
+}
+
+hl_runtime_status hl_runtime_module_apply_hlp_capture_types( hl_runtime_module *runtime, const unsigned char *bytes, int length, int haxe_type_count, hl_patch_code **published_code ) {
 	const char *error = NULL;
 	hl_patch *patch;
 	h_bool applied;
@@ -464,7 +468,7 @@ hl_runtime_status hl_runtime_module_apply_hlp_capture( hl_runtime_module *runtim
 			patch->functions[i].instructions[instruction].operands[1]=target;
 		}
 	}
-	applied = hl_module_apply_patch_capture(runtime->module,patch,&error,published_code);
+	applied = hl_module_apply_patch_capture_types(runtime->module,patch,&error,published_code,haxe_type_count);
 	hl_patch_free(patch);
 	hl_mutex_release(runtime->lock);
 	if( applied ) {
