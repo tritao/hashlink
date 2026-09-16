@@ -347,6 +347,15 @@ HL_PRIM void hl_remove_root( void *v ) {
 	gc_global_lock(false);
 }
 
+HL_API void *hl_root_get( void *r ) {
+	void *value;
+	if( r == NULL ) return NULL;
+	gc_global_lock(true);
+	value = *(void**)r;
+	gc_global_lock(false);
+	return value;
+}
+
 HL_API void hl_root_set( void *r, void *value ) {
 	if( r == NULL ) return;
 	gc_global_lock(true);
