@@ -151,7 +151,7 @@ static int manifest_slot( const hl_runtime_manifest *manifest, int index ) {
 }
 
 static hl_runtime_status hl_runtime_module_load_code_manifest_internal( hl_code *code, const unsigned char *bytes, int length,
-	const hl_runtime_manifest *manifest, hl_runtime_module **out, bool initialize ) {
+	const hl_runtime_manifest *manifest, hl_runtime_module **out, bool initialize, bool haxe_metadata ) {
 	hl_module *module;
 	hl_runtime_module *runtime;
 	int i, j;
@@ -169,7 +169,7 @@ static hl_runtime_status hl_runtime_module_load_code_manifest_internal( hl_code 
 			module->debug_hlb_size = length;
 		}
 	}
-	if( module == NULL || module->debug_hlb == NULL || !hl_module_init(module,HL_MODULE_PATCHABLE | HL_MODULE_HAXE_METADATA) ) {
+	if( module == NULL || module->debug_hlb == NULL || !hl_module_init(module,HL_MODULE_PATCHABLE | (haxe_metadata ? HL_MODULE_HAXE_METADATA : 0)) ) {
 		if( module != NULL ) hl_module_free_shutdown(module);
 		return HL_RUNTIME_JIT_FAILED;
 	}
@@ -228,7 +228,7 @@ static hl_runtime_status hl_runtime_module_load_code_manifest_internal( hl_code 
 }
 
 static hl_runtime_status hl_runtime_module_load_code_internal( hl_code *code, const unsigned char *bytes, int length, const unsigned char *identity,
-	int identity_length, hl_runtime_module **out, bool initialize ) {
+	int identity_length, hl_runtime_module **out, bool initialize, bool haxe_metadata ) {
 	hl_runtime_manifest manifest;
 	int version, identity_count, entries_offset, initializer_slot;
 	if( out == NULL || code == NULL || bytes == NULL || length <= 0 || identity == NULL || identity_length < 28 ) return HL_RUNTIME_BAD_ARGUMENT;
@@ -251,7 +251,7 @@ static hl_runtime_status hl_runtime_module_load_code_internal( hl_code *code, co
 		for(int i=0;i<identity_count;i++)
 			if( (int)read_u32(manifest.encoded_entries + i * 8) == HL_RUNTIME_V2_INIT_STABLE_ID )
 				manifest.initializer_slot = (int)read_u32(manifest.encoded_entries + i * 8 + 4);
-	return hl_runtime_module_load_code_manifest_internal(code,bytes,length,&manifest,out,initialize);
+	return hl_runtime_module_load_code_manifest_internal(code,bytes,length,&manifest,out,initialize,haxe_metadata);
 }
 
 hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out ) {
@@ -261,13 +261,13 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 	if( bytes == NULL || length <= 0 ) return HL_RUNTIME_BAD_ARGUMENT;
 	code = hl_code_read(bytes,length,&error);
 	if( code == NULL ) return HL_RUNTIME_BAD_FORMAT;
-	status = hl_runtime_module_load_code_internal(code,bytes,length,identity,identity_length,out,true);
+	status = hl_runtime_module_load_code_internal(code,bytes,length,identity,identity_length,out,true,false);
 	hl_code_free(code);
 	return status;
 }
 
 hl_runtime_status hl_runtime_module_load_code( hl_code *code, const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out ) {
-	return hl_runtime_module_load_code_internal(code,bytes,length,identity,identity_length,out,false);
+	return hl_runtime_module_load_code_internal(code,bytes,length,identity,identity_length,out,false,true);
 }
 
 hl_runtime_status hl_runtime_module_load_code_manifest( hl_code *code, const unsigned char *bytes, int length, const unsigned char *module_id,
@@ -281,7 +281,7 @@ hl_runtime_status hl_runtime_module_load_code_manifest( hl_code *code, const uns
 	manifest.encoded_entries = NULL;
 	manifest.stable_ids = stable_ids;
 	manifest.slots = slots;
-	return hl_runtime_module_load_code_manifest_internal(code,bytes,length,&manifest,out,false);
+	return hl_runtime_module_load_code_manifest_internal(code,bytes,length,&manifest,out,false,true);
 }
 
 hl_runtime_status hl_runtime_module_initialize_constant( hl_runtime_module *runtime, int index ) {
