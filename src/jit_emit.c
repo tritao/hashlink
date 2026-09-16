@@ -1667,10 +1667,22 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 				STORE(dst, LOAD_MEM_PTR(addr, 0));
 			}
 		} else {
+			/* Preserve null pointer-like values as null dynamics instead of typed null payloads. */
+			int jnull = -1;
+			if( hl_is_ptr(ra->t) ) {
+				emit_test(ctx, LOAD(ra), OJNull);
+				jnull = emit_jump(ctx, true);
+			}
 			ereg arg = LOAD_CONST_PTR(ra->t);
 			ereg ret = emit_native_call(ctx,hl_alloc_dynamic,&arg,1,&hlt_dyn);
 			STORE_MEM(ret,HDYN_VALUE,LOAD(ra));
 			STORE(dst, ret);
+			if( jnull >= 0 ) {
+				int jend = emit_jump(ctx, false);
+				patch_jump(ctx, jnull);
+				STORE(dst, LOAD_CONST_PTR(NULL));
+				patch_jump(ctx, jend);
+			}
 		}
 		break;
 	case OToSFloat:
