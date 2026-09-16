@@ -102,22 +102,37 @@ static void runtime_clear_exception_state() {
 	memset(thread->exc_stack_trace,0,sizeof(thread->exc_stack_trace));
 }
 
-hl_runtime_status hl_runtime_module_validate_call( hl_runtime_module *runtime, int stable_id, int shape ) {
+static hl_runtime_status validate_call_slot_locked( hl_runtime_module *runtime, int slot, int shape ) {
 	hl_function *function;
 	int nargs;
 	hl_type_kind result_kind;
-	if( runtime == NULL || shape < 0 || shape > 6 ) return HL_RUNTIME_BAD_ARGUMENT;
+	if( shape < 0 || shape > 6 ) return HL_RUNTIME_BAD_ARGUMENT;
 	nargs = shape == 3 || shape == 6 ? 1 : 0;
 	result_kind = shape == 0 || shape == 6 ? HI32 : shape == 1 || shape == 3 ? HVOID : shape == 2 ? HBYTES : shape == 4 ? HFUN : (hl_type_kind)-1;
+	function = find_function(runtime->module,slot);
+	return function == NULL || function->type->kind != HFUN || function->type->fun->nargs != nargs
+		|| (result_kind != (hl_type_kind)-1 && function->type->fun->ret->kind != result_kind)
+		? HL_RUNTIME_BAD_FUNCTION : HL_RUNTIME_OK;
+}
+
+hl_runtime_status hl_runtime_module_validate_call( hl_runtime_module *runtime, int stable_id, int shape ) {
+	hl_runtime_status status;
+	int slot;
+	if( runtime == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
 	hl_mutex_acquire(runtime->lock);
-	stable_id = resolve_stable_id(runtime,stable_id);
-	function = find_function(runtime->module,stable_id);
-	if( function == NULL || function->type->kind != HFUN || function->type->fun->nargs != nargs || (result_kind != (hl_type_kind)-1 && function->type->fun->ret->kind != result_kind) ) {
-		hl_mutex_release(runtime->lock);
-		return HL_RUNTIME_BAD_FUNCTION;
-	}
+	slot = resolve_stable_id(runtime,stable_id);
+	status = validate_call_slot_locked(runtime,slot,shape);
 	hl_mutex_release(runtime->lock);
-	return HL_RUNTIME_OK;
+	return status;
+}
+
+hl_runtime_status hl_runtime_module_validate_call_slot( hl_runtime_module *runtime, int slot, int shape ) {
+	hl_runtime_status status;
+	if( runtime == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
+	hl_mutex_acquire(runtime->lock);
+	status = validate_call_slot_locked(runtime,slot,shape);
+	hl_mutex_release(runtime->lock);
+	return status;
 }
 
 static hl_function *find_function( hl_module *module, int stable_id ) {
@@ -354,26 +369,21 @@ int hl_runtime_module_debug_region_count( hl_runtime_module *runtime ) {
 	return runtime == NULL ? 0 : hl_module_patch_debug_region_count(runtime->module);
 }
 
-hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int stable_id, int *out, vdynamic **exception ) {
+static hl_runtime_status call_i32_slot_locked( hl_runtime_module *runtime, int slot, int *out, vdynamic **exception ) {
 	hl_function *function;
 	vclosure closure;
 	vdynamic *result;
 	bool raised = false;
-	if( runtime == NULL || out == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
 	if( exception != NULL ) *exception = NULL;
-	hl_mutex_acquire(runtime->lock);
-	stable_id = resolve_stable_id(runtime,stable_id);
-	function = find_function(runtime->module,stable_id);
+	function = find_function(runtime->module,slot);
 	if( function == NULL || function->type->kind != HFUN || function->type->fun->nargs != 0 || function->type->fun->ret->kind != HI32 ) {
-		hl_mutex_release(runtime->lock);
 		return HL_RUNTIME_BAD_FUNCTION;
 	}
 	closure.t = function->type;
-	closure.fun = runtime->module->functions_ptrs[stable_id];
+	closure.fun = runtime->module->functions_ptrs[slot];
 	closure.hasValue = 0;
 	closure.value = NULL;
 	result = hl_dyn_call_safe(&closure,NULL,0,&raised);
-	hl_mutex_release(runtime->lock);
 	if( raised ) {
 		if( exception != NULL ) *exception = result;
 		return HL_RUNTIME_EXCEPTION;
@@ -382,21 +392,36 @@ hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int st
 	return HL_RUNTIME_OK;
 }
 
-static hl_runtime_status call_checked( hl_runtime_module *runtime, int stable_id, int nargs, hl_type_kind result_kind,
+hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int stable_id, int *out, vdynamic **exception ) {
+	hl_runtime_status status;
+	int slot;
+	if( runtime == NULL || out == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
+	hl_mutex_acquire(runtime->lock);
+	slot = resolve_stable_id(runtime,stable_id);
+	status = call_i32_slot_locked(runtime,slot,out,exception);
+	hl_mutex_release(runtime->lock);
+	return status;
+}
+
+hl_runtime_status hl_runtime_module_call_i32_slot( hl_runtime_module *runtime, int slot, int *out, vdynamic **exception ) {
+	hl_runtime_status status;
+	if( runtime == NULL || out == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
+	hl_mutex_acquire(runtime->lock);
+	status = call_i32_slot_locked(runtime,slot,out,exception);
+	hl_mutex_release(runtime->lock);
+	return status;
+}
+
+static hl_runtime_status call_checked_slot_locked( hl_runtime_module *runtime, int slot, int nargs, hl_type_kind result_kind,
 	vdynamic **args, vdynamic **result_out, vdynamic **exception ) {
 	hl_function *function;
 	vclosure closure;
 	vdynamic *result;
 	bool raised = false;
-	int slot;
-	if( runtime == NULL || (nargs > 0 && args == NULL) ) return HL_RUNTIME_BAD_ARGUMENT;
 	if( exception != NULL ) *exception = NULL;
 	if( result_out != NULL ) *result_out = NULL;
-	hl_mutex_acquire(runtime->lock);
-	slot = resolve_stable_id(runtime,stable_id);
 	function = find_function(runtime->module,slot);
 	if( function == NULL || function->type->kind != HFUN || function->type->fun->nargs != nargs || (result_kind != (hl_type_kind)-1 && function->type->fun->ret->kind != result_kind) ) {
-		hl_mutex_release(runtime->lock);
 		return HL_RUNTIME_BAD_FUNCTION;
 	}
 	closure.t = function->type;
@@ -404,7 +429,6 @@ static hl_runtime_status call_checked( hl_runtime_module *runtime, int stable_id
 	closure.hasValue = 0;
 	closure.value = NULL;
 	result = hl_dyn_call_safe(&closure,args,nargs,&raised);
-	hl_mutex_release(runtime->lock);
 	if( raised ) {
 		if( exception != NULL ) *exception = result;
 		return HL_RUNTIME_EXCEPTION;
@@ -413,8 +437,34 @@ static hl_runtime_status call_checked( hl_runtime_module *runtime, int stable_id
 	return HL_RUNTIME_OK;
 }
 
+static hl_runtime_status call_checked( hl_runtime_module *runtime, int stable_id, int nargs, hl_type_kind result_kind,
+	vdynamic **args, vdynamic **result_out, vdynamic **exception ) {
+	hl_runtime_status status;
+	int slot;
+	if( runtime == NULL || (nargs > 0 && args == NULL) ) return HL_RUNTIME_BAD_ARGUMENT;
+	hl_mutex_acquire(runtime->lock);
+	slot = resolve_stable_id(runtime,stable_id);
+	status = call_checked_slot_locked(runtime,slot,nargs,result_kind,args,result_out,exception);
+	hl_mutex_release(runtime->lock);
+	return status;
+}
+
+static hl_runtime_status call_checked_slot( hl_runtime_module *runtime, int slot, int nargs, hl_type_kind result_kind,
+	vdynamic **args, vdynamic **result_out, vdynamic **exception ) {
+	hl_runtime_status status;
+	if( runtime == NULL || (nargs > 0 && args == NULL) ) return HL_RUNTIME_BAD_ARGUMENT;
+	hl_mutex_acquire(runtime->lock);
+	status = call_checked_slot_locked(runtime,slot,nargs,result_kind,args,result_out,exception);
+	hl_mutex_release(runtime->lock);
+	return status;
+}
+
 hl_runtime_status hl_runtime_module_call_void( hl_runtime_module *runtime, int stable_id, vdynamic **exception ) {
 	return call_checked(runtime,stable_id,0,HVOID,NULL,NULL,exception);
+}
+
+hl_runtime_status hl_runtime_module_call_void_slot( hl_runtime_module *runtime, int slot, vdynamic **exception ) {
+	return call_checked_slot(runtime,slot,0,HVOID,NULL,NULL,exception);
 }
 
 hl_runtime_status hl_runtime_module_call_bytes( hl_runtime_module *runtime, int stable_id, vbyte **out, vdynamic **exception ) {
@@ -422,6 +472,15 @@ hl_runtime_status hl_runtime_module_call_bytes( hl_runtime_module *runtime, int 
 	hl_runtime_status status;
 	if( out == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
 	status = call_checked(runtime,stable_id,0,HBYTES,NULL,&result,exception);
+	if( status == HL_RUNTIME_OK ) *out = result == NULL ? NULL : result->v.bytes;
+	return status;
+}
+
+hl_runtime_status hl_runtime_module_call_bytes_slot( hl_runtime_module *runtime, int slot, vbyte **out, vdynamic **exception ) {
+	vdynamic *result = NULL;
+	hl_runtime_status status;
+	if( out == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
+	status = call_checked_slot(runtime,slot,0,HBYTES,NULL,&result,exception);
 	if( status == HL_RUNTIME_OK ) *out = result == NULL ? NULL : result->v.bytes;
 	return status;
 }
@@ -434,11 +493,28 @@ hl_runtime_status hl_runtime_module_call_bytes1( hl_runtime_module *runtime, int
 	return call_checked(runtime,stable_id,1,HVOID,args,NULL,exception);
 }
 
+hl_runtime_status hl_runtime_module_call_bytes1_slot( hl_runtime_module *runtime, int slot, vbyte *argument, vdynamic **exception ) {
+	vdynamic *args[1];
+	if( runtime == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
+	args[0] = hl_alloc_dynamic(&hlt_bytes);
+	args[0]->v.bytes = argument;
+	return call_checked_slot(runtime,slot,1,HVOID,args,NULL,exception);
+}
+
 hl_runtime_status hl_runtime_module_call_closure( hl_runtime_module *runtime, int stable_id, vclosure **out, vdynamic **exception ) {
 	vdynamic *result = NULL;
 	hl_runtime_status status;
 	if( out == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
 	status = call_checked(runtime,stable_id,0,HFUN,NULL,&result,exception);
+	if( status == HL_RUNTIME_OK ) *out = (vclosure*)result;
+	return status;
+}
+
+hl_runtime_status hl_runtime_module_call_closure_slot( hl_runtime_module *runtime, int slot, vclosure **out, vdynamic **exception ) {
+	vdynamic *result = NULL;
+	hl_runtime_status status;
+	if( out == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
+	status = call_checked_slot(runtime,slot,0,HFUN,NULL,&result,exception);
 	if( status == HL_RUNTIME_OK ) *out = (vclosure*)result;
 	return status;
 }
@@ -473,12 +549,32 @@ hl_runtime_status hl_runtime_module_call_object( hl_runtime_module *runtime, int
 	return status;
 }
 
+hl_runtime_status hl_runtime_module_call_object_slot( hl_runtime_module *runtime, int slot, vdynamic **out, vdynamic **exception ) {
+	vdynamic *result = NULL;
+	hl_runtime_status status;
+	if( out == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
+	status = call_checked_slot(runtime,slot,0,(hl_type_kind)-1,NULL,&result,exception);
+	if( status == HL_RUNTIME_OK && (result == NULL || (result->t->kind != HOBJ && result->t->kind != HSTRUCT)) ) return HL_RUNTIME_BAD_FUNCTION;
+	if( status == HL_RUNTIME_OK ) *out = result;
+	return status;
+}
+
 hl_runtime_status hl_runtime_module_call_i32_object( hl_runtime_module *runtime, int stable_id, vdynamic *argument, int *out, vdynamic **exception ) {
 	vdynamic *args[1], *result = NULL;
 	hl_runtime_status status;
 	if( argument == NULL || out == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
 	args[0] = argument;
 	status = call_checked(runtime,stable_id,1,HI32,args,&result,exception);
+	if( status == HL_RUNTIME_OK ) *out = result->v.i;
+	return status;
+}
+
+hl_runtime_status hl_runtime_module_call_i32_object_slot( hl_runtime_module *runtime, int slot, vdynamic *argument, int *out, vdynamic **exception ) {
+	vdynamic *args[1], *result = NULL;
+	hl_runtime_status status;
+	if( argument == NULL || out == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
+	args[0] = argument;
+	status = call_checked_slot(runtime,slot,1,HI32,args,&result,exception);
 	if( status == HL_RUNTIME_OK ) *out = result->v.i;
 	return status;
 }

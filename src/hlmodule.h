@@ -452,14 +452,23 @@ HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load_code_manifest( hl
 /** Materialize one Haxe-owned constant through an external runtime wrapper. */
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_initialize_constant( hl_runtime_module *runtime, int index );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int stable_id, int *result, vdynamic **exception );
+/** Haxe-resolved dispatch-slot call entrypoints; native code retains ABI checks. */
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32_slot( hl_runtime_module *runtime, int slot, int *result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_void( hl_runtime_module *runtime, int stable_id, vdynamic **exception );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_void_slot( hl_runtime_module *runtime, int slot, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_bytes( hl_runtime_module *runtime, int stable_id, vbyte **result, vdynamic **exception );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_bytes_slot( hl_runtime_module *runtime, int slot, vbyte **result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_bytes1( hl_runtime_module *runtime, int stable_id, vbyte *argument, vdynamic **exception );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_bytes1_slot( hl_runtime_module *runtime, int slot, vbyte *argument, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_closure( hl_runtime_module *runtime, int stable_id, vclosure **result, vdynamic **exception );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_closure_slot( hl_runtime_module *runtime, int slot, vclosure **result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_retained_closure_i32( hl_runtime_module *runtime, vclosure *closure, int *result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_object( hl_runtime_module *runtime, int stable_id, vdynamic **result, vdynamic **exception );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_object_slot( hl_runtime_module *runtime, int slot, vdynamic **result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32_object( hl_runtime_module *runtime, int stable_id, vdynamic *argument, int *result, vdynamic **exception );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32_object_slot( hl_runtime_module *runtime, int slot, vdynamic *argument, int *result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_validate_call( hl_runtime_module *runtime, int stable_id, int shape );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_validate_call_slot( hl_runtime_module *runtime, int slot, int shape );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const unsigned char *bytes, int length );
 /** Apply an HLP and retain its published JIT allocation for an external owner. */
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp_capture( hl_runtime_module *runtime, const unsigned char *bytes, int length, hl_patch_code **published_code );
