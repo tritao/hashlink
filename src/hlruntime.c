@@ -169,7 +169,7 @@ static hl_runtime_status hl_runtime_module_load_code_manifest_internal( hl_code 
 			module->debug_hlb_size = length;
 		}
 	}
-	if( module == NULL || module->debug_hlb == NULL || !hl_module_init(module,HL_MODULE_PATCHABLE) ) {
+	if( module == NULL || module->debug_hlb == NULL || !hl_module_init(module,HL_MODULE_PATCHABLE | HL_MODULE_HAXE_METADATA) ) {
 		if( module != NULL ) hl_module_free_shutdown(module);
 		return HL_RUNTIME_JIT_FAILED;
 	}

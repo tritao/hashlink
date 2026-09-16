@@ -705,7 +705,7 @@ static void disabled_primitive() {
 	hl_error("This library primitive has been disabled");
 }
 
-static void hl_module_init_indexes( hl_module *m ) {
+static void hl_module_init_indexes( hl_module *m, bool haxe_metadata ) {
 	int i;
 	for(i=0;i<m->code->nfunctions;i++) {
 		hl_function *f = m->code->functions + i;
@@ -752,11 +752,11 @@ static void hl_module_init_indexes( hl_module *m ) {
 			}
 			break;
 		case HENUM:
-			hl_init_enum(t,&m->ctx);
+			if( !haxe_metadata ) hl_init_enum(t,&m->ctx);
 			t->tenum->global_value = ((int)(int_val)t->tenum->global_value) ? (void**)(int_val)(m->globals_data + m->globals_indexes[(int)(int_val)t->tenum->global_value-1]) : NULL;
 			break;
 		case HVIRTUAL:
-			hl_init_virtual(t,&m->ctx);
+			if( !haxe_metadata ) hl_init_virtual(t,&m->ctx);
 			break;
 		default:
 			break;
@@ -1014,7 +1014,7 @@ int hl_module_init( hl_module *m, int flags ) {
 	// inits
 	if( hot_reload ) m->hash = hl_code_hash_alloc(m->code);
 	hl_module_init_natives(m);
-	hl_module_init_indexes(m);
+	hl_module_init_indexes(m,(flags & HL_MODULE_HAXE_METADATA) != 0);
 #	ifdef WIN64_UNWIND_TABLES
 	m->unwind_table_size = m->code->nfunctions + 10; // extra space for jit internals
 	m->unwind_table = malloc(sizeof(RUNTIME_FUNCTION) * m->unwind_table_size);
@@ -1252,7 +1252,7 @@ h_bool hl_module_patch( hl_module *m1, hl_code *c ) {
 	m2->globals_size = gsize;
 
 	hl_module_init_natives(m2);
-	hl_module_init_indexes(m2);
+	hl_module_init_indexes(m2,false);
 	hl_jit_reset(ctx, m2);
 	hl_code_hash_finalize(m2->hash);
 

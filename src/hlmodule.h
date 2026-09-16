@@ -304,6 +304,8 @@ typedef unsigned char h_bool;
 #define HL_MODULE_DUMP 2
 #define HL_MODULE_DEBUG 4
 #define HL_MODULE_PATCHABLE 8
+/** The type graph and derived enum/virtual metadata were prepared by Haxeon. */
+#define HL_MODULE_HAXE_METADATA 16
 
 extern int hl_jit_trampoline;
 void hl_jit_tag_callback( void *native );
