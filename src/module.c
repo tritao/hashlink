@@ -794,11 +794,13 @@ static void hl_module_init_indexes( hl_module *m, bool haxe_metadata ) {
 		}
 	}
 
-	static hl_type_obj obj_entry = {0};
-	hl_function *fent = m->code->functions + m->functions_indexes[m->code->entrypoint];
-	obj_entry.name = USTR("");
-	fent->obj = &obj_entry;
-	fent->field.name = USTR("init");
+	if( !haxe_metadata ) {
+		static hl_type_obj obj_entry = {0};
+		hl_function *fent = m->code->functions + m->functions_indexes[m->code->entrypoint];
+		obj_entry.name = USTR("");
+		fent->obj = &obj_entry;
+		fent->field.name = USTR("init");
+	}
 }
 
 /* Haxe owns object layout and descriptors, but executable prototype tables
