@@ -366,14 +366,15 @@ static bool patch_from_haxe_input( hl_patch *patch, hl_patch_input *input ) {
 	return true;
 }
 
-const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id ) {
-	int slot;
+const char *hl_runtime_module_resolve_jit_location_slot( hl_runtime_module *runtime, int slot ) {
 	void *address;
-	if( runtime == NULL ) return NULL;
-	slot = resolve_stable_id(runtime,stable_id);
-	if( slot < 0 ) return NULL;
+	if( runtime == NULL || find_function(runtime->module,slot) == NULL ) return NULL;
 	address = runtime->module->patch_targets ? runtime->module->patch_targets[slot] : runtime->module->functions_ptrs[slot];
 	return hl_module_resolve_jit_location(address);
+}
+
+const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id ) {
+	return hl_runtime_module_resolve_jit_location_slot(runtime,resolve_stable_id(runtime,stable_id));
 }
 
 int hl_runtime_module_debug_region_count( hl_runtime_module *runtime ) {
