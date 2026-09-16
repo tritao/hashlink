@@ -724,7 +724,7 @@ static void hl_module_init_indexes( hl_module *m, bool haxe_metadata ) {
 		case HSTRUCT:
 			t->obj->m = &m->ctx;
 			t->obj->global_value = ((int)(int_val)t->obj->global_value) ? (void**)(int_val)(m->globals_data + m->globals_indexes[(int)(int_val)t->obj->global_value-1]) : NULL;
-			{
+			if( !haxe_metadata ) {
 				int j;
 				for(j=0;j<t->obj->nproto;j++) {
 					hl_obj_proto *p = t->obj->proto + j;
