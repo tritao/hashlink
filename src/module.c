@@ -805,7 +805,7 @@ static void hl_module_init_indexes( hl_module *m, bool haxe_metadata ) {
 
 /* Haxe owns object layout and descriptors, but executable prototype tables
    must be built only after the module's finalized JIT entrypoints exist. */
-static void hl_module_init_haxe_object_prototypes( hl_module *m ) {
+void hl_module_publish_haxe_object_prototypes( hl_module *m ) {
 	int i;
 	for(i=0;i<m->code->ntypes;i++) {
 		hl_type *t = m->code->types + i;
@@ -1065,7 +1065,6 @@ int hl_module_init( hl_module *m, int flags ) {
 		m->functions_ptrs[f->findex] = ((unsigned char*)m->jit_code) + ((int_val)m->functions_ptrs[f->findex]);
 	}
 	if( m->patchable && !module_init_patch_entries(m) ) return 0;
-	if( (flags & HL_MODULE_HAXE_METADATA) != 0 ) hl_module_init_haxe_object_prototypes(m);
 	// INIT constants. Haxe-owned metadata publishes this policy through the
 	// narrow native kernel after module initialization has returned.
 	if( (flags & HL_MODULE_HAXE_METADATA) == 0 )

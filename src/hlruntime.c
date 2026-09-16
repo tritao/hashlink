@@ -284,6 +284,14 @@ hl_runtime_status hl_runtime_module_load_code_manifest( hl_code *code, const uns
 	return hl_runtime_module_load_code_manifest_internal(code,bytes,length,&manifest,out,false,true);
 }
 
+hl_runtime_status hl_runtime_module_publish_haxe_object_prototypes( hl_runtime_module *runtime ) {
+	if( runtime == NULL || runtime->module == NULL || runtime->lock == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
+	hl_mutex_acquire(runtime->lock);
+	hl_module_publish_haxe_object_prototypes(runtime->module);
+	hl_mutex_release(runtime->lock);
+	return HL_RUNTIME_OK;
+}
+
 hl_runtime_status hl_runtime_module_initialize_constant( hl_runtime_module *runtime, int index ) {
 	bool initialized;
 	if( runtime == NULL || runtime->module == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
