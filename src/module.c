@@ -762,32 +762,34 @@ static void hl_module_init_indexes( hl_module *m, bool haxe_metadata ) {
 			break;
 		}
 	}
-	for(i=0;i<m->code->nfunctions;i++) {
-		int k;
-		hl_function *f = m->code->functions + i;
-		hl_function *real_f = f;
-		while( real_f && !real_f->obj ) real_f = real_f->field.ref;
-		if( real_f == NULL ) continue;
-		for(k=0;k<f->nops;k++) {
-			hl_opcode *op = f->ops + k;
-			switch( op->op ) {
-			case OCall0:
-			case OCall1:
-			case OCall2:
-			case OCall3:
-			case OCall4:
-			case OCallN:
-			case OStaticClosure:
-			case OInstanceClosure:
-				if( m->functions_indexes[op->p2] < m->code->nfunctions ) {
-					hl_function *floc = m->code->functions + m->functions_indexes[op->p2];
-					if( floc->obj ) continue;
-					floc->field.ref = real_f;
-					floc->ref = real_f->ref++;
+	if( !haxe_metadata ) {
+		for(i=0;i<m->code->nfunctions;i++) {
+			int k;
+			hl_function *f = m->code->functions + i;
+			hl_function *real_f = f;
+			while( real_f && !real_f->obj ) real_f = real_f->field.ref;
+			if( real_f == NULL ) continue;
+			for(k=0;k<f->nops;k++) {
+				hl_opcode *op = f->ops + k;
+				switch( op->op ) {
+				case OCall0:
+				case OCall1:
+				case OCall2:
+				case OCall3:
+				case OCall4:
+				case OCallN:
+				case OStaticClosure:
+				case OInstanceClosure:
+					if( m->functions_indexes[op->p2] < m->code->nfunctions ) {
+						hl_function *floc = m->code->functions + m->functions_indexes[op->p2];
+						if( floc->obj ) continue;
+						floc->field.ref = real_f;
+						floc->ref = real_f->ref++;
+					}
+					break;
+				default:
+					break;
 				}
-				break;
-			default:
-				break;
 			}
 		}
 	}
