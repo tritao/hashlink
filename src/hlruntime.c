@@ -290,6 +290,26 @@ static int resolve_stable_id( hl_runtime_module *runtime, int stable_id ) {
 	return -1;
 }
 
+static bool apply_haxe_patch_resolution( hl_runtime_module *runtime, hl_patch *patch, hl_patch_resolution *resolution ) {
+	if( resolution == NULL || resolution->function_count != patch->function_count || (patch->function_count > 0 && resolution->functions == NULL) ) return false;
+	for(int i=0;i<patch->function_count;i++) {
+		hl_patch_function *source = patch->functions+i;
+		hl_patch_function_resolution *resolved = resolution->functions+i;
+		if( source->stable_id != resolved->stable_id || resolve_stable_id(runtime,source->stable_id) != resolved->slot ) return false;
+		source->findex = resolved->slot;
+		if( source->relocation_count != resolved->relocation_count ) return false;
+		for(int j=0;j<source->relocation_count;j++) {
+			int instruction = source->relocation_instructions[j];
+			int target = resolve_stable_id(runtime,source->relocation_stable_ids[j]);
+			if( resolved->relocation_stable_ids == NULL || resolved->relocation_slots == NULL
+				|| resolved->relocation_stable_ids[j] != source->relocation_stable_ids[j] || target != resolved->relocation_slots[j]
+				|| instruction < 0 || instruction >= source->instruction_count || source->instructions[instruction].operand_count < 2 ) return false;
+			source->instructions[instruction].operands[1] = resolved->relocation_slots[j];
+		}
+	}
+	return true;
+}
+
 const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id ) {
 	int slot;
 	void *address;
@@ -447,6 +467,12 @@ hl_runtime_status hl_runtime_module_apply_hlp_capture_types( hl_runtime_module *
 
 hl_runtime_status hl_runtime_module_apply_hlp_capture_metadata( hl_runtime_module *runtime, const unsigned char *bytes, int length, int haxe_type_count,
 	hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug, hl_patch_code **published_code ) {
+	return hl_runtime_module_apply_hlp_capture_metadata_resolution(runtime,bytes,length,haxe_type_count,haxe_functions,haxe_function_count,haxe_pools,haxe_debug,NULL,published_code);
+}
+
+hl_runtime_status hl_runtime_module_apply_hlp_capture_metadata_resolution( hl_runtime_module *runtime, const unsigned char *bytes, int length, int haxe_type_count,
+	hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug, hl_patch_resolution *haxe_resolution,
+	hl_patch_code **published_code ) {
 	const char *error = NULL;
 	hl_patch *patch;
 	h_bool applied;
@@ -461,19 +487,23 @@ hl_runtime_status hl_runtime_module_apply_hlp_capture_metadata( hl_runtime_modul
 	if( memcmp(runtime->module_id,patch->module_id,16) != 0 ) {
 		hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE;
 	}
-	for(int i=0;i<patch->function_count;i++) {
-		int slot = resolve_stable_id(runtime,patch->functions[i].stable_id);
-		if( slot < 0 ) { hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE; }
-		patch->functions[i].findex = slot;
-		for(int j=0;j<patch->functions[i].relocation_count;j++) {
-			int instruction=patch->functions[i].relocation_instructions[j];
-			int target=resolve_stable_id(runtime,patch->functions[i].relocation_stable_ids[j]);
-			int opcode=instruction<0||instruction>=patch->functions[i].instruction_count?-1:patch->functions[i].instructions[instruction].opcode;
-			if(target<0||(opcode!=OCall0&&opcode!=OCall1&&opcode!=OCall2&&opcode!=OCallN&&opcode!=OStaticClosure&&opcode!=OInstanceClosure)){hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE;}
-			patch->functions[i].instructions[instruction].operands[1]=target;
+	if( haxe_resolution != NULL ) {
+		if( !apply_haxe_patch_resolution(runtime,patch,haxe_resolution) ) {hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE;}
+	} else {
+		for(int i=0;i<patch->function_count;i++) {
+			int slot = resolve_stable_id(runtime,patch->functions[i].stable_id);
+			if( slot < 0 ) { hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE; }
+			patch->functions[i].findex = slot;
+			for(int j=0;j<patch->functions[i].relocation_count;j++) {
+				int instruction=patch->functions[i].relocation_instructions[j];
+				int target=resolve_stable_id(runtime,patch->functions[i].relocation_stable_ids[j]);
+				int opcode=instruction<0||instruction>=patch->functions[i].instruction_count?-1:patch->functions[i].instructions[instruction].opcode;
+				if(target<0||(opcode!=OCall0&&opcode!=OCall1&&opcode!=OCall2&&opcode!=OCallN&&opcode!=OStaticClosure&&opcode!=OInstanceClosure)){hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE;}
+				patch->functions[i].instructions[instruction].operands[1]=target;
+			}
 		}
 	}
-	applied = hl_module_apply_patch_capture_metadata(runtime->module,patch,&error,published_code,haxe_type_count,haxe_functions,haxe_function_count,haxe_pools,haxe_debug);
+	applied = hl_module_apply_patch_capture_metadata_resolution(runtime->module,patch,&error,published_code,haxe_type_count,haxe_functions,haxe_function_count,haxe_pools,haxe_debug,haxe_resolution);
 	hl_patch_free(patch);
 	hl_mutex_release(runtime->lock);
 	if( applied ) {

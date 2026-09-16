@@ -168,6 +168,21 @@ typedef struct {
 	hl_source_snapshot *source_snapshots;
 } hl_patch_debug;
 
+/** Stable-ID and relocation slots resolved by the Haxe patch policy. */
+typedef struct {
+	int stable_id;
+	int slot;
+	int relocation_count;
+	int *relocation_stable_ids;
+	int *relocation_slots;
+} hl_patch_function_resolution;
+
+/** Haxe-owned patch resolution plan checked before native publication. */
+typedef struct {
+	int function_count;
+	hl_patch_function_resolution *functions;
+} hl_patch_resolution;
+
 typedef struct {
 	int tag;
 	union {
@@ -346,6 +361,10 @@ HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch_capture_types( hl_module *mod
 /** Apply a patch using Haxe-owned type records and patched function descriptors. */
 HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch_capture_metadata( hl_module *module, hl_patch *patch, const char **error_msg,
 	hl_patch_code **published_code, int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug );
+/** Apply a patch using Haxe-owned metadata and a stable-ID resolution plan. */
+HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch_capture_metadata_resolution( hl_module *module, hl_patch *patch, const char **error_msg,
+	hl_patch_code **published_code, int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug,
+	hl_patch_resolution *haxe_resolution );
 /** Release one external owner of a published hot-reload JIT allocation. */
 HL_EXTERN_C HL_EXPORT h_bool hl_patch_code_release( hl_patch_code *code );
 /** Read the immutable revision carried by a retained JIT allocation. */
@@ -438,6 +457,10 @@ HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp_capture_type
 /** Apply an HLP using Haxe-owned type records and patched function descriptors. */
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp_capture_metadata( hl_runtime_module *runtime, const unsigned char *bytes, int length,
 	int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug, hl_patch_code **published_code );
+/** Apply an HLP using Haxe-owned metadata and stable-ID resolution. */
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp_capture_metadata_resolution( hl_runtime_module *runtime, const unsigned char *bytes, int length,
+	int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug,
+	hl_patch_resolution *haxe_resolution, hl_patch_code **published_code );
 HL_EXTERN_C HL_EXPORT const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_debug_region_count( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_hlp_summary( const unsigned char *bytes, int length, int *base_revision, int *revision, int *function_count );

@@ -671,12 +671,20 @@ h_bool hl_module_apply_patch_capture_types( hl_module *m, hl_patch *patch, const
 
 h_bool hl_module_apply_patch_capture_metadata( hl_module *m, hl_patch *patch, const char **error_msg, hl_patch_code **published_code,
 	int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug ) {
+	return hl_module_apply_patch_capture_metadata_resolution(m,patch,error_msg,published_code,haxe_type_count,haxe_functions,haxe_function_count,haxe_pools,haxe_debug,NULL);
+}
+
+h_bool hl_module_apply_patch_capture_metadata_resolution( hl_module *m, hl_patch *patch, const char **error_msg, hl_patch_code **published_code,
+	int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug,
+	hl_patch_resolution *haxe_resolution ) {
 	const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;bool combined_pools_external=false;hl_code code;hl_module temp;
 	if( published_code != NULL ) *published_code = NULL;
 	if(!m||!patch||!m->patchable){error="Module is not patchable";goto fail;}
 	if(haxe_type_count < -1 || (haxe_type_count >= 0 && haxe_type_count != patch->type_count)){error="Haxe type count does not match patch";goto fail;}
 	if(haxe_function_count < -1 || (haxe_function_count >= 0 && (haxe_function_count != patch->function_count || haxe_functions == NULL))){error="Haxe function count does not match patch";goto fail;}
 	if(haxe_debug != NULL && haxe_function_count < 0){error="Haxe patch debug metadata requires Haxe functions";goto fail;}
+	if(haxe_resolution != NULL && (haxe_function_count < 0 || haxe_resolution->function_count != patch->function_count
+		|| (patch->function_count > 0 && haxe_resolution->functions == NULL))){error="Invalid Haxe patch resolution metadata";goto fail;}
 	if(patch->function_count<=0){error="Patch contains no functions";goto fail;}
 	if(m->revision!=patch->base_revision||patch->revision<=patch->base_revision){error="Stale patch revision";goto fail;}
 	if(patch->base_int_count!=m->code->nints||patch->base_float_count!=m->code->nfloats||patch->base_string_count!=m->code->nstrings||patch->base_type_count!=m->code->ntypes){error="Patch symbol base does not match module";goto fail;}
@@ -684,6 +692,14 @@ h_bool hl_module_apply_patch_capture_metadata( hl_module *m, hl_patch *patch, co
 	if(!validate_patch_types(m,patch,patch->base_string_count+patch->string_count,&error))goto fail;
 	for(int i=0;i<patch->function_count;i++){for(int j=0;j<i;j++)if(patch->functions[j].findex==patch->functions[i].findex){error="Duplicate stable function slot";goto fail;}if(!validate_function(m,patch,patch->functions+i,&error))goto fail;}
 	if(haxe_debug != NULL && !validate_haxe_patch_debug(m,patch,haxe_debug,&error))goto fail;
+	if(haxe_resolution != NULL) {
+		for(int i=0;i<patch->function_count;i++) {
+			hl_patch_function *source=patch->functions+i;hl_patch_function_resolution *resolved=haxe_resolution->functions+i;
+			if(source->stable_id!=resolved->stable_id||source->findex!=resolved->slot||resolved->relocation_count!=source->relocation_count
+				|| (source->relocation_count>0&&(resolved->relocation_stable_ids==NULL||resolved->relocation_slots==NULL))){error="Invalid Haxe patch resolution entry";goto fail;}
+			for(int j=0;j<source->relocation_count;j++)if(source->relocation_stable_ids[j]!=resolved->relocation_stable_ids[j]){error="Invalid Haxe patch relocation identity";goto fail;}
+		}
+	}
 	if(haxe_pools != NULL) {
 		int total_ints=patch->base_int_count+patch->int_count,total_floats=patch->base_float_count+patch->float_count,total_strings=patch->base_string_count+patch->string_count;
 		if(haxe_pools->int_count!=total_ints||haxe_pools->float_count!=total_floats||haxe_pools->string_count!=total_strings
