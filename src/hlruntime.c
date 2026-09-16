@@ -563,7 +563,8 @@ hl_runtime_status hl_runtime_module_apply_hlp_capture_metadata_input( hl_runtime
 	hl_patch patch;
 	h_bool applied;
 	if( published_code != NULL ) *published_code = NULL;
-	if( runtime == NULL || input == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
+	if( runtime == NULL || input == NULL || haxe_type_count < 0 || haxe_function_count < 0 || haxe_functions == NULL
+		|| haxe_pools == NULL || haxe_debug == NULL || haxe_resolution == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
 	if( !patch_from_haxe_input(&patch,input) ) return HL_RUNTIME_BAD_FORMAT;
 	hl_mutex_acquire(runtime->lock);
 	if( memcmp(runtime->module_id,patch.module_id,16) != 0 ) {
