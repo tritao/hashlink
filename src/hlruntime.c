@@ -284,6 +284,15 @@ hl_runtime_status hl_runtime_module_load_code_manifest( hl_code *code, const uns
 	return hl_runtime_module_load_code_manifest_internal(code,bytes,length,&manifest,out,false);
 }
 
+hl_runtime_status hl_runtime_module_initialize_constant( hl_runtime_module *runtime, int index ) {
+	bool initialized;
+	if( runtime == NULL || runtime->module == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
+	hl_mutex_acquire(runtime->lock);
+	initialized = hl_module_init_constant(runtime->module,index) != 0;
+	hl_mutex_release(runtime->lock);
+	return initialized ? HL_RUNTIME_OK : HL_RUNTIME_BAD_ARGUMENT;
+}
+
 static int resolve_stable_id( hl_runtime_module *runtime, int stable_id ) {
 	int i;
 	for(i=0;i<runtime->identity_count;i++) if( runtime->stable_ids[i] == stable_id ) return runtime->slots[i];

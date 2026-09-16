@@ -939,7 +939,7 @@ static void hl_module_init_natives( hl_module *m ) {
 	}
 }
 
-static void hl_module_init_constant( hl_module *m, hl_constant *c ) {
+static void hl_module_init_constant_value( hl_module *m, hl_constant *c ) {
 	hl_type *t = m->code->globals[c->global];
 	hl_runtime_obj *rt;
 	vdynamic **global = (vdynamic**)(m->globals_data + m->globals_indexes[c->global]);
@@ -981,6 +981,12 @@ static void hl_module_init_constant( hl_module *m, hl_constant *c ) {
 	}
 	*global = v;
 	hl_remove_root(global);
+}
+
+h_bool hl_module_init_constant( hl_module *m, int index ) {
+	if( m == NULL || m->code == NULL || index < 0 || index >= m->code->nconstants ) return false;
+	hl_module_init_constant_value(m,m->code->constants + index);
+	return true;
 }
 
 static void hl_module_add( hl_module *m ) {
@@ -1056,11 +1062,11 @@ int hl_module_init( hl_module *m, int flags ) {
 	}
 	if( m->patchable && !module_init_patch_entries(m) ) return 0;
 	if( (flags & HL_MODULE_HAXE_METADATA) != 0 ) hl_module_init_haxe_object_prototypes(m);
-	// INIT constants
-	for(i=0;i<m->code->nconstants;i++) {
-		hl_constant *c = m->code->constants + i;
-		hl_module_init_constant(m, c);
-	}
+	// INIT constants. Haxe-owned metadata publishes this policy through the
+	// narrow native kernel after module initialization has returned.
+	if( (flags & HL_MODULE_HAXE_METADATA) == 0 )
+		for(i=0;i<m->code->nconstants;i++)
+			hl_module_init_constant_value(m,m->code->constants + i);
 	hl_module_add(m);
 	hl_gdb_jit_register(m);
 	hl_setup.resolve_symbol = module_resolve_symbol;
@@ -1271,7 +1277,7 @@ h_bool hl_module_patch( hl_module *m1, hl_code *c ) {
 	for(i=0;i<m2->code->nconstants;i++) {
 		hl_constant *c = m2->code->constants + i;
 		if( c->global >= m1->code->nglobals )
-			hl_module_init_constant(m2, c);
+			hl_module_init_constant_value(m2,c);
 	}
 
 	for(i2=0;i2<m2->code->nfunctions;i2++) {

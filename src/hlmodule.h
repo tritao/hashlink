@@ -359,6 +359,8 @@ void hl_jit_tag_callback( void *native );
 
 HL_EXTERN_C HL_EXPORT hl_module *hl_module_alloc( hl_code *code );
 HL_EXTERN_C HL_EXPORT int hl_module_init( hl_module *m, int flags );
+/** Materialize one Haxe-owned constant after module initialization. */
+HL_EXTERN_C HL_EXPORT h_bool hl_module_init_constant( hl_module *m, int index );
 h_bool hl_module_patch( hl_module *m, hl_code *code );
 /** Atomically redirect compatible function indices to an initialized generation. */
 HL_EXTERN_C HL_EXPORT h_bool hl_module_patch_slots( hl_module *target, hl_module *generation, const int *indices, int count );
@@ -447,6 +449,8 @@ HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load_code( hl_code *co
 /** Initialize a runtime wrapper from externally owned Haxe metadata and an already decoded manifest. */
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load_code_manifest( hl_code *code, const unsigned char *bytes, int length, const unsigned char *module_id,
 	int module_id_length, int revision, const int *stable_ids, const int *slots, int identity_count, int initializer_slot, hl_runtime_module **out );
+/** Materialize one Haxe-owned constant through an external runtime wrapper. */
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_initialize_constant( hl_runtime_module *runtime, int index );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int stable_id, int *result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_void( hl_runtime_module *runtime, int stable_id, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_bytes( hl_runtime_module *runtime, int stable_id, vbyte **result, vdynamic **exception );
