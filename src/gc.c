@@ -347,6 +347,13 @@ HL_PRIM void hl_remove_root( void *v ) {
 	gc_global_lock(false);
 }
 
+HL_API void hl_root_set( void *r, void *value ) {
+	if( r == NULL ) return;
+	gc_global_lock(true);
+	*(void**)r = value;
+	gc_global_lock(false);
+}
+
 HL_API void hl_add_weak_root( void *r ) {
 	gc_weak_root *weak;
 	if( r == NULL ) return;

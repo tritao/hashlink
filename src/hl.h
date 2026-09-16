@@ -824,6 +824,8 @@ HL_API int hl_gc_owner_live_count( void *owner );
 HL_API void hl_add_root( void *ptr );
 HL_API void hl_add_root_owner( void *ptr, void *owner );
 HL_API void hl_remove_root( void *ptr );
+/** Update one registered root slot while excluding a concurrent collection. */
+HL_API void hl_root_set( void *ptr, void *value );
 HL_API void hl_add_weak_root( void *ptr );
 HL_API void hl_remove_weak_root( void *ptr );
 HL_API void *hl_weak_root_get( void *ptr );
