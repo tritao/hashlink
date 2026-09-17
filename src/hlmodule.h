@@ -460,9 +460,6 @@ HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load_code( hl_code *co
  */
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load_haxe_metadata( hl_code *code, const unsigned char *bytes, int length, const unsigned char *module_id,
 	int module_id_length, int revision, const int *stable_ids, const int *slots, int identity_count, int initializer_slot, hl_runtime_module **out );
-/** Compatibility alias for the former Haxe-owned manifest loader name. */
-HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load_code_manifest( hl_code *code, const unsigned char *bytes, int length, const unsigned char *module_id,
-	int module_id_length, int revision, const int *stable_ids, const int *slots, int identity_count, int initializer_slot, hl_runtime_module **out );
 /** Materialize one Haxe-owned constant through an external runtime wrapper. */
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_initialize_constant( hl_runtime_module *runtime, int index );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int stable_id, int *result, vdynamic **exception );
@@ -494,10 +491,6 @@ HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp_capture_meta
 	int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug, hl_patch_code **published_code );
 /** Apply a Haxe-decoded patch model without reparsing its HLP wire bytes. */
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_haxe_patch( hl_runtime_module *runtime, hl_patch_input *input,
-	int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug,
-	hl_patch_code **published_code );
-/** Compatibility alias for the former Haxe-owned patch entrypoint name. */
-HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp_capture_metadata_input( hl_runtime_module *runtime, hl_patch_input *input,
 	int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug,
 	hl_patch_code **published_code );
 /** Resolve one already validated native dispatch slot to its JIT source location. */
