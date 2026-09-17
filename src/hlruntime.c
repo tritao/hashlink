@@ -778,6 +778,15 @@ int hl_runtime_module_native_root_count( hl_runtime_module *runtime ) {
 	return result;
 }
 
+int hl_runtime_module_debug_hlb_size( hl_runtime_module *runtime ) {
+	int result;
+	if( runtime == NULL || runtime->module == NULL ) return -1;
+	hl_mutex_acquire(runtime->lock);
+	result = runtime->module->debug_hlb_size;
+	hl_mutex_release(runtime->lock);
+	return result;
+}
+
 void hl_runtime_module_retirement_status_get( hl_runtime_module *runtime, hl_module_retirement_status *out ) {
 	if( out == NULL ) return;
 	memset(out,0,sizeof(*out));
