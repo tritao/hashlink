@@ -63,7 +63,8 @@ static void hl_read_bytes( hl_reader *r, void *data, int size ) {
 		ERROR("No more data");
 		return;
 	}
-	memcpy(data,r->b + r->pos, size);
+	if( size > 0 )
+		memcpy(data,r->b + r->pos, size);
 	r->pos += size;
 }
 
@@ -83,7 +84,7 @@ static int hl_read_i32( hl_reader *r ) {
 	b = r->b[r->pos++];
 	c = r->b[r->pos++];
 	d = r->b[r->pos++];
-	return a | (b<<8) | (c<<16) | (d<<24);
+	return (int)((uint32_t)a | ((uint32_t)b<<8) | ((uint32_t)c<<16) | ((uint32_t)d<<24));
 }
 
 static int hl_read_index( hl_reader *r ) {

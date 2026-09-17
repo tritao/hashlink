@@ -166,6 +166,11 @@
 #	include <sanitizer/asan_interface.h>
 #	define ASAN_JIT_STACK(ptr,size)	__asan_unpoison_memory_region(ptr,size)
 #	define ASAN_DISABLE				__declspec(no_sanitize_address)
+#	define HL_ASAN_ENABLED
+#elif defined(__SANITIZE_ADDRESS__) || defined(__ADDRESS_SANITIZER__)
+#	define ASAN_JIT_STACK(ptr,size)
+#	define ASAN_DISABLE __attribute__((no_sanitize_address))
+#	define HL_ASAN_ENABLED
 #else
 #	define ASAN_JIT_STACK(ptr,size)
 #	define ASAN_DISABLE

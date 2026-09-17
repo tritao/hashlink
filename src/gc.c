@@ -72,8 +72,8 @@
 //		0x0000000YXXX0000
 //		0x0007FY0YXXX0000
 static int_val gc_hash( void *ptr ) {
-	int_val v = (int_val)ptr;
-	return (v ^ ((v >> 33) << 28)) & 0x0000000FFFFFFFFF;
+	uintptr_t v = (uintptr_t)ptr;
+	return (int_val)((v ^ ((v >> 33) << 28)) & (uintptr_t)0x0000000FFFFFFFFF);
 }
 #endif
 
@@ -261,14 +261,19 @@ HL_API hl_thread_info *hl_get_thread() {
 	return current_thread;
 }
 
-static void gc_save_context(hl_thread_info *t, void *prev_stack ) {
+ASAN_DISABLE static void gc_save_context(hl_thread_info *t, void *prev_stack ) {
 	setjmp(t->gc_regs);
 	// some compilers (such as clang) might push/pop some callee registers in call
 	// to gc_save_context (or before) which might hold a gc value !
 	// let's capture them immediately in extra per-thread data
-	t->stack_cur = &prev_stack;
-
 #	ifndef HL_DEBUG
+#	if defined(HL_ASAN_ENABLED)
+	/* AddressSanitizer may place caller and callee frames in unrelated fake
+	   stacks, so the raw stack interval is not a valid GC root range. */
+	t->stack_cur = &prev_stack;
+	t->extra_stack_size = 0;
+#	else
+	t->stack_cur = &prev_stack;
 	void* stack_cur = &t;
 	// We have no guarantee prev_stack is pointer-aligned
 	// All calls are passing a pointer to a bool, which is aligned on 1 byte
@@ -280,6 +285,7 @@ static void gc_save_context(hl_thread_info *t, void *prev_stack ) {
 	if( size > HL_MAX_EXTRA_STACK ) hl_fatal("GC_SAVE_CONTEXT");
 	t->extra_stack_size = size;
 	memcpy(t->extra_stack_data, prev_stack, size*sizeof(void*));
+#	endif
 #	endif
 }
 
@@ -317,8 +323,10 @@ HL_API void hl_add_root_owner( void *r, void *owner ) {
 		void ***roots = (void***)malloc(sizeof(void*)*nroots);
 		void **owners = (void**)malloc(sizeof(void*)*nroots);
 		if( roots == NULL || owners == NULL ) out_of_memory("roots");
-		memcpy(roots,gc_roots,sizeof(void*)*gc_roots_count);
-		memcpy(owners,gc_root_owners,sizeof(void*)*gc_roots_count);
+		if( gc_roots_count > 0 ) {
+			memcpy(roots,gc_roots,sizeof(void*)*gc_roots_count);
+			memcpy(owners,gc_root_owners,sizeof(void*)*gc_roots_count);
+		}
 		free(gc_roots);
 		free(gc_root_owners);
 		gc_roots = roots;
@@ -453,7 +461,8 @@ HL_API void hl_register_thread( void *stack_top ) {
 
 	gc_global_lock(true);
 	hl_thread_info **all = (hl_thread_info**)malloc(sizeof(void*) * (gc_threads.count + 1));
-	memcpy(all,gc_threads.threads,sizeof(void*)*gc_threads.count);
+	if( gc_threads.count > 0 )
+		memcpy(all,gc_threads.threads,sizeof(void*)*gc_threads.count);
 	gc_threads.threads = all;
 	all[gc_threads.count++] = t;
 	gc_global_lock(false);
@@ -768,7 +777,8 @@ HL_PRIM void **hl_gc_mark_grow( gc_mstack *stack ) {
 		out_of_memory("markstack");
 		return NULL;
 	}
-	memcpy(nstack, base_stack, avail * sizeof(void*));
+	if( avail > 0 )
+		memcpy(nstack, base_stack, avail * sizeof(void*));
 	free(base_stack);
 	stack->size = nsize;
 	stack->end = nstack + nsize;
@@ -908,7 +918,7 @@ static int gc_flush_mark( gc_mstack *stack ) {
 #		endif
 		while( pos < nwords ) {
 			void *p;
-			if( mark_bits && (mark_bits[pos >> 5] & (1 << (pos&31))) == 0 ) {
+			if( mark_bits && (mark_bits[pos >> 5] & (1u << (pos&31))) == 0 ) {
 				pos++;
 				block++;
 				continue;
@@ -942,7 +952,7 @@ static void gc_mark_stack( void *start, void *end ) {
 #		else
 		int bid = gc_allocator_get_block_id(page, p);
 #		endif
-		if( bid >= 0 && (page->bmp[bid>>3] & (1<<(bid&7))) == 0 ) {
+		if( bid >= 0 && (page->bmp[bid>>3] & (1u<<(bid&7))) == 0 ) {
 			page->bmp[bid>>3] |= 1<<(bid&7);
 			GC_PUSH_GEN(p,page);
 		}

@@ -304,7 +304,7 @@ static uchar *module_resolve_symbol( void *addr, uchar *out, int *outSize ) {
 	return hl_module_resolve_symbol_full(addr,out,outSize,NULL);
 }
 
-int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out, int size ) {
+ASAN_DISABLE int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out, int size ) {
 #if defined(HL_64) && defined(HL_WIN)
 #else
 	void *stack_bottom = stack_ptr;
@@ -379,7 +379,7 @@ int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out
 	return count;
 }
 
-static int module_capture_stack( void **stack, int size ) {
+ASAN_DISABLE static int module_capture_stack( void **stack, int size ) {
 #ifdef WIN64_UNWIND_TABLES
 	CONTEXT context;
 	int module_count;
@@ -987,7 +987,8 @@ static void hl_module_add( hl_module *m ) {
 	hl_mutex_acquire(modules_lock);
 	hl_module **old_modules = cur_modules;
 	hl_module **new_modules = (hl_module**)malloc(sizeof(void*)*(modules_count + 1));
-	memcpy(new_modules, old_modules, sizeof(void*)*modules_count);
+	if( modules_count > 0 )
+		memcpy(new_modules, old_modules, sizeof(void*)*modules_count);
 	new_modules[modules_count] = m;
 	m->diagnostics_id = next_diagnostics_id++;
 	cur_modules = new_modules;

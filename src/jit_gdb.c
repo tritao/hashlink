@@ -192,7 +192,19 @@ static int function_name( hl_code *code, hl_function *f, char *out, int size ) {
 	hl_type_obj *obj = fun_obj(f);
 	const uchar *field = fun_field_name(f);
 	if( qualified ) return snprintf(out,size,"%s",qualified);
-	if( obj && field ) return snprintf(out,size,"%s.%s",hl_to_utf8(obj->name),hl_to_utf8(field));
+	if( obj && field ) {
+		char *obj_name = NULL;
+		char *field_name = NULL;
+		int result;
+		hl_add_root(&obj_name);
+		hl_add_root(&field_name);
+		obj_name = hl_to_utf8(obj->name);
+		field_name = hl_to_utf8(field);
+		result = snprintf(out,size,"%s.%s",obj_name,field_name);
+		hl_remove_root(&field_name);
+		hl_remove_root(&obj_name);
+		return result;
+	}
 	return snprintf(out,size,"fun$%d",f->findex);
 }
 

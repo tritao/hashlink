@@ -332,7 +332,8 @@ static einstr *emit_instr( emit_ctx *ctx, emit_op op ) {
 		int next_size = ctx->max_instrs ? (ctx->max_instrs << 1) : 256;
 		einstr *instrs = (einstr*)malloc(sizeof(einstr) * next_size);
 		if( instrs == NULL ) jit_error("Out of memory");
-		memcpy(instrs, ctx->instrs, pos * sizeof(einstr));
+		if( pos > 0 )
+			memcpy(instrs, ctx->instrs, pos * sizeof(einstr));
 		memset(instrs + pos, 0, (next_size - pos) * sizeof(einstr));
 		free(ctx->instrs);
 		ctx->instrs = instrs;
@@ -402,7 +403,8 @@ static tmp_phi *alloc_phi( emit_ctx *ctx, emit_block *b, vreg *r ) {
 		int new_size = ctx->max_phis ? ctx->max_phis << 1 : 64;
 		tmp_phi **phis = (tmp_phi**)malloc(sizeof(tmp_phi*) * new_size);
 		if( phis == NULL ) jit_error("Out of memory");
-		memcpy(phis, ctx->phis, sizeof(tmp_phi*) * ctx->phi_count);
+		if( ctx->phi_count > 0 )
+			memcpy(phis, ctx->phis, sizeof(tmp_phi*) * ctx->phi_count);
 		free(ctx->phis);
 		ctx->phis = phis;
 		ctx->max_phis = new_size;
@@ -2248,9 +2250,9 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 			current_addr = LOAD_CONST_PTR(&tinf->trap_current);
 #			else
 			thread = emit_native_call(ctx, hl_get_thread, NULL, 0, &hlt_bytes);
-			current_addr = OFFSET(thread, UNUSED, 0, (int)(int_val)&tinf->trap_current);
+			current_addr = OFFSET(thread, UNUSED, 0, (int)offsetof(hl_thread_info, trap_current));
 #			endif
-			STORE_MEM(st, (int)(int_val)&trap->prev, LOAD_MEM_PTR(current_addr,0));
+			STORE_MEM(st, (int)offsetof(hl_trap_ctx, prev), LOAD_MEM_PTR(current_addr,0));
 			STORE_MEM(current_addr, 0, st);
 
 
@@ -2288,7 +2290,7 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 					offs = m->globals_indexes[gindex];
 				}
 			}
-			STORE_MEM(st, (int)(int_val)&trap->tcheck, addr ? LOAD_MEM_PTR(LOAD_CONST_PTR(addr),offs) : LOAD_CONST_PTR(NULL));
+			STORE_MEM(st, (int)offsetof(hl_trap_ctx, tcheck), addr ? LOAD_MEM_PTR(LOAD_CONST_PTR(addr),offs) : LOAD_CONST_PTR(NULL));
 
 			void *fun = SETJMP_FUN;
 			ereg args[2];
@@ -2303,7 +2305,7 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 			ereg ret = emit_native_call(ctx, fun, args, nargs, &hlt_i32);
 			emit_test(ctx, ret, OJNull);
 			int jskip = emit_jump(ctx, true);
-			STORE(dst, tinf ? LOAD_CONST_PTR(&tinf->exc_value) : LOAD_MEM_PTR(thread,(int)(int_val)&tinf->exc_value));
+			STORE(dst, tinf ? LOAD_CONST_PTR(&tinf->exc_value) : LOAD_MEM_PTR(thread,(int)offsetof(hl_thread_info, exc_value)));
 
 			int jtrap = ctx->emit_pos;
 			emit_gen(ctx, JUMP, UNUSED, UNUSED, 0);
@@ -2330,10 +2332,10 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 			current_addr = LOAD_CONST_PTR(&tinf->trap_current);
 #			else
 			thread = emit_native_call(ctx, hl_get_thread, NULL, 0, &hlt_bytes);
-			current_addr = OFFSET(thread, UNUSED, 0, (int)(int_val)&tinf->trap_current);
+			current_addr = OFFSET(thread, UNUSED, 0, (int)offsetof(hl_thread_info, trap_current));
 #			endif
 
-			STORE_MEM(current_addr, 0, LOAD_MEM_PTR(st,(int)(int_val)&trap->prev));
+			STORE_MEM(current_addr, 0, LOAD_MEM_PTR(st,(int)offsetof(hl_trap_ctx, prev)));
 
 			emit_instr(ctx, CATCH);
 		}

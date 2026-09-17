@@ -153,8 +153,10 @@ static void regs_write_instr( regs_ctx *ctx, einstr *e, ereg out ) {
 		einstr *instrs = (einstr*)malloc(sizeof(einstr) * next_size);
 		ereg *out = (ereg*)malloc(sizeof(ereg) * next_size);
 		if( instrs == NULL || out == NULL ) jit_error("Out of memory");
-		memcpy(instrs, ctx->instrs, pos * sizeof(einstr));
-		memcpy(out, ctx->out_write, pos * sizeof(ereg));
+		if( pos > 0 ) {
+			memcpy(instrs, ctx->instrs, pos * sizeof(einstr));
+			memcpy(out, ctx->out_write, pos * sizeof(ereg));
+		}
 		memset(instrs + pos, 0, (next_size - pos) * sizeof(einstr));
 		free(ctx->instrs);
 		free(ctx->out_write);

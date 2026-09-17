@@ -317,11 +317,11 @@ static opform OP_FORMS[] = {
 static const int SIB_MULT[] = {-1, 0, 1, -1, 2, -1, -1, -1, 3};
 
 #define B(v)					ctx->code.values[ctx->code.cur++] = (unsigned char)(v)
-#define W(wv)					*(int*)&ctx->code.values[_incr(&ctx->code.cur,4)] = wv
-#define W64(v64)				*(int_val*)&ctx->code.values[_incr(&ctx->code.cur,8)] = v64
+#define W(wv) do { int w_value = (wv); memcpy(&ctx->code.values[_incr(&ctx->code.cur,4)], &w_value, sizeof(w_value)); } while(0)
+#define W64(v64) do { int_val w_value = (v64); memcpy(&ctx->code.values[_incr(&ctx->code.cur,8)], &w_value, sizeof(w_value)); } while(0)
 
 #define MOD_RM(mod,reg,rm)		B(((mod) << 6) | (((reg)&7) << 3) | ((rm)&7))
-#define SIB(mult,rmult,rbase)	B((SIB_MULT[mult]<<6) | (((rmult)&7)<<3) | ((rbase)&7))
+#define SIB(mult,rmult,rbase)	B(((unsigned int)SIB_MULT[mult]<<6) | (((rmult)&7)<<3) | ((rbase)&7))
 #define IS_SBYTE(c)				( (c) >= -128 && (c) < 128 )
 
 #define BREAK()					B(0xCC)
@@ -1775,7 +1775,7 @@ void hl_codegen_function( jit_ctx *jit ) {
 		int pos = int_arr_get(ctx->near_jumps,i);
 		int target = int_arr_get(ctx->near_jumps,i+1);
 		int offset = ctx->pos_map[target] - (pos + 4);
-		*(int*)&ctx->code.values[pos] = offset;
+		memcpy(&ctx->code.values[pos], &offset, sizeof(offset));
 	}
 	for(int i=const_addr_prev;i<int_arr_count(ctx->const_addr);i+=2) {
 		int target = int_arr_get(ctx->const_addr,i+1);
@@ -1885,12 +1885,11 @@ void hl_codegen_init( jit_ctx *jit ) {
 	//		case HF32: case HF64: return jit_wrapper_d(arg0,&args);
 	//		default: return jit_wrapper_ptr(arg0,&args);
 	//		}
-	hl_type_fun *ft = NULL;
 	ereg fun_ptr = scratch_not_param[0];
 
 	EMIT(_MOV,tmp,MK_ADDR(cl,0),M_PTR); // ->t
 	EMIT(_MOV,tmp,MK_ADDR(tmp,HL_WSIZE),M_PTR); // ->fun
-	EMIT(_MOV,tmp,MK_ADDR(tmp,(int)(int_val)&ft->ret),M_PTR); // ->rets
+	EMIT(_MOV,tmp,MK_ADDR(tmp,offsetof(hl_type_fun,ret)),M_PTR); // ->rets
 	EMIT(_MOV,tmp,MK_ADDR(tmp,0),M_I32); // ->kind
 
 	EMIT(_CMP,tmp,MK_CONST(HF64),M_I32);
@@ -2001,7 +2000,7 @@ void hl_codegen_flush_consts( jit_ctx *jit ) {
 		int pos = int_arr_get(ctx->funs,i);
 		int fid = int_arr_get(ctx->funs,i+1);
 		int offset = (int)(int_val)jit->mod->functions_ptrs[fid] - (pos + 4);
-		*(int*)(jit->output + pos) = offset;
+		memcpy(jit->output + pos, &offset, sizeof(offset));
 	}
 	int_arr_reset(&ctx->funs);
 	// emit constant table
@@ -2013,7 +2012,7 @@ void hl_codegen_flush_consts( jit_ctx *jit ) {
 		int pos = int_arr_get(ctx->const_refs,i);
 		int coffs = int_arr_get(ctx->const_refs,i+1);
 		int offset = (ctx->const_table_pos + coffs) - (pos + 4);
-		*(int*)(jit->output + pos) = offset;
+		memcpy(jit->output + pos, &offset, sizeof(offset));
 	}
 	int_arr_reset(&ctx->const_refs);
 	// cleanup
@@ -2027,7 +2026,8 @@ void hl_codegen_final( jit_ctx *jit ) {
 	for(int i=0;i<int_arr_count(ctx->const_addr);i+=2) {
 		int pos = int_arr_get(ctx->const_addr,i);
 		int offs = int_arr_get(ctx->const_addr,i+1);
-		*(void**)(jit->final_code + ctx->const_table_pos + pos) = jit->final_code + offs;
+		void *address = jit->final_code + offs;
+		memcpy(jit->final_code + ctx->const_table_pos + pos, &address, sizeof(address));
 	}
 	int_arr_free(&ctx->const_addr);
 }

@@ -8,6 +8,7 @@ void hl_debug_notify_revision( hl_module *m );
 
 struct _hl_runtime_module {
 	hl_module *module;
+	hl_code *owned_code;
 	hl_mutex *lock;
 	unsigned char module_id[16];
 	int identity_count;
@@ -16,6 +17,12 @@ struct _hl_runtime_module {
 	bool borrowed_identity;
 	struct _hl_runtime_module *retirement_next;
 };
+
+static void runtime_code_free( hl_code *code ) {
+	if( code == NULL ) return;
+	hl_code_free(code);
+	hl_free(&code->alloc);
+}
 
 static hl_runtime_module *failed_retirements = NULL;
 static hl_mutex *failed_retirements_lock = NULL;
@@ -31,6 +38,7 @@ static void runtime_identity_free( hl_runtime_module *runtime ) {
 static void runtime_wrapper_free( hl_runtime_module *runtime ) {
 	hl_remove_root(&runtime->lock);
 	hl_mutex_free(runtime->lock);
+	runtime_code_free(runtime->owned_code);
 	runtime_identity_free(runtime);
 	free(runtime);
 }
@@ -174,13 +182,15 @@ static int manifest_slot( const hl_runtime_manifest *manifest, int index ) {
 }
 
 static hl_runtime_status hl_runtime_module_load_code_manifest_internal( hl_code *code, const unsigned char *bytes, int length,
-	const hl_runtime_manifest *manifest, hl_runtime_module **out, bool initialize, bool haxe_metadata ) {
+	const hl_runtime_manifest *manifest, hl_runtime_module **out, bool initialize, bool haxe_metadata,
+	hl_code *owned_code, bool *code_owned ) {
 	hl_module *module;
 	hl_runtime_module *runtime;
 	int i, j;
 	/* Haxe-owned metadata loads use the Haxe retirement backlog. The native
 	   retry list is compatibility state for the legacy byte-decoder path. */
 	if( !haxe_metadata ) hl_runtime_failed_retirements_retry();
+	if( code_owned != NULL ) *code_owned = false;
 	if( out == NULL || code == NULL || bytes == NULL || length <= 0 || manifest == NULL || manifest->module_id == NULL
 		|| manifest->revision < 0 || manifest->initializer_slot < -1 || manifest->identity_count < 0 || manifest->identity_count > 0x100000
 		|| (manifest->identity_count > 0 && manifest->encoded_entries == NULL && (manifest->stable_ids == NULL || manifest->slots == NULL)) )
@@ -204,6 +214,7 @@ static hl_runtime_status hl_runtime_module_load_code_manifest_internal( hl_code 
 		return HL_RUNTIME_JIT_FAILED;
 	}
 	runtime->module = module;
+	runtime->owned_code = NULL;
 	runtime->module->revision = manifest->revision;
 	memcpy(runtime->module_id,manifest->module_id,16);
 	runtime->identity_count = manifest->identity_count;
@@ -211,8 +222,14 @@ static hl_runtime_status hl_runtime_module_load_code_manifest_internal( hl_code 
 	runtime->stable_ids = runtime->borrowed_identity ? manifest->stable_ids : (const int*)malloc(sizeof(int) * manifest->identity_count);
 	runtime->slots = runtime->borrowed_identity ? manifest->slots : (const int*)malloc(sizeof(int) * manifest->identity_count);
 	runtime->retirement_next = NULL;
+	runtime->owned_code = owned_code;
+	if( code_owned != NULL && owned_code != NULL ) *code_owned = true;
 	if( (manifest->identity_count > 0) && (runtime->stable_ids == NULL || runtime->slots == NULL) ) {
-		runtime_identity_free(runtime);free(runtime);hl_module_unload(module);return HL_RUNTIME_JIT_FAILED;
+		runtime_identity_free(runtime);
+		hl_module_unload(module);
+		runtime_code_free(runtime->owned_code);
+		free(runtime);
+		return HL_RUNTIME_JIT_FAILED;
 	}
 	for(i=0;i<manifest->identity_count;i++) {
 		if( !runtime->borrowed_identity ) {
@@ -220,10 +237,18 @@ static hl_runtime_status hl_runtime_module_load_code_manifest_internal( hl_code 
 			((int*)runtime->slots)[i] = manifest_slot(manifest,i);
 		}
 		if( runtime->stable_ids[i] < 0 || find_function(module,runtime->slots[i]) == NULL ) {
-			runtime_identity_free(runtime);free(runtime);hl_module_unload(module);return HL_RUNTIME_BAD_FORMAT;
+			runtime_identity_free(runtime);
+			hl_module_unload(module);
+			runtime_code_free(runtime->owned_code);
+			free(runtime);
+			return HL_RUNTIME_BAD_FORMAT;
 		}
 		for(j=0;j<i;j++) if( runtime->stable_ids[j] == runtime->stable_ids[i] || runtime->slots[j] == runtime->slots[i] ) {
-			runtime_identity_free(runtime);free(runtime);hl_module_unload(module);return HL_RUNTIME_BAD_FORMAT;
+			runtime_identity_free(runtime);
+			hl_module_unload(module);
+			runtime_code_free(runtime->owned_code);
+			free(runtime);
+			return HL_RUNTIME_BAD_FORMAT;
 		}
 	}
 	runtime->lock = hl_mutex_alloc(true);
@@ -256,7 +281,8 @@ static hl_runtime_status hl_runtime_module_load_code_manifest_internal( hl_code 
 }
 
 static hl_runtime_status hl_runtime_module_load_code_internal( hl_code *code, const unsigned char *bytes, int length, const unsigned char *identity,
-	int identity_length, hl_runtime_module **out, bool initialize, bool haxe_metadata ) {
+	int identity_length, hl_runtime_module **out, bool initialize, bool haxe_metadata,
+	hl_code *owned_code, bool *code_owned ) {
 	hl_runtime_manifest manifest;
 	int version, identity_count, entries_offset, initializer_slot;
 	if( out == NULL || code == NULL || bytes == NULL || length <= 0 || identity == NULL || identity_length < 28 ) return HL_RUNTIME_BAD_ARGUMENT;
@@ -279,7 +305,7 @@ static hl_runtime_status hl_runtime_module_load_code_internal( hl_code *code, co
 		for(int i=0;i<identity_count;i++)
 			if( (int)read_u32(manifest.encoded_entries + i * 8) == HL_RUNTIME_V2_INIT_STABLE_ID )
 				manifest.initializer_slot = (int)read_u32(manifest.encoded_entries + i * 8 + 4);
-	return hl_runtime_module_load_code_manifest_internal(code,bytes,length,&manifest,out,initialize,haxe_metadata);
+	return hl_runtime_module_load_code_manifest_internal(code,bytes,length,&manifest,out,initialize,haxe_metadata,owned_code,code_owned);
 }
 
 hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out ) {
@@ -289,13 +315,15 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 	if( bytes == NULL || length <= 0 ) return HL_RUNTIME_BAD_ARGUMENT;
 	code = hl_code_read(bytes,length,&error);
 	if( code == NULL ) return HL_RUNTIME_BAD_FORMAT;
-	status = hl_runtime_module_load_code_internal(code,bytes,length,identity,identity_length,out,true,false);
-	hl_code_free(code);
+	bool code_owned = false;
+	status = hl_runtime_module_load_code_internal(code,bytes,length,identity,identity_length,out,true,false,code,&code_owned);
+	if( !code_owned )
+		runtime_code_free(code);
 	return status;
 }
 
 hl_runtime_status hl_runtime_module_load_code( hl_code *code, const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out ) {
-	return hl_runtime_module_load_code_internal(code,bytes,length,identity,identity_length,out,false,true);
+	return hl_runtime_module_load_code_internal(code,bytes,length,identity,identity_length,out,false,true,NULL,NULL);
 }
 
 hl_runtime_status hl_runtime_module_load_code_manifest( hl_code *code, const unsigned char *bytes, int length, const unsigned char *module_id,
@@ -309,7 +337,7 @@ hl_runtime_status hl_runtime_module_load_code_manifest( hl_code *code, const uns
 	manifest.encoded_entries = NULL;
 	manifest.stable_ids = stable_ids;
 	manifest.slots = slots;
-	return hl_runtime_module_load_code_manifest_internal(code,bytes,length,&manifest,out,false,true);
+	return hl_runtime_module_load_code_manifest_internal(code,bytes,length,&manifest,out,false,true,NULL,NULL);
 }
 
 hl_runtime_status hl_runtime_module_initialize_constant( hl_runtime_module *runtime, int index ) {

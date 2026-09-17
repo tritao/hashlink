@@ -124,7 +124,7 @@ typedef enum {
 
 #define UNUSED						((ereg)0)
 #define MK_REG(v,kind)				(((v)&0x7F) | (kind))
-#define MK_REG_VAL(v,kind,val)		(MK_REG(v,kind) | (((val) << 7)&0x8FFFFF80))
+#define MK_REG_VAL(v,kind,val)		(MK_REG(v,kind) | (((uint32_t)(val) << 7)&0x8FFFFF80))
 
 #define REG_KIND(r)		((r)&0x70000000)
 #define REG_REG(r)		((r)&0x7F)
