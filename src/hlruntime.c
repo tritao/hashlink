@@ -178,7 +178,9 @@ static hl_runtime_status hl_runtime_module_load_code_manifest_internal( hl_code 
 	hl_module *module;
 	hl_runtime_module *runtime;
 	int i, j;
-	hl_runtime_failed_retirements_retry();
+	/* Haxe-owned metadata loads use the Haxe retirement backlog. The native
+	   retry list is compatibility state for the legacy byte-decoder path. */
+	if( !haxe_metadata ) hl_runtime_failed_retirements_retry();
 	if( out == NULL || code == NULL || bytes == NULL || length <= 0 || manifest == NULL || manifest->module_id == NULL
 		|| manifest->revision < 0 || manifest->initializer_slot < -1 || manifest->identity_count < 0 || manifest->identity_count > 0x100000
 		|| (manifest->identity_count > 0 && manifest->encoded_entries == NULL && (manifest->stable_ids == NULL || manifest->slots == NULL)) )
