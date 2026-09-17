@@ -401,6 +401,11 @@ void hl_patch_free( hl_patch *patch ) {
 }
 
 hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error_msg ) {
+	if( hl_runtime_decode_guard_active() ) {
+		hl_runtime_decode_guard_note();
+		if( error_msg != NULL ) *error_msg = "Native HLP decoding is disabled for Haxe-owned runtime execution";
+		return NULL;
+	}
 	patch_reader r = { data, data + (size < 0 ? 0 : size), NULL };
 	hl_patch *patch = (hl_patch*)calloc(1,sizeof(hl_patch));
 	const unsigned char *p; int version, i, j, count, tag, section_count, section_length;

@@ -334,6 +334,12 @@ typedef struct {
 
 HL_EXTERN_C HL_EXPORT hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg );
 
+/** Reject native HLB/HLP decoding while a Haxe-owned runtime operation is active. */
+HL_EXTERN_C HL_EXPORT void hl_runtime_decode_guard_begin( void );
+HL_EXTERN_C HL_EXPORT int hl_runtime_decode_guard_end( void );
+HL_EXTERN_C HL_EXPORT bool hl_runtime_decode_guard_active( void );
+HL_EXTERN_C HL_EXPORT void hl_runtime_decode_guard_note( void );
+
 hl_code_hash *hl_code_hash_alloc( hl_code *c );
 void hl_code_hash_finalize( hl_code_hash *h );
 void hl_code_hash_free( hl_code_hash *h );

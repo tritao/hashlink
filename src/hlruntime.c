@@ -26,6 +26,28 @@ static void runtime_code_free( hl_code *code ) {
 
 static hl_runtime_module *failed_retirements = NULL;
 static hl_mutex *failed_retirements_lock = NULL;
+HL_THREAD_STATIC_VAR int runtime_decode_guard_depth = 0;
+HL_THREAD_STATIC_VAR int runtime_decode_guard_attempts = 0;
+
+void hl_runtime_decode_guard_begin() {
+	if( runtime_decode_guard_depth == 0 ) runtime_decode_guard_attempts = 0;
+	runtime_decode_guard_depth++;
+}
+
+int hl_runtime_decode_guard_end() {
+	int attempts = runtime_decode_guard_attempts;
+	if( runtime_decode_guard_depth > 0 ) runtime_decode_guard_depth--;
+	if( runtime_decode_guard_depth == 0 ) runtime_decode_guard_attempts = 0;
+	return attempts;
+}
+
+bool hl_runtime_decode_guard_active() {
+	return runtime_decode_guard_depth > 0;
+}
+
+void hl_runtime_decode_guard_note() {
+	runtime_decode_guard_attempts++;
+}
 
 static void runtime_identity_free( hl_runtime_module *runtime ) {
 	if( runtime == NULL || runtime->borrowed_identity ) return;

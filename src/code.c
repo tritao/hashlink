@@ -486,6 +486,11 @@ static int *hl_read_debug_infos( hl_reader *r, int nops ) {
 }
 
 hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg ) {
+	if( hl_runtime_decode_guard_active() ) {
+		hl_runtime_decode_guard_note();
+		if( error_msg != NULL ) *error_msg = "Native HLB decoding is disabled for Haxe-owned runtime execution";
+		return NULL;
+	}
 	hl_reader _r = { data, size, 0, 0, NULL };
 	hl_reader *r = &_r;
 	hl_code *c;
