@@ -191,20 +191,20 @@ static hl_runtime_status hl_runtime_module_load_code_manifest_internal( hl_code 
 	   retry list is compatibility state for the legacy byte-decoder path. */
 	if( !haxe_metadata ) hl_runtime_failed_retirements_retry();
 	if( code_owned != NULL ) *code_owned = false;
-	if( out == NULL || code == NULL || bytes == NULL || length <= 0 || manifest == NULL || manifest->module_id == NULL
+	if( out == NULL || code == NULL || length < 0 || (length > 0 && bytes == NULL) || manifest == NULL || manifest->module_id == NULL
 		|| manifest->revision < 0 || manifest->initializer_slot < -1 || manifest->identity_count < 0 || manifest->identity_count > 0x100000
 		|| (manifest->identity_count > 0 && manifest->encoded_entries == NULL && (manifest->stable_ids == NULL || manifest->slots == NULL)) )
 		return HL_RUNTIME_BAD_ARGUMENT;
 	*out = NULL;
 	module = hl_module_alloc(code);
-	if( module != NULL ) {
+	if( module != NULL && length > 0 ) {
 		module->debug_hlb = (unsigned char*)malloc(length);
 		if( module->debug_hlb != NULL ) {
 			memcpy(module->debug_hlb,bytes,length);
 			module->debug_hlb_size = length;
 		}
 	}
-	if( module == NULL || module->debug_hlb == NULL || !hl_module_init(module,HL_MODULE_PATCHABLE | (haxe_metadata ? HL_MODULE_HAXE_METADATA : 0)) ) {
+	if( module == NULL || (length > 0 && module->debug_hlb == NULL) || !hl_module_init(module,HL_MODULE_PATCHABLE | (haxe_metadata ? HL_MODULE_HAXE_METADATA : 0)) ) {
 		if( module != NULL ) hl_module_free_shutdown(module);
 		return HL_RUNTIME_JIT_FAILED;
 	}

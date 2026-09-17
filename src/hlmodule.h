@@ -449,6 +449,8 @@ HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load_code( hl_code *co
 /**
  * Initialize a runtime wrapper from externally owned Haxe metadata and an already decoded manifest.
  * The stable_ids and slots arrays are borrowed until the runtime wrapper is released.
+ * The optional bytes payload is retained only for legacy debugger metadata; a
+ * Haxe-owned execution module may pass NULL and zero length.
  */
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load_code_manifest( hl_code *code, const unsigned char *bytes, int length, const unsigned char *module_id,
 	int module_id_length, int revision, const int *stable_ids, const int *slots, int identity_count, int initializer_slot, hl_runtime_module **out );
