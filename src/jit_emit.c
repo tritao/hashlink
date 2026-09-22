@@ -2332,7 +2332,6 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 	case OEndTrap:
 		{
 			if( ctx->trap_count == 0 ) jit_assert();
-			ereg st = ctx->traps[ctx->trap_count - 1].stack;
 
 			ereg thread, current_addr;
 			static hl_thread_info *tinf = NULL;
@@ -2345,7 +2344,10 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 			current_addr = OFFSET(thread, UNUSED, 0, (int)(int_val)&tinf->trap_current);
 #			endif
 
-			STORE_MEM(current_addr, 0, LOAD_MEM_PTR(st,(int)(int_val)&trap->prev));
+			/* Consecutive OEndTrap opcodes can unwind several nested handlers.
+			   ctx->traps is static JIT state, so pop the active runtime handler. */
+			ereg active_trap = LOAD_MEM_PTR(current_addr,0);
+			STORE_MEM(current_addr, 0, LOAD_MEM_PTR(active_trap,(int)(int_val)&trap->prev));
 
 			emit_instr(ctx, CATCH);
 		}
