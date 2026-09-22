@@ -99,6 +99,12 @@ static int block_error() {
 	return -2;
 }
 
+#ifdef HL_WIN
+#define SOCKET_INTERRUPTED 0
+#else
+#define SOCKET_INTERRUPTED (errno == EINTR)
+#endif
+
 HL_PRIM void hl_socket_init() {
 #ifdef HL_WIN
 	static bool init_done = false;
@@ -150,10 +156,13 @@ HL_PRIM void hl_socket_close( hl_socket *s ) {
 
 HL_PRIM int hl_socket_send_char( hl_socket *s, int c ) {
 	char cc;
+	int ret;
 	cc = (char)(unsigned char)c;
 	if( !s )
 		return -2;
-	if( send(s->sock,&cc,1,MSG_NOSIGNAL) == SOCKET_ERROR )
+	do ret = send(s->sock,&cc,1,MSG_NOSIGNAL);
+	while( ret == SOCKET_ERROR && SOCKET_INTERRUPTED );
+	if( ret == SOCKET_ERROR )
 		return block_error();
 	return 1;
 }
@@ -162,7 +171,8 @@ HL_PRIM int hl_socket_send( hl_socket *s, vbyte *buf, int pos, int len ) {
 	int r;
 	if( !s )
 		return -2;
-	r = send(s->sock, (char*)buf + pos, len, MSG_NOSIGNAL);
+	do r = send(s->sock, (char*)buf + pos, len, MSG_NOSIGNAL);
+	while( r == SOCKET_ERROR && SOCKET_INTERRUPTED );
 	if( r == SOCKET_ERROR )
 		return block_error();
 	return r;
@@ -174,7 +184,8 @@ HL_PRIM int hl_socket_recv( hl_socket *s, vbyte *buf, int pos, int len ) {
 	if( !s )
 		return -2;
 	hl_blocking(true);
-	ret = recv(s->sock, (char*)buf + pos, len, MSG_NOSIGNAL);
+	do ret = recv(s->sock, (char*)buf + pos, len, MSG_NOSIGNAL);
+	while( ret == SOCKET_ERROR && SOCKET_INTERRUPTED );
 	hl_blocking(false);
 	if( ret == SOCKET_ERROR )
 		return block_error();
@@ -186,7 +197,8 @@ HL_PRIM int hl_socket_recv_char( hl_socket *s ) {
 	int ret;
 	if( !s ) return -2;
 	hl_blocking(true);
-	ret = recv(s->sock,&cc,1,MSG_NOSIGNAL);
+	do ret = recv(s->sock,&cc,1,MSG_NOSIGNAL);
+	while( ret == SOCKET_ERROR && SOCKET_INTERRUPTED );
 	hl_blocking(false);
 	if( ret == SOCKET_ERROR )
 		return block_error();
@@ -295,7 +307,8 @@ HL_PRIM hl_socket *hl_socket_accept( hl_socket *s ) {
 	hl_socket *hs;
 	if( !s ) return NULL;
 	hl_blocking(true);
-	nsock = accept(s->sock,(struct sockaddr*)&addr,&addrlen);
+	do nsock = accept(s->sock,(struct sockaddr*)&addr,&addrlen);
+	while( nsock == INVALID_SOCKET && SOCKET_INTERRUPTED );
 	hl_blocking(false);
 	if( nsock == INVALID_SOCKET )
 		return NULL;
@@ -476,7 +489,15 @@ HL_PRIM bool hl_socket_select( varray *ra, varray *wa, varray *ea, char *tmp, in
 	if( select((int)(max+1),ra?rs:NULL,wa?ws:NULL,ea?es:NULL,tt) == SOCKET_ERROR ) {
 		hl_blocking(false);
 #		ifndef HL_WIN
-		if( errno == EINTR ) return true;
+		if( errno == EINTR ) {
+			if( rs ) FD_ZERO(rs);
+			if( ws ) FD_ZERO(ws);
+			if( es ) FD_ZERO(es);
+			make_array_result(rs,ra);
+			make_array_result(ws,wa);
+			make_array_result(es,ea);
+			return true;
+		}
 #		endif
 		return false;
 	}
