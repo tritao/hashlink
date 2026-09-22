@@ -20,6 +20,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 #include "hl.h"
+HL_API double hl_sys_time( void );
 #ifdef HL_WIN
 #	undef _GUID
 #	include <windows.h>
@@ -227,6 +228,7 @@ static struct {
 	int pages_blocks;
 	int mark_bytes;
 	int mark_time;
+	double mark_duration_ms;
 	int mark_count;
 	int alloc_time; // only measured if gc_profile active
 } gc_stats = {0};
@@ -973,6 +975,7 @@ static void gc_major() {
 	}
 
 	int time = TIMESTAMP(), dt;
+	double mark_started = hl_sys_time();
 	gc_stats.last_mark = gc_stats.total_allocated;
 	gc_stats.last_mark_allocs = gc_stats.allocation_count;
 	gc_stop_world(true);
@@ -981,6 +984,7 @@ static void gc_major() {
 	dt = TIMESTAMP() - time;
 	gc_stats.mark_count++;
 	gc_stats.mark_time += dt;
+	gc_stats.mark_duration_ms += (hl_sys_time() - mark_started) * 1000.0;
 	if( gc_flags & GC_PROFILE ) {
 		printf("GC-PROFILE %d\n\tmark-time %.3g\n\talloc-time %.3g\n\ttotal-mark-time %.3g\n\ttotal-alloc-time %.3g\n\tallocated %d (%dKB)\n",
 			gc_stats.mark_count,
@@ -1476,7 +1480,16 @@ HL_API void hl_gc_profile_stats( unsigned long long *allocated, unsigned long lo
 	*allocations = (unsigned long long)gc_stats.allocation_count;
 	*heap = (unsigned long long)gc_stats.pages_total_memory;
 	*collections = (unsigned long long)gc_stats.mark_count;
-	*mark_micros = (unsigned long long)gc_stats.mark_time;
+	*mark_micros = (unsigned long long)(gc_stats.mark_duration_ms * 1000.0);
+}
+
+HL_PRIM void hl_gc_detailed_stats( double *allocated, double *allocations, double *collections, double *mark_micros ) {
+	unsigned long long heap, allocated_value, allocation_value, collection_value, mark_value;
+	hl_gc_profile_stats(&allocated_value,&allocation_value,&heap,&collection_value,&mark_value);
+	*allocated = (double)allocated_value;
+	*allocations = (double)allocation_value;
+	*collections = (double)collection_value;
+	*mark_micros = (double)mark_value;
 }
 
 HL_API void hl_gc_enable( bool b ) {
@@ -1674,6 +1687,7 @@ DEFINE_PRIM(_VOID, gc_major, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_enable, _BOOL);
 DEFINE_PRIM(_VOID, gc_profile, _BOOL);
 DEFINE_PRIM(_VOID, gc_stats, _REF(_F64) _REF(_F64) _REF(_F64));
+DEFINE_PRIM(_VOID, gc_detailed_stats, _REF(_F64) _REF(_F64) _REF(_F64) _REF(_F64));
 DEFINE_PRIM(_VOID, gc_dump_memory, _BYTES);
 DEFINE_PRIM(_I32, gc_get_live_objects, _TYPE _ARR);
 DEFINE_PRIM(_I32, gc_get_flags, _NO_ARG);
