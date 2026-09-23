@@ -1475,6 +1475,18 @@ HL_API void hl_gc_stats( double *total_allocated, double *allocation_count, doub
 	*current_memory = (double)gc_stats.pages_total_memory;
 }
 
+HL_PRIM double hl_gc_total_allocated() {
+	return (double)gc_stats.total_allocated;
+}
+
+HL_PRIM double hl_gc_collections() {
+	return (double)gc_stats.mark_count;
+}
+
+HL_PRIM double hl_gc_mark_micros() {
+	return gc_stats.mark_duration_ms * 1000.0;
+}
+
 HL_API void hl_gc_profile_stats( unsigned long long *allocated, unsigned long long *allocations, unsigned long long *heap, unsigned long long *collections, unsigned long long *mark_micros ) {
 	*allocated = (unsigned long long)gc_stats.total_allocated;
 	*allocations = (unsigned long long)gc_stats.allocation_count;
@@ -1687,6 +1699,9 @@ DEFINE_PRIM(_VOID, gc_major, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_enable, _BOOL);
 DEFINE_PRIM(_VOID, gc_profile, _BOOL);
 DEFINE_PRIM(_VOID, gc_stats, _REF(_F64) _REF(_F64) _REF(_F64));
+DEFINE_PRIM(_F64, gc_total_allocated, _NO_ARG);
+DEFINE_PRIM(_F64, gc_collections, _NO_ARG);
+DEFINE_PRIM(_F64, gc_mark_micros, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_detailed_stats, _REF(_F64) _REF(_F64) _REF(_F64) _REF(_F64));
 DEFINE_PRIM(_VOID, gc_dump_memory, _BYTES);
 DEFINE_PRIM(_I32, gc_get_live_objects, _TYPE _ARR);
