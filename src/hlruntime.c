@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Must match the maximum 29-bit stable ID reserved by HlFunctionCache. */
 #define HL_RUNTIME_V2_INIT_STABLE_ID 0x1FFFFFFF
 
 void hl_debug_notify_revision( hl_module *m );
