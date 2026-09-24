@@ -159,6 +159,13 @@ HL_PRIM void hl_sys_profile_event( int code, vbyte *data, int dataLen ) {
 	if( hl_setup.profile_event ) hl_setup.profile_event(code, data, dataLen);
 }
 
+HL_PRIM void hl_sys_profile_span( int code, uchar *name ) {
+	if( hl_setup.profile_event && name ) {
+		char *utf8 = hl_to_utf8(name);
+		hl_setup.profile_event(code, (vbyte*)utf8, (int)strlen(utf8));
+	}
+}
+
 HL_PRIM void hl_sys_exit( int code ) {
 	if( hl_setup.before_exit ) hl_setup.before_exit();
 	exit(code);
@@ -740,6 +747,7 @@ DEFINE_PRIM(_ARR, sys_args, _NO_ARG);
 DEFINE_PRIM(_I32, sys_getpid, _NO_ARG);
 DEFINE_PRIM(_BOOL, sys_check_reload, _BYTES);
 DEFINE_PRIM(_VOID, sys_profile_event, _I32 _BYTES _I32);
+DEFINE_PRIM(_VOID, sys_profile_span, _I32 _BYTES);
 DEFINE_PRIM(_VOID, sys_vtune_init, _NO_ARG);
 DEFINE_PRIM(_I32, sys_set_flags, _I32);
 DEFINE_PRIM(_BOOL, sys_has_debugger, _NO_ARG);

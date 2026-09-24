@@ -127,11 +127,7 @@ static struct {
 } stream = {0};
 
 enum { PROFILE_STREAM_SAMPLE = 1, PROFILE_STREAM_EVENT = 2 };
-#define PROFILE_EVENT_MODULE_REVISION 0x484C0001
-#define PROFILE_EVENT_THREAD_NAME 0x484C0002
-#define PROFILE_EVENT_GC_STATS 0x484C0003
-#define PROFILE_EVENT_NATIVE_SYMBOL 0x484C0004
-#define PROFILE_EVENT_ALLOCATION_SAMPLE 0x484C0005
+#include "profile_events.h"
 
 static volatile int profile_allocation_interval = 0;
 
@@ -950,6 +946,11 @@ static void profile_event( int code, vbyte *ptr, int dataLen ) {
 		break;
 	case -8:
 		hl_get_thread()->flags |= HL_THREAD_INVISIBLE;
+		break;
+	case PROFILE_EVENT_SPAN_BEGIN:
+	case PROFILE_EVENT_SPAN_END:
+		if( data.profiling_pause ) return;
+		stream_record(PROFILE_STREAM_EVENT,0,hl_sys_time(),hl_get_thread()->thread_id,code,ptr,dataLen);
 		break;
 	default:
 		if( code < 0 ) return;
