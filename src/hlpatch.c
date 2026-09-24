@@ -13,13 +13,18 @@ struct _hl_patch_code {
 	int references;
 	int function_count;
 	hl_function *functions;
+	int functions_external;
+	int debug_spans_external;
 	int jit_debug_count;
 	hl_debug_infos *jit_debug;
 	hl_source_span **debug_spans;
 	int source_snapshot_count;
 	hl_source_snapshot *source_snapshots;
+	int source_snapshots_external;
 	void *gdb_jit_entry;
 	hl_patch_code *next_retired;
+	int external_references;
+	int detached;
 };
 
 static hl_function *find_live_function( hl_module *m, int findex ) {
@@ -32,33 +37,66 @@ static int find_debug_file( hl_code *code, const char *path, int length ) {
 	return -1;
 }
 
+static bool validate_haxe_patch_debug( hl_module *m, hl_patch *patch, hl_patch_debug *debug, const char **error ) {
+	if(debug==NULL||debug->function_count!=patch->function_count||(patch->function_count>0&&debug->debug_spans==NULL)){*error="Invalid Haxe patch debug metadata";return false;}
+	if(debug->source_snapshot_count!=patch->source_snapshot_count||(debug->source_snapshot_count>0&&debug->source_snapshots==NULL)){*error="Invalid Haxe patch source snapshots";return false;}
+	for(int i=0;i<patch->function_count;i++) {
+		hl_patch_function *source=patch->functions+i;hl_source_span *expected=source->debug_spans;hl_source_span *actual=debug->debug_spans[i];
+		if((source->debug_count>0&&actual==NULL)||(source->debug_count==0&&actual!=NULL)){*error="Invalid Haxe patch debug span count";return false;}
+		for(int j=0;j<source->debug_count;j++) {
+			int file=find_debug_file(m->code,patch->debug_files[expected[j].file],patch->debug_file_lens[expected[j].file]);
+			if(file<0||actual[j].file!=file||actual[j].line!=expected[j].line||actual[j].column!=expected[j].column||actual[j].end_line!=expected[j].end_line
+				||actual[j].end_column!=expected[j].end_column||actual[j].source_hash!=expected[j].source_hash||actual[j].start!=expected[j].start
+				||actual[j].end!=expected[j].end||actual[j].flags!=expected[j].flags){*error="Invalid Haxe patch source span";return false;}
+		}
+	}
+	for(int i=0;i<patch->source_snapshot_count;i++) {
+		hl_source_snapshot *expected=patch->source_snapshots+i;hl_source_snapshot *actual=debug->source_snapshots+i;
+		if(actual->source_hash!=expected->source_hash||actual->length!=expected->length||(actual->length>0&&actual->content==NULL)
+			||(actual->length>0&&memcmp(actual->content,expected->content,actual->length)!=0)){*error="Invalid Haxe patch source snapshot";return false;}
+	}
+	return true;
+}
+
 static void patch_code_free( hl_patch_code *code ) {
 	if(!code)return;
 	if(code->gdb_jit_entry){hl_module module={0};module.gdb_jit_entry=code->gdb_jit_entry;hl_gdb_jit_unregister(&module);code->gdb_jit_entry=NULL;}
 	for(int i=0;i<code->function_count;i++) {
-		for(int j=0;j<code->functions[i].nops;j++) {
-			hl_opcode *op=code->functions[i].ops+j;
-			if(op->extra && (op->op==OCall3||op->op==OCall4||op->op==OCallN||op->op==OCallMethod||op->op==OCallThis||op->op==OCallClosure||op->op==OMakeEnum)) free(op->extra);
+		if(!code->functions_external) {
+			for(int j=0;j<code->functions[i].nops;j++) {
+				hl_opcode *op=code->functions[i].ops+j;
+				if(op->extra && (op->op==OCall3||op->op==OCall4||op->op==OCallN||op->op==OCallMethod||op->op==OCallThis||op->op==OCallClosure||op->op==OMakeEnum)) free(op->extra);
+			}
+			free(code->functions[i].regs);
+			free(code->functions[i].ops);
+			free(code->functions[i].debug);
 		}
-		free(code->functions[i].regs);
-		free(code->functions[i].ops);
-		free(code->functions[i].debug);
-		free(code->debug_spans == NULL ? NULL : code->debug_spans[i]);
+		if(!code->debug_spans_external)free(code->debug_spans == NULL ? NULL : code->debug_spans[i]);
 	}
 	for(int i=0;i<code->jit_debug_count;i++){free(code->jit_debug[i].offsets);free(code->jit_debug[i].vars);free(code->jit_debug[i].opcodes);}
 	free(code->jit_debug);
-	free(code->debug_spans);
-	for(int i=0;i<code->source_snapshot_count;i++) free(code->source_snapshots[i].content);
-	free(code->source_snapshots);
+	if(!code->debug_spans_external)free(code->debug_spans);
+	if(!code->source_snapshots_external){for(int i=0;i<code->source_snapshot_count;i++) free(code->source_snapshots[i].content);free(code->source_snapshots);}
 	if(code->code) hl_free_executable_memory(code->code,code->code_size);
-	free(code->functions);
+	if(!code->functions_external) free(code->functions);
 	free(code);
 }
 
 void hl_module_patch_release_all( hl_module *m ) {
 	if(!m||!m->patch_owners)return;
-	for(int i=0;i<m->code->nfunctions+m->code->nnatives;i++){hl_patch_code *owner=m->patch_owners[i];if(owner){m->patch_owners[i]=NULL;if(--owner->references==0)patch_code_free(owner);}}
-	while(m->retired_patch_code){hl_patch_code *owner=m->retired_patch_code;m->retired_patch_code=owner->next_retired;patch_code_free(owner);}
+	for(int i=0;i<m->code->nfunctions+m->code->nnatives;i++){hl_patch_code *owner=m->patch_owners[i];if(owner){m->patch_owners[i]=NULL;if(--owner->references==0){if(owner->external_references==0)patch_code_free(owner);else owner->detached=1;}}}
+	while(m->retired_patch_code){hl_patch_code *owner=m->retired_patch_code;m->retired_patch_code=owner->next_retired;if(owner->external_references==0)patch_code_free(owner);else owner->detached=1;}
+}
+
+h_bool hl_patch_code_release( hl_patch_code *code ) {
+	if( code == NULL || code->external_references <= 0 ) return false;
+	code->external_references--;
+	if( code->external_references == 0 && code->detached ) patch_code_free(code);
+	return true;
+}
+
+int hl_patch_code_revision( hl_patch_code *code ) {
+	return code == NULL ? -1 : code->revision;
 }
 
 int hl_module_patch_allocation_count( hl_module *m ) {
@@ -363,6 +401,11 @@ void hl_patch_free( hl_patch *patch ) {
 }
 
 hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error_msg ) {
+	if( hl_runtime_decode_guard_active() ) {
+		hl_runtime_decode_guard_note();
+		if( error_msg != NULL ) *error_msg = "Native HLP decoding is disabled for Haxe-owned runtime execution";
+		return NULL;
+	}
 	patch_reader r = { data, data + (size < 0 ? 0 : size), NULL };
 	hl_patch *patch = (hl_patch*)calloc(1,sizeof(hl_patch));
 	const unsigned char *p; int version, i, j, count, tag, section_count, section_length;
@@ -620,30 +663,91 @@ static bool stage_patch_types( hl_module *m, hl_patch *patch, uchar **strings, v
 }
 
 h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_msg ) {
-	const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;hl_code code;hl_module temp;
+	return hl_module_apply_patch_capture(m,patch,error_msg,NULL);
+}
+
+h_bool hl_module_apply_patch_capture( hl_module *m, hl_patch *patch, const char **error_msg, hl_patch_code **published_code ) {
+	return hl_module_apply_patch_capture_types(m,patch,error_msg,published_code,-1);
+}
+
+h_bool hl_module_apply_patch_capture_types( hl_module *m, hl_patch *patch, const char **error_msg, hl_patch_code **published_code, int haxe_type_count ) {
+	return hl_module_apply_patch_capture_metadata(m,patch,error_msg,published_code,haxe_type_count,NULL,-1,NULL,NULL);
+}
+
+h_bool hl_module_apply_patch_capture_metadata( hl_module *m, hl_patch *patch, const char **error_msg, hl_patch_code **published_code,
+	int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug ) {
+	const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;bool combined_pools_external=false;hl_code code;hl_module temp;
+	if( published_code != NULL ) *published_code = NULL;
 	if(!m||!patch||!m->patchable){error="Module is not patchable";goto fail;}
+	if(haxe_type_count < -1 || (haxe_type_count >= 0 && haxe_type_count != patch->type_count)){error="Haxe type count does not match patch";goto fail;}
+	if(haxe_function_count < -1 || (haxe_function_count >= 0 && (haxe_function_count != patch->function_count || haxe_functions == NULL))){error="Haxe function count does not match patch";goto fail;}
+	if(haxe_debug != NULL && haxe_function_count < 0){error="Haxe patch debug metadata requires Haxe functions";goto fail;}
 	if(patch->function_count<=0){error="Patch contains no functions";goto fail;}
 	if(m->revision!=patch->base_revision||patch->revision<=patch->base_revision){error="Stale patch revision";goto fail;}
 	if(patch->base_int_count!=m->code->nints||patch->base_float_count!=m->code->nfloats||patch->base_string_count!=m->code->nstrings||patch->base_type_count!=m->code->ntypes){error="Patch symbol base does not match module";goto fail;}
 	if(patch->int_prefix_hash!=hash_int_prefix(m->code,patch->base_int_count)||patch->float_prefix_hash!=hash_float_prefix(m->code,patch->base_float_count)||patch->string_prefix_hash!=hash_string_prefix(m->code,patch->base_string_count)||patch->type_prefix_hash!=hash_type_prefix(m,patch->base_type_count)){error="Patch symbol prefix hash does not match module";goto fail;}
-	if(!validate_patch_types(m,patch,patch->base_string_count+patch->string_count,&error))goto fail;
+	if(haxe_type_count < 0 && !validate_patch_types(m,patch,patch->base_string_count+patch->string_count,&error))goto fail;
 	for(int i=0;i<patch->function_count;i++){for(int j=0;j<i;j++)if(patch->functions[j].findex==patch->functions[i].findex){error="Duplicate stable function slot";goto fail;}if(!validate_function(m,patch,patch->functions+i,&error))goto fail;}
-	combined_ints=(int*)malloc(sizeof(int)*(patch->base_int_count+patch->int_count));if(!combined_ints){error="Out of memory applying patch";goto fail;}memcpy(combined_ints,m->code->ints,sizeof(int)*patch->base_int_count);memcpy(combined_ints+patch->base_int_count,patch->ints,sizeof(int)*patch->int_count);
-	combined_floats=(double*)malloc(sizeof(double)*(patch->base_float_count+patch->float_count));if(!combined_floats){error="Out of memory applying patch";goto fail;}memcpy(combined_floats,m->code->floats,sizeof(double)*patch->base_float_count);memcpy(combined_floats+patch->base_float_count,patch->floats,sizeof(double)*patch->float_count);
-	{int total=patch->base_string_count+patch->string_count,bytes=0,pos=0;for(int i=0;i<patch->base_string_count;i++)bytes+=m->code->strings_lens[i]+1;for(int i=0;i<patch->string_count;i++)bytes+=patch->string_lens[i]+1;combined_strings=(char**)malloc(sizeof(char*)*total);combined_string_lens=(int*)malloc(sizeof(int)*total);combined_ustrings=(uchar**)calloc(total,sizeof(uchar*));combined_string_data=(char*)malloc(bytes);if((total>0)&&(!combined_strings||!combined_string_lens||!combined_ustrings||!combined_string_data)){error="Out of memory applying patch";goto fail;}for(int i=0;i<total;i++){const char *src;int length;if(i<patch->base_string_count){src=m->code->strings[i];length=m->code->strings_lens[i];combined_ustrings[i]=(uchar*)hl_get_ustring(m->code,i);}else{src=patch->strings[i-patch->base_string_count];length=patch->string_lens[i-patch->base_string_count];int usize=hl_utf8_length((vbyte*)src,0);combined_ustrings[i]=(uchar*)malloc((usize+1)*sizeof(uchar));if(!combined_ustrings[i]){error="Out of memory applying patch";goto fail;}hl_from_utf8(combined_ustrings[i],usize,src);}combined_strings[i]=combined_string_data+pos;combined_string_lens[i]=length;memcpy(combined_string_data+pos,src,length);combined_string_data[pos+length]=0;pos+=length+1;}}
+	if(haxe_debug != NULL && !validate_haxe_patch_debug(m,patch,haxe_debug,&error))goto fail;
+	if(haxe_pools != NULL) {
+		int total_ints=patch->base_int_count+patch->int_count,total_floats=patch->base_float_count+patch->float_count,total_strings=patch->base_string_count+patch->string_count;
+		if(haxe_pools->int_count!=total_ints||haxe_pools->float_count!=total_floats||haxe_pools->string_count!=total_strings
+			|| (total_ints>0&&haxe_pools->ints==NULL) || (total_floats>0&&haxe_pools->floats==NULL)
+			|| (total_strings>0&&(haxe_pools->strings==NULL||haxe_pools->string_lens==NULL||haxe_pools->ustrings==NULL))){error="Invalid Haxe patch scalar pools";goto fail;}
+		combined_ints=haxe_pools->ints;combined_floats=haxe_pools->floats;combined_strings=haxe_pools->strings;combined_string_lens=haxe_pools->string_lens;combined_ustrings=haxe_pools->ustrings;combined_pools_external=true;
+	} else {
+		combined_ints=(int*)malloc(sizeof(int)*(patch->base_int_count+patch->int_count));if(!combined_ints){error="Out of memory applying patch";goto fail;}if(patch->base_int_count>0)memcpy(combined_ints,m->code->ints,sizeof(int)*patch->base_int_count);if(patch->int_count>0)memcpy(combined_ints+patch->base_int_count,patch->ints,sizeof(int)*patch->int_count);
+		combined_floats=(double*)malloc(sizeof(double)*(patch->base_float_count+patch->float_count));if(!combined_floats){error="Out of memory applying patch";goto fail;}if(patch->base_float_count>0)memcpy(combined_floats,m->code->floats,sizeof(double)*patch->base_float_count);if(patch->float_count>0)memcpy(combined_floats+patch->base_float_count,patch->floats,sizeof(double)*patch->float_count);
+		{int total=patch->base_string_count+patch->string_count,bytes=0,pos=0;for(int i=0;i<patch->base_string_count;i++)bytes+=m->code->strings_lens[i]+1;for(int i=0;i<patch->string_count;i++)bytes+=patch->string_lens[i]+1;combined_strings=(char**)malloc(sizeof(char*)*total);combined_string_lens=(int*)malloc(sizeof(int)*total);combined_ustrings=(uchar**)calloc(total,sizeof(uchar*));combined_string_data=(char*)malloc(bytes);if((total>0)&&(!combined_strings||!combined_string_lens||!combined_ustrings||!combined_string_data)){error="Out of memory applying patch";goto fail;}for(int i=0;i<total;i++){const char *src;int length;if(i<patch->base_string_count){src=m->code->strings[i];length=m->code->strings_lens[i];combined_ustrings[i]=(uchar*)hl_get_ustring(m->code,i);}else{src=patch->strings[i-patch->base_string_count];length=patch->string_lens[i-patch->base_string_count];int usize=hl_utf8_length((vbyte*)src,0);combined_ustrings[i]=(uchar*)malloc((usize+1)*sizeof(uchar));if(!combined_ustrings[i]){error="Out of memory applying patch";goto fail;}hl_from_utf8(combined_ustrings[i],usize,src);}combined_strings[i]=combined_string_data+pos;combined_string_lens[i]=length;memcpy(combined_string_data+pos,src,length);combined_string_data[pos+length]=0;pos+=length+1;}}
+	}
 	if(inject_patch_failure(m,1,&error))goto fail;
-	if(!stage_patch_types(m,patch,combined_ustrings,&type_allocations,&type_allocation_count,&error))goto fail;
+	if(haxe_type_count < 0 && !stage_patch_types(m,patch,combined_ustrings,&type_allocations,&type_allocation_count,&error))goto fail;
 	if(inject_patch_failure(m,2,&error))goto fail;
 	allocation=(hl_patch_code*)calloc(1,sizeof(hl_patch_code));if(!allocation){error="Out of memory applying patch";goto fail;}
 	allocation->revision=patch->revision;
 	allocation->source_snapshot_count=patch->source_snapshot_count;
-	allocation->source_snapshots=(hl_source_snapshot*)calloc(patch->source_snapshot_count,sizeof(hl_source_snapshot));
-	if(patch->source_snapshot_count&&!allocation->source_snapshots){error="Out of memory applying source snapshots";goto fail;}
-	for(int i=0;i<patch->source_snapshot_count;i++){allocation->source_snapshots[i]=patch->source_snapshots[i];allocation->source_snapshots[i].content=(unsigned char*)malloc(patch->source_snapshots[i].length);if(patch->source_snapshots[i].length&&!allocation->source_snapshots[i].content){error="Out of memory applying source snapshot";goto fail;}memcpy(allocation->source_snapshots[i].content,patch->source_snapshots[i].content,patch->source_snapshots[i].length);}
-	allocation->function_count=patch->function_count;allocation->functions=(hl_function*)calloc(patch->function_count,sizeof(hl_function));allocation->debug_spans=(hl_source_span**)calloc(patch->function_count,sizeof(hl_source_span*));
+	if(haxe_debug != NULL) {
+		allocation->source_snapshots=haxe_debug->source_snapshots;
+		allocation->source_snapshots_external=1;
+	} else {
+		allocation->source_snapshots=(hl_source_snapshot*)calloc(patch->source_snapshot_count,sizeof(hl_source_snapshot));
+		if(patch->source_snapshot_count&&!allocation->source_snapshots){error="Out of memory applying source snapshots";goto fail;}
+		for(int i=0;i<patch->source_snapshot_count;i++){allocation->source_snapshots[i]=patch->source_snapshots[i];allocation->source_snapshots[i].content=(unsigned char*)malloc(patch->source_snapshots[i].length);if(patch->source_snapshots[i].length&&!allocation->source_snapshots[i].content){error="Out of memory applying source snapshot";goto fail;}memcpy(allocation->source_snapshots[i].content,patch->source_snapshots[i].content,patch->source_snapshots[i].length);}
+	}
+	allocation->function_count=patch->function_count;
+	if(haxe_function_count >= 0) {
+		allocation->functions=haxe_functions;
+		allocation->functions_external=1;
+	} else {
+		allocation->functions=(hl_function*)calloc(patch->function_count,sizeof(hl_function));
+	}
+	if(haxe_debug != NULL) {
+		allocation->debug_spans=haxe_debug->debug_spans;
+		allocation->debug_spans_external=1;
+	} else {
+		allocation->debug_spans=(hl_source_span**)calloc(patch->function_count,sizeof(hl_source_span*));
+	}
 	offsets=(int*)calloc(patch->function_count,sizeof(int));if(!allocation->functions||!allocation->debug_spans||!offsets){error="Out of memory applying patch";goto fail;}
-	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;hl_function *live;dst->type=m->code->types+src->type;dst->findex=src->findex;live=find_live_function(m,dst->findex);if(live){dst->obj=live->obj;dst->field=live->field;dst->ref=live->ref;}dst->nregs=src->register_count;dst->nops=src->instruction_count;dst->regs=(hl_type**)calloc(dst->nregs,sizeof(hl_type*));dst->ops=(hl_opcode*)calloc(dst->nops,sizeof(hl_opcode));if(!dst->regs||!dst->ops){error="Out of memory applying patch";goto fail;}for(int j=0;j<dst->nregs;j++)dst->regs[j]=m->code->types+src->registers[j];for(int j=0;j<dst->nops;j++){hl_patch_instruction *s=src->instructions+j;hl_opcode *d=dst->ops+j;d->op=(hl_op)s->opcode;if(s->operand_count>0)d->p1=s->operands[0];if(s->operand_count>1)d->p2=s->operands[1];if(s->operand_count>2)d->p3=s->operands[2];if(s->operand_count==4&&d->op!=OCallN&&d->op!=OCallMethod&&d->op!=OCallThis&&d->op!=OCallClosure&&d->op!=OMakeEnum)d->extra=(int*)(int_val)s->operands[3];if(s->operand_count>3&&(d->op==OCall3||d->op==OCall4||d->op==OCallN||d->op==OCallMethod||d->op==OCallThis||d->op==OCallClosure||d->op==OMakeEnum)){int count=d->op==OCall3?2:d->op==OCall4?3:s->operand_count-3;d->extra=(int*)malloc(sizeof(int)*count);if(!d->extra){error="Out of memory applying patch";goto fail;}memcpy(d->extra,s->operands+3,sizeof(int)*count);}}}
-	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;if(src->debug_count){dst->debug=(int*)calloc(src->debug_count*2,sizeof(int));allocation->debug_spans[i]=(hl_source_span*)calloc(src->debug_count,sizeof(hl_source_span));if(!dst->debug||!allocation->debug_spans[i]){error="Out of memory applying patch debug metadata";goto fail;}for(int j=0;j<src->debug_count;j++){hl_source_span span=src->debug_spans[j];int file=find_debug_file(m->code,patch->debug_files[span.file],patch->debug_file_lens[span.file]);if(file<0){error="Patch debug file is not present in module";goto fail;}span.file=file;dst->debug[j*2]=file;dst->debug[j*2+1]=span.line;allocation->debug_spans[i][j]=span;}}}
+	if(haxe_function_count < 0) {
+		for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;hl_function *live;dst->type=m->code->types+src->type;dst->findex=src->findex;live=find_live_function(m,dst->findex);if(live){dst->obj=live->obj;dst->field=live->field;dst->ref=live->ref;}dst->nregs=src->register_count;dst->nops=src->instruction_count;dst->regs=(hl_type**)calloc(dst->nregs,sizeof(hl_type*));dst->ops=(hl_opcode*)calloc(dst->nops,sizeof(hl_opcode));if(!dst->regs||!dst->ops){error="Out of memory applying patch";goto fail;}for(int j=0;j<dst->nregs;j++)dst->regs[j]=m->code->types+src->registers[j];for(int j=0;j<dst->nops;j++){hl_patch_instruction *s=src->instructions+j;hl_opcode *d=dst->ops+j;d->op=(hl_op)s->opcode;if(s->operand_count>0)d->p1=s->operands[0];if(s->operand_count>1)d->p2=s->operands[1];if(s->operand_count>2)d->p3=s->operands[2];if(s->operand_count==4&&d->op!=OCallN&&d->op!=OCallMethod&&d->op!=OCallThis&&d->op!=OCallClosure&&d->op!=OMakeEnum)d->extra=(int*)(int_val)s->operands[3];if(s->operand_count>3&&(d->op==OCall3||d->op==OCall4||d->op==OCallN||d->op==OCallMethod||d->op==OCallThis||d->op==OCallClosure||d->op==OMakeEnum)){int count=d->op==OCall3?2:d->op==OCall4?3:s->operand_count-3;d->extra=(int*)malloc(sizeof(int)*count);if(!d->extra){error="Out of memory applying patch";goto fail;}memcpy(d->extra,s->operands+3,sizeof(int)*count);}}}
+	} else {
+		for(int i=0;i<patch->function_count;i++) {
+			hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;hl_function *live=find_live_function(m,src->findex);
+			if(dst->findex!=src->findex||dst->type!=m->code->types+src->type||dst->nregs!=src->register_count||dst->nops!=src->instruction_count||dst->regs==NULL||dst->ops==NULL){error="Invalid Haxe patch function metadata";goto fail;}
+			if(live){dst->obj=live->obj;dst->field=live->field;dst->ref=live->ref;}
+		}
+	}
+	for(int i=0;i<patch->function_count;i++){
+		hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;
+		if(src->debug_count){
+			if(!allocation->functions_external){
+				dst->debug=(int*)calloc(src->debug_count*2,sizeof(int));
+				allocation->debug_spans[i]=(hl_source_span*)calloc(src->debug_count,sizeof(hl_source_span));
+				if(!dst->debug||!allocation->debug_spans[i]){error="Out of memory applying patch debug metadata";goto fail;}
+				for(int j=0;j<src->debug_count;j++){hl_source_span span=src->debug_spans[j];int file=find_debug_file(m->code,patch->debug_files[span.file],patch->debug_file_lens[span.file]);if(file<0){error="Patch debug file is not present in module";goto fail;}span.file=file;dst->debug[j*2]=file;dst->debug[j*2+1]=span.line;allocation->debug_spans[i][j]=span;}
+			} else if(dst->debug==NULL||allocation->debug_spans[i]==NULL){error="Haxe patch function debug metadata is missing";goto fail;}
+		}
+	}
 	combined_functions=(hl_function*)calloc(m->code->nfunctions,sizeof(hl_function));
 	if(!combined_functions){error="Out of memory applying patch";goto fail;}
 	memcpy(combined_functions,m->code->functions,sizeof(hl_function)*m->code->nfunctions);
@@ -662,21 +766,29 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	if(type_allocation_count){int needed=m->patch_type_allocation_count+type_allocation_count;if(needed>m->patch_type_allocation_capacity){int capacity=needed<16?16:needed*2;void **owners=(void**)realloc(m->patch_type_allocations,sizeof(void*)*capacity);if(!owners){error="Out of memory publishing patch types";goto fail;}m->patch_type_allocations=owners;m->patch_type_allocation_capacity=capacity;}}
 	for(int i=0;i<type_allocation_count;i++)m->patch_type_allocations[m->patch_type_allocation_count++]=type_allocations[i];
 	free(type_allocations);type_allocations=NULL;type_allocation_count=0;for(int i=m->code->ntypes;i<code.ntypes;i++)m->code->types[i].gc_owner=m;m->code->ntypes=code.ntypes;
-	for(int i=0;i<patch->function_count;i++){int slot=allocation->functions[i].findex;hl_patch_code *old=m->patch_owners[slot];void *target=(unsigned char*)allocation->code+offsets[i];if(m->patch_targets){if(old==NULL)hl_jit_patch_method(m->patch_targets[slot],m->patch_targets+slot);m->patch_targets[slot]=target;}else{hl_jit_patch_method(m->functions_ptrs[slot],m->functions_ptrs+slot);m->functions_ptrs[slot]=target;}m->patch_owners[slot]=allocation;allocation->references++;if(old&&--old->references==0){if(m->patch_targets)patch_code_free(old);else{old->next_retired=m->retired_patch_code;m->retired_patch_code=old;}}}
-	if(m->patch_ustrings==NULL)m->patch_initial_string_count=patch->base_string_count;
-	free(m->patch_ints);free(m->patch_floats);free(m->patch_strings);free(m->patch_string_lens);free(m->patch_ustrings);free(m->patch_string_data);
-	m->patch_ints=combined_ints;m->patch_floats=combined_floats;m->patch_strings=combined_strings;m->patch_string_lens=combined_string_lens;m->patch_ustrings=combined_ustrings;m->patch_string_data=combined_string_data;
+	for(int i=0;i<patch->function_count;i++){int slot=allocation->functions[i].findex;hl_patch_code *old=m->patch_owners[slot];void *target=(unsigned char*)allocation->code+offsets[i];if(m->patch_targets){if(old==NULL)hl_jit_patch_method(m->patch_targets[slot],m->patch_targets+slot);m->patch_targets[slot]=target;}else{hl_jit_patch_method(m->functions_ptrs[slot],m->functions_ptrs+slot);m->functions_ptrs[slot]=target;}m->patch_owners[slot]=allocation;allocation->references++;if(old&&--old->references==0){if(m->patch_targets){if(old->external_references==0)patch_code_free(old);else old->detached=1;}else{old->next_retired=m->retired_patch_code;m->retired_patch_code=old;}}}
+	if(haxe_pools != NULL) {
+		if(m->patch_ustrings)for(int i=m->patch_initial_string_count;i<m->code->nstrings;i++)free(m->patch_ustrings[i]);
+		free(m->patch_ints);free(m->patch_floats);free(m->patch_strings);free(m->patch_string_lens);free(m->patch_ustrings);free(m->patch_string_data);
+		m->patch_ints=NULL;m->patch_floats=NULL;m->patch_strings=NULL;m->patch_string_lens=NULL;m->patch_ustrings=NULL;m->patch_string_data=NULL;
+	} else {
+		if(m->patch_ustrings==NULL)m->patch_initial_string_count=patch->base_string_count;
+		free(m->patch_ints);free(m->patch_floats);free(m->patch_strings);free(m->patch_string_lens);free(m->patch_ustrings);free(m->patch_string_data);
+		m->patch_ints=combined_ints;m->patch_floats=combined_floats;m->patch_strings=combined_strings;m->patch_string_lens=combined_string_lens;m->patch_ustrings=combined_ustrings;m->patch_string_data=combined_string_data;
+	}
 	m->code->ints=combined_ints;m->code->nints=code.nints;m->code->floats=combined_floats;m->code->nfloats=code.nfloats;m->code->strings=combined_strings;m->code->strings_lens=combined_string_lens;m->code->ustrings=combined_ustrings;m->code->nstrings=code.nstrings;
 	combined_ints=NULL;combined_floats=NULL;combined_strings=NULL;combined_string_lens=NULL;combined_ustrings=NULL;combined_string_data=NULL;
-	m->revision=patch->revision;m->patch_jit_count+=patch->function_count;free(offsets);if(error_msg)*error_msg=NULL;return true;
+	m->revision=patch->revision;m->patch_jit_count+=patch->function_count;if(published_code!=NULL){allocation->external_references++;*published_code=allocation;}free(offsets);if(error_msg)*error_msg=NULL;return true;
 fail:
 	if(jit) hl_jit_free(jit,false);
 	free(combined_functions);
 	free(offsets);
-	free(combined_ints);
-	free(combined_floats);free(combined_strings);free(combined_string_lens);if(combined_ustrings)for(int i=patch->base_string_count;i<patch->base_string_count+patch->string_count;i++)free(combined_ustrings[i]);free(combined_ustrings);free(combined_string_data);
+	if(!combined_pools_external) {
+		free(combined_ints);
+		free(combined_floats);free(combined_strings);free(combined_string_lens);if(combined_ustrings)for(int i=patch->base_string_count;i<patch->base_string_count+patch->string_count;i++)free(combined_ustrings[i]);free(combined_ustrings);free(combined_string_data);
+	}
 	for(int i=0;i<type_allocation_count;i++)free(type_allocations[i]);
-	free(type_allocations);if(m&&patch&&m->code&&patch->base_type_count<=m->code->types_capacity&&patch->type_count<=m->code->types_capacity-patch->base_type_count)memset(m->code->types+patch->base_type_count,0,sizeof(hl_type)*patch->type_count);
+	free(type_allocations);if(haxe_type_count < 0 && m&&patch&&m->code&&patch->base_type_count<=m->code->types_capacity&&patch->type_count<=m->code->types_capacity-patch->base_type_count)memset(m->code->types+patch->base_type_count,0,sizeof(hl_type)*patch->type_count);
 	patch_code_free(allocation);
 	if(error_msg) *error_msg=error?error:"Invalid patch";
 	return false;

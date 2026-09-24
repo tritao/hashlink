@@ -136,6 +136,18 @@ typedef struct {
 	int *operands;
 } hl_patch_instruction;
 
+/** C-layout scalar pools prepared by Haxe for one cumulative patch state. */
+typedef struct {
+	int int_count;
+	int float_count;
+	int string_count;
+	int *ints;
+	double *floats;
+	char **strings;
+	int *string_lens;
+	uchar **ustrings;
+} hl_patch_pools;
+
 typedef struct {
 	int file, line, column, end_line, end_column;
 	int source_hash;
@@ -147,6 +159,14 @@ typedef struct {
 	int length;
 	unsigned char *content;
 } hl_source_snapshot;
+
+/** C-layout patch debug metadata prepared by Haxe for one cumulative patch state. */
+typedef struct {
+	int function_count;
+	hl_source_span **debug_spans;
+	int source_snapshot_count;
+	hl_source_snapshot *source_snapshots;
+} hl_patch_debug;
 
 typedef struct {
 	int tag;
@@ -202,6 +222,33 @@ typedef struct {
 	int source_snapshot_count;
 	hl_source_snapshot *source_snapshots;
 } hl_patch;
+
+/** Haxe-owned decoded patch model passed directly to the native JIT boundary. */
+typedef struct {
+	unsigned char *module_id;
+	int base_revision;
+	int revision;
+	unsigned int int_prefix_hash, float_prefix_hash, string_prefix_hash, type_prefix_hash;
+	int base_int_count;
+	int int_count;
+	int *ints;
+	int float_count;
+	int base_float_count;
+	double *floats;
+	int string_count;
+	int base_string_count;
+	char **strings;
+	int *string_lens;
+	int type_count;
+	int base_type_count;
+	int function_count;
+	hl_patch_function *functions;
+	int debug_file_count;
+	char **debug_files;
+	int *debug_file_lens;
+	int source_snapshot_count;
+	hl_source_snapshot *source_snapshots;
+} hl_patch_input;
 
 HL_EXTERN_C HL_EXPORT hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error_msg );
 HL_EXTERN_C HL_EXPORT void hl_patch_free( hl_patch *patch );
@@ -287,6 +334,12 @@ typedef struct {
 
 HL_EXTERN_C HL_EXPORT hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg );
 
+/** Reject native HLB/HLP decoding while a Haxe-owned runtime operation is active. */
+HL_EXTERN_C HL_EXPORT void hl_runtime_decode_guard_begin( void );
+HL_EXTERN_C HL_EXPORT int hl_runtime_decode_guard_end( void );
+HL_EXTERN_C HL_EXPORT bool hl_runtime_decode_guard_active( void );
+HL_EXTERN_C HL_EXPORT void hl_runtime_decode_guard_note( void );
+
 hl_code_hash *hl_code_hash_alloc( hl_code *c );
 void hl_code_hash_finalize( hl_code_hash *h );
 void hl_code_hash_free( hl_code_hash *h );
@@ -311,18 +364,34 @@ typedef unsigned char h_bool;
 #define HL_MODULE_DUMP 2
 #define HL_MODULE_DEBUG 4
 #define HL_MODULE_PATCHABLE 8
+/** The type graph and derived enum/virtual metadata were prepared by Haxeon. */
+#define HL_MODULE_HAXE_METADATA 16
 
 extern int hl_jit_trampoline;
 void hl_jit_tag_callback( void *native );
 
 HL_EXTERN_C HL_EXPORT hl_module *hl_module_alloc( hl_code *code );
 HL_EXTERN_C HL_EXPORT int hl_module_init( hl_module *m, int flags );
+/** Materialize one Haxe-owned constant after module initialization. */
+HL_EXTERN_C HL_EXPORT h_bool hl_module_init_constant( hl_module *m, int index );
 h_bool hl_module_patch( hl_module *m, hl_code *code );
 /** Atomically redirect compatible function indices to an initialized generation. */
 HL_EXTERN_C HL_EXPORT h_bool hl_module_patch_slots( hl_module *target, hl_module *generation, const int *indices, int count );
 /** Validate and redirect every bytecode function to a complete generation. */
 HL_EXTERN_C HL_EXPORT h_bool hl_module_patch_generation( hl_module *target, hl_module *generation );
 HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch( hl_module *module, hl_patch *patch, const char **error_msg );
+/** Apply a patch and retain the newly published JIT allocation for an external owner. */
+HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch_capture( hl_module *module, hl_patch *patch, const char **error_msg, hl_patch_code **published_code );
+/** Apply a patch whose compatible appended type records were prepared by Haxeon. */
+HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch_capture_types( hl_module *module, hl_patch *patch, const char **error_msg,
+	hl_patch_code **published_code, int haxe_type_count );
+/** Apply a patch using Haxe-owned type records and patched function descriptors. */
+HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch_capture_metadata( hl_module *module, hl_patch *patch, const char **error_msg,
+	hl_patch_code **published_code, int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug );
+/** Release one external owner of a published hot-reload JIT allocation. */
+HL_EXTERN_C HL_EXPORT h_bool hl_patch_code_release( hl_patch_code *code );
+/** Read the immutable revision carried by a retained JIT allocation. */
+HL_EXTERN_C HL_EXPORT int hl_patch_code_revision( hl_patch_code *code );
 HL_EXTERN_C HL_EXPORT int hl_module_patch_allocation_count( hl_module *module );
 HL_EXTERN_C HL_EXPORT int hl_module_patch_retired_allocation_count( hl_module *module );
 /** Resolve a program counter owned by a live or retained hot-reload JIT block. */
@@ -388,16 +457,51 @@ typedef enum {
 	HL_RUNTIME_BAD_FUNCTION, HL_RUNTIME_EXCEPTION, HL_RUNTIME_RETIRE_BLOCKED
 } hl_runtime_status;
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out );
+/** Initialize a runtime wrapper from externally owned Haxe metadata. The caller owns code. */
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load_code( hl_code *code, const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out );
+/**
+ * Initialize a runtime wrapper from externally owned Haxe metadata and an already decoded manifest.
+ * The stable_ids and slots arrays are borrowed until the runtime wrapper is released.
+ * The optional bytes payload is retained only for legacy debugger metadata; a
+ * Haxe-owned execution module may pass NULL and zero length.
+ */
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load_haxe_metadata( hl_code *code, const unsigned char *bytes, int length, const unsigned char *module_id,
+	int module_id_length, int revision, const int *stable_ids, const int *slots, int identity_count, int initializer_slot, hl_runtime_module **out );
+/** Materialize one Haxe-owned constant through an external runtime wrapper. */
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_initialize_constant( hl_runtime_module *runtime, int index );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int stable_id, int *result, vdynamic **exception );
+/** Haxe-resolved dispatch-slot call entrypoints; native code retains ABI checks. */
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32_slot( hl_runtime_module *runtime, int slot, int *result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_void( hl_runtime_module *runtime, int stable_id, vdynamic **exception );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_void_slot( hl_runtime_module *runtime, int slot, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_bytes( hl_runtime_module *runtime, int stable_id, vbyte **result, vdynamic **exception );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_bytes_slot( hl_runtime_module *runtime, int slot, vbyte **result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_bytes1( hl_runtime_module *runtime, int stable_id, vbyte *argument, vdynamic **exception );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_bytes1_slot( hl_runtime_module *runtime, int slot, vbyte *argument, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_closure( hl_runtime_module *runtime, int stable_id, vclosure **result, vdynamic **exception );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_closure_slot( hl_runtime_module *runtime, int slot, vclosure **result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_retained_closure_i32( hl_runtime_module *runtime, vclosure *closure, int *result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_object( hl_runtime_module *runtime, int stable_id, vdynamic **result, vdynamic **exception );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_object_slot( hl_runtime_module *runtime, int slot, vdynamic **result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32_object( hl_runtime_module *runtime, int stable_id, vdynamic *argument, int *result, vdynamic **exception );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32_object_slot( hl_runtime_module *runtime, int slot, vdynamic *argument, int *result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_validate_call( hl_runtime_module *runtime, int stable_id, int shape );
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_validate_call_slot( hl_runtime_module *runtime, int slot, int shape );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const unsigned char *bytes, int length );
+/** Apply an HLP and retain its published JIT allocation for an external owner. */
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp_capture( hl_runtime_module *runtime, const unsigned char *bytes, int length, hl_patch_code **published_code );
+/** Apply an HLP whose compatible appended type records were prepared by Haxeon. */
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp_capture_types( hl_runtime_module *runtime, const unsigned char *bytes, int length,
+	int haxe_type_count, hl_patch_code **published_code );
+/** Apply an HLP using Haxe-owned type records and patched function descriptors. */
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp_capture_metadata( hl_runtime_module *runtime, const unsigned char *bytes, int length,
+	int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug, hl_patch_code **published_code );
+/** Apply a Haxe-decoded patch model without reparsing its HLP wire bytes. */
+HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_haxe_patch( hl_runtime_module *runtime, hl_patch_input *input,
+	int haxe_type_count, hl_function *haxe_functions, int haxe_function_count, hl_patch_pools *haxe_pools, hl_patch_debug *haxe_debug,
+	hl_patch_code **published_code );
+/** Resolve one already validated native dispatch slot to its JIT source location. */
+HL_EXTERN_C HL_EXPORT const char *hl_runtime_module_resolve_jit_location_slot( hl_runtime_module *runtime, int slot );
 HL_EXTERN_C HL_EXPORT const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_debug_region_count( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_hlp_summary( const unsigned char *bytes, int length, int *base_revision, int *revision, int *function_count );
@@ -409,6 +513,8 @@ HL_EXTERN_C HL_EXPORT int hl_runtime_module_type_count( hl_runtime_module *runti
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_type_capacity( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_live_allocation_count( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_native_root_count( hl_runtime_module *runtime );
+/** Return the optional raw HLB size retained for legacy debugger MAP support. */
+HL_EXTERN_C HL_EXPORT int hl_runtime_module_debug_hlb_size( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT void hl_runtime_module_retirement_status_get( hl_runtime_module *runtime, hl_module_retirement_status *out );
 /** Test hook: fail the next patch at a staging boundary (1..3), or disable with 0. */
 HL_EXTERN_C HL_EXPORT void hl_runtime_module_set_patch_failure_stage( hl_runtime_module *runtime, int stage );

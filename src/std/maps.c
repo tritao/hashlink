@@ -46,7 +46,8 @@ typedef struct {
 
 static void hl_freelist_resize( hl_free_list *f, int newsize ) {
 	hl_free_bucket *buckets = (hl_free_bucket*)hl_gc_alloc_noptr(sizeof(hl_free_bucket)*newsize);
-	memcpy(buckets,f->buckets,f->head * sizeof(hl_free_bucket));
+	if( f->head > 0 )
+		memcpy(buckets,f->buckets,f->head * sizeof(hl_free_bucket));
 	f->buckets = buckets;
 	f->nbuckets = newsize;
 }

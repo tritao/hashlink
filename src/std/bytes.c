@@ -27,16 +27,18 @@ HL_PRIM vbyte *hl_alloc_bytes( int size ) {
 
 HL_PRIM vbyte *hl_copy_bytes( const vbyte *ptr, int size ) {
 	vbyte *b = hl_alloc_bytes(size);
-	memcpy(b,ptr,size);
+	if( size > 0 )
+		memcpy(b,ptr,size);
 	return b;
 }
 
 HL_PRIM void hl_bytes_blit( char *dst, int dpos, char *src, int spos, int len ) {
-	memmove(dst + dpos,src+spos,len);
+	if( len > 0 )
+		memmove(dst + dpos,src+spos,len);
 }
 
 HL_PRIM int hl_bytes_compare( vbyte *a, int apos, vbyte *b, int bpos, int len ) {
-	return memcmp(a+apos,b+bpos,len);
+	return len > 0 ? memcmp(a+apos,b+bpos,len) : 0;
 }
 
 HL_PRIM int hl_bytes_compare16( vbyte *a, vbyte *b, int len ) {
@@ -143,7 +145,8 @@ HL_PRIM int hl_bytes_rfind( vbyte *where, int len, vbyte *which, int wlen ) {
 }
 
 HL_PRIM void hl_bytes_fill( vbyte *bytes, int pos, int len, int value ) {
-	memset(bytes+pos,value,len);
+	if( len > 0 )
+		memset(bytes+pos,value,len);
 }
 
 
@@ -277,7 +280,7 @@ HL_PRIM vbyte *hl_bytes_from_address64( int_val v ) {
 }
 
 HL_PRIM int hl_string_compare( vbyte *a, vbyte *b, int len ) {
-	return memcmp(a,b,len * sizeof(uchar));
+	return len > 0 ? memcmp(a,b,len * sizeof(uchar)) : 0;
 }
 
 HL_PRIM int hl_string_compare_full( vbyte *a, vbyte *b ) {

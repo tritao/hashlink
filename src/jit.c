@@ -108,7 +108,8 @@ static bool jit_code_reserve( jit_ctx *ctx, int size ) {
 		while( pos + ctx->code_size > nsize ) nsize *= 3;
 		unsigned char *nout = malloc(nsize);
 		if( !nout ) return false;
-		memcpy(nout,ctx->output,pos);
+		if( pos > 0 )
+			memcpy(nout,ctx->output,pos);
 		free(ctx->output);
 		ctx->output = nout;
 		ctx->out_max = nsize;
@@ -120,7 +121,8 @@ static bool jit_code_append( jit_ctx *ctx ) {
 	if( !jit_code_reserve(ctx,ctx->code_size) )
 		return false;
 	int pos = ctx->out_pos;
-	memcpy(ctx->output + pos, ctx->code_instrs, ctx->code_size);
+	if( ctx->code_size > 0 )
+		memcpy(ctx->output + pos, ctx->code_instrs, ctx->code_size);
 	ctx->out_pos += ctx->code_size;
 	return true;
 }
@@ -205,7 +207,8 @@ int hl_jit_function( jit_ctx *ctx, hl_module *m, hl_function *f ) {
 			ctx->regs_track[(i<<2)|1] = ctx->code_pos_map[ctx->regs_track[(i<<2)|1] + 1];
 			ctx->regs_track[(i<<2)|2] = ctx->code_pos_map[ctx->regs_track[(i<<2)|2]];
 		}
-		memcpy(dbg->vars,ctx->regs_track,dbg->vars_size);
+		if( dbg->vars_size > 0 )
+			memcpy(dbg->vars,ctx->regs_track,dbg->vars_size);
 	}
 	if( !jit_code_append(ctx) )
 		return -1;

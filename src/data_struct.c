@@ -57,11 +57,13 @@ INLINE static void S_NAME(check_size)( hl_alloc *alloc, S_TYPE *st ) {
 	if( st->cur == st->max ) {
 		int n = st->max ? (st->max << 1) : STRUCT_DEF_SIZE;
 		S_KEY *keys = (S_KEY*)hl_malloc(alloc,sizeof(S_KEY) * n);
-		memcpy(keys,st->keys,sizeof(S_KEY) * st->cur);
+		if( st->cur > 0 )
+			memcpy(keys,st->keys,sizeof(S_KEY) * st->cur);
 		st->keys = keys;
 #		ifdef S_MAP
 		S_VALUE *vals = (S_VALUE*)hl_malloc(alloc,sizeof(S_VALUE) * n);
-		memcpy(vals,st->values,sizeof(S_VALUE) * st->cur);
+		if( st->cur > 0 )
+			memcpy(vals,st->values,sizeof(S_VALUE) * st->cur);
 		st->values = vals;
 #		endif
 		st->max = n;
@@ -121,7 +123,8 @@ static S_VALUE *S_NAME(reserve_impl)( hl_alloc *alloc, S_TYPE *st, int count ) {
 		int n = st->max ? (st->max << 1) : STRUCT_DEF_SIZE;
 		while( n < st->cur + count ) n <<= 1;
 		S_KEY *keys = (S_KEY*)hl_malloc(alloc,sizeof(S_KEY) * n);
-		memcpy(keys,st->keys,sizeof(S_KEY) * st->cur);
+		if( st->cur > 0 )
+			memcpy(keys,st->keys,sizeof(S_KEY) * st->cur);
 		st->keys = keys;
 		st->max = n;
 	}

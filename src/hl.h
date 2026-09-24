@@ -166,6 +166,11 @@
 #	include <sanitizer/asan_interface.h>
 #	define ASAN_JIT_STACK(ptr,size)	__asan_unpoison_memory_region(ptr,size)
 #	define ASAN_DISABLE				__declspec(no_sanitize_address)
+#	define HL_ASAN_ENABLED
+#elif defined(__SANITIZE_ADDRESS__) || defined(__ADDRESS_SANITIZER__)
+#	define ASAN_JIT_STACK(ptr,size)
+#	define ASAN_DISABLE __attribute__((no_sanitize_address))
+#	define HL_ASAN_ENABLED
 #else
 #	define ASAN_JIT_STACK(ptr,size)
 #	define ASAN_DISABLE
@@ -824,6 +829,14 @@ HL_API int hl_gc_owner_live_count( void *owner );
 HL_API void hl_add_root( void *ptr );
 HL_API void hl_add_root_owner( void *ptr, void *owner );
 HL_API void hl_remove_root( void *ptr );
+/** Read one registered root slot while excluding a concurrent collection. */
+HL_API void *hl_root_get( void *ptr );
+/** Update one registered root slot while excluding a concurrent collection. */
+HL_API void hl_root_set( void *ptr, void *value );
+HL_API void hl_add_weak_root( void *ptr );
+HL_API void hl_remove_weak_root( void *ptr );
+HL_API void *hl_weak_root_get( void *ptr );
+HL_API void hl_weak_root_set( void *ptr, void *value );
 HL_API int hl_gc_owner_root_count( void *owner );
 HL_API void hl_gc_major( void );
 HL_API bool hl_is_gc_ptr( void *ptr );

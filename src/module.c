@@ -25,6 +25,8 @@
 #include <jit.h>
 #include "jit_gdb.h"
 
+HL_API void *hl_atomic_store_ptr( void **address, void *value );
+
 #ifdef HL_WIN
 #	undef _GUID
 #	include <windows.h>
@@ -302,7 +304,7 @@ static uchar *module_resolve_symbol( void *addr, uchar *out, int *outSize ) {
 	return hl_module_resolve_symbol_full(addr,out,outSize,NULL);
 }
 
-int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out, int size ) {
+ASAN_DISABLE int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out, int size ) {
 #if defined(HL_64) && defined(HL_WIN)
 #else
 	void *stack_bottom = stack_ptr;
@@ -377,7 +379,7 @@ int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out
 	return count;
 }
 
-static int module_capture_stack( void **stack, int size ) {
+ASAN_DISABLE static int module_capture_stack( void **stack, int size ) {
 #ifdef WIN64_UNWIND_TABLES
 	CONTEXT context;
 	int module_count;
@@ -703,7 +705,7 @@ static void disabled_primitive() {
 	hl_error("This library primitive has been disabled");
 }
 
-static void hl_module_init_indexes( hl_module *m ) {
+static void hl_module_init_indexes( hl_module *m, bool haxe_metadata ) {
 	int i;
 	for(i=0;i<m->code->nfunctions;i++) {
 		hl_function *f = m->code->functions + i;
@@ -722,7 +724,7 @@ static void hl_module_init_indexes( hl_module *m ) {
 		case HSTRUCT:
 			t->obj->m = &m->ctx;
 			t->obj->global_value = ((int)(int_val)t->obj->global_value) ? (void**)(int_val)(m->globals_data + m->globals_indexes[(int)(int_val)t->obj->global_value-1]) : NULL;
-			{
+			if( !haxe_metadata ) {
 				int j;
 				for(j=0;j<t->obj->nproto;j++) {
 					hl_obj_proto *p = t->obj->proto + j;
@@ -750,51 +752,55 @@ static void hl_module_init_indexes( hl_module *m ) {
 			}
 			break;
 		case HENUM:
-			hl_init_enum(t,&m->ctx);
+			if( !haxe_metadata ) hl_init_enum(t,&m->ctx);
 			t->tenum->global_value = ((int)(int_val)t->tenum->global_value) ? (void**)(int_val)(m->globals_data + m->globals_indexes[(int)(int_val)t->tenum->global_value-1]) : NULL;
 			break;
 		case HVIRTUAL:
-			hl_init_virtual(t,&m->ctx);
+			if( !haxe_metadata ) hl_init_virtual(t,&m->ctx);
 			break;
 		default:
 			break;
 		}
 	}
-	for(i=0;i<m->code->nfunctions;i++) {
-		int k;
-		hl_function *f = m->code->functions + i;
-		hl_function *real_f = f;
-		while( real_f && !real_f->obj ) real_f = real_f->field.ref;
-		if( real_f == NULL ) continue;
-		for(k=0;k<f->nops;k++) {
-			hl_opcode *op = f->ops + k;
-			switch( op->op ) {
-			case OCall0:
-			case OCall1:
-			case OCall2:
-			case OCall3:
-			case OCall4:
-			case OCallN:
-			case OStaticClosure:
-			case OInstanceClosure:
-				if( m->functions_indexes[op->p2] < m->code->nfunctions ) {
-					hl_function *floc = m->code->functions + m->functions_indexes[op->p2];
-					if( floc->obj ) continue;
-					floc->field.ref = real_f;
-					floc->ref = real_f->ref++;
+	if( !haxe_metadata ) {
+		for(i=0;i<m->code->nfunctions;i++) {
+			int k;
+			hl_function *f = m->code->functions + i;
+			hl_function *real_f = f;
+			while( real_f && !real_f->obj ) real_f = real_f->field.ref;
+			if( real_f == NULL ) continue;
+			for(k=0;k<f->nops;k++) {
+				hl_opcode *op = f->ops + k;
+				switch( op->op ) {
+				case OCall0:
+				case OCall1:
+				case OCall2:
+				case OCall3:
+				case OCall4:
+				case OCallN:
+				case OStaticClosure:
+				case OInstanceClosure:
+					if( m->functions_indexes[op->p2] < m->code->nfunctions ) {
+						hl_function *floc = m->code->functions + m->functions_indexes[op->p2];
+						if( floc->obj ) continue;
+						floc->field.ref = real_f;
+						floc->ref = real_f->ref++;
+					}
+					break;
+				default:
+					break;
 				}
-				break;
-			default:
-				break;
 			}
 		}
 	}
 
-	static hl_type_obj obj_entry = {0};
-	hl_function *fent = m->code->functions + m->functions_indexes[m->code->entrypoint];
-	obj_entry.name = USTR("");
-	fent->obj = &obj_entry;
-	fent->field.name = USTR("init");
+	if( !haxe_metadata ) {
+		static hl_type_obj obj_entry = {0};
+		hl_function *fent = m->code->functions + m->functions_indexes[m->code->entrypoint];
+		obj_entry.name = USTR("");
+		fent->obj = &obj_entry;
+		fent->field.name = USTR("init");
+	}
 }
 
 #ifdef HL_VTUNE
@@ -926,7 +932,7 @@ static void hl_module_init_natives( hl_module *m ) {
 	}
 }
 
-static void hl_module_init_constant( hl_module *m, hl_constant *c ) {
+static void hl_module_init_constant_value( hl_module *m, hl_constant *c ) {
 	hl_type *t = m->code->globals[c->global];
 	hl_runtime_obj *rt;
 	vdynamic **global = (vdynamic**)(m->globals_data + m->globals_indexes[c->global]);
@@ -970,12 +976,19 @@ static void hl_module_init_constant( hl_module *m, hl_constant *c ) {
 	hl_remove_root(global);
 }
 
+h_bool hl_module_init_constant( hl_module *m, int index ) {
+	if( m == NULL || m->code == NULL || index < 0 || index >= m->code->nconstants ) return false;
+	hl_module_init_constant_value(m,m->code->constants + index);
+	return true;
+}
+
 static void hl_module_add( hl_module *m ) {
 	module_registry_init();
 	hl_mutex_acquire(modules_lock);
 	hl_module **old_modules = cur_modules;
 	hl_module **new_modules = (hl_module**)malloc(sizeof(void*)*(modules_count + 1));
-	memcpy(new_modules, old_modules, sizeof(void*)*modules_count);
+	if( modules_count > 0 )
+		memcpy(new_modules, old_modules, sizeof(void*)*modules_count);
 	new_modules[modules_count] = m;
 	m->diagnostics_id = next_diagnostics_id++;
 	cur_modules = new_modules;
@@ -1012,7 +1025,7 @@ int hl_module_init( hl_module *m, int flags ) {
 	// inits
 	if( hot_reload ) m->hash = hl_code_hash_alloc(m->code);
 	hl_module_init_natives(m);
-	hl_module_init_indexes(m);
+	hl_module_init_indexes(m,(flags & HL_MODULE_HAXE_METADATA) != 0);
 #	ifdef WIN64_UNWIND_TABLES
 	m->unwind_table_size = m->code->nfunctions + 10; // extra space for jit internals
 	m->unwind_table = malloc(sizeof(RUNTIME_FUNCTION) * m->unwind_table_size);
@@ -1042,11 +1055,11 @@ int hl_module_init( hl_module *m, int flags ) {
 		m->functions_ptrs[f->findex] = ((unsigned char*)m->jit_code) + ((int_val)m->functions_ptrs[f->findex]);
 	}
 	if( m->patchable && !module_init_patch_entries(m) ) return 0;
-	// INIT constants
-	for(i=0;i<m->code->nconstants;i++) {
-		hl_constant *c = m->code->constants + i;
-		hl_module_init_constant(m, c);
-	}
+	// INIT constants. Haxe-owned metadata publishes this policy through the
+	// narrow native kernel after module initialization has returned.
+	if( (flags & HL_MODULE_HAXE_METADATA) == 0 )
+		for(i=0;i<m->code->nconstants;i++)
+			hl_module_init_constant_value(m,m->code->constants + i);
 	hl_module_add(m);
 	hl_gdb_jit_register(m);
 	hl_setup.resolve_symbol = module_resolve_symbol;
@@ -1164,7 +1177,7 @@ h_bool hl_module_patch_slots( hl_module *target, hl_module *generation, const in
 
 	for(i=0;i<count;i++) {
 		hl_jit_patch_method(target->functions_ptrs[indices[i]],target->functions_ptrs + indices[i]);
-		target->functions_ptrs[indices[i]] = generation->functions_ptrs[indices[i]];
+		hl_atomic_store_ptr(target->functions_ptrs + indices[i],generation->functions_ptrs[indices[i]]);
 	}
 	return true;
 }
@@ -1250,14 +1263,14 @@ h_bool hl_module_patch( hl_module *m1, hl_code *c ) {
 	m2->globals_size = gsize;
 
 	hl_module_init_natives(m2);
-	hl_module_init_indexes(m2);
+	hl_module_init_indexes(m2,false);
 	hl_jit_reset(ctx, m2);
 	hl_code_hash_finalize(m2->hash);
 
 	for(i=0;i<m2->code->nconstants;i++) {
 		hl_constant *c = m2->code->constants + i;
 		if( c->global >= m1->code->nglobals )
-			hl_module_init_constant(m2, c);
+			hl_module_init_constant_value(m2,c);
 	}
 
 	for(i2=0;i2<m2->code->nfunctions;i2++) {

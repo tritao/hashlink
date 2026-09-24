@@ -63,7 +63,8 @@ static void hl_read_bytes( hl_reader *r, void *data, int size ) {
 		ERROR("No more data");
 		return;
 	}
-	memcpy(data,r->b + r->pos, size);
+	if( size > 0 )
+		memcpy(data,r->b + r->pos, size);
 	r->pos += size;
 }
 
@@ -83,7 +84,7 @@ static int hl_read_i32( hl_reader *r ) {
 	b = r->b[r->pos++];
 	c = r->b[r->pos++];
 	d = r->b[r->pos++];
-	return a | (b<<8) | (c<<16) | (d<<24);
+	return (int)((uint32_t)a | ((uint32_t)b<<8) | ((uint32_t)c<<16) | ((uint32_t)d<<24));
 }
 
 static int hl_read_index( hl_reader *r ) {
@@ -485,6 +486,11 @@ static int *hl_read_debug_infos( hl_reader *r, int nops ) {
 }
 
 hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg ) {
+	if( hl_runtime_decode_guard_active() ) {
+		hl_runtime_decode_guard_note();
+		if( error_msg != NULL ) *error_msg = "Native HLB decoding is disabled for Haxe-owned runtime execution";
+		return NULL;
+	}
 	hl_reader _r = { data, size, 0, 0, NULL };
 	hl_reader *r = &_r;
 	hl_code *c;

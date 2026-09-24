@@ -88,18 +88,18 @@ HL_PRIM int hl_hash( vbyte *b ) {
 }
 
 HL_PRIM int hl_hash_utf8( const char *name ) {
-	int h = 0;
+	unsigned int h = 0;
 	// ASCII should be enough
 	while( *name ) {
 		h = 223 * h + (unsigned)*name;
 		name++;
 	}
 	h %= 0x1FFFFF7B;
-	return h;
+	return (int)h;
 }
 
 HL_PRIM int hl_hash_gen( const uchar *name, bool cache_name ) {
-	int h = 0;
+	unsigned int h = 0;
 	const uchar *oname = name;
 	while( *name ) {
 		h = 223 * h + (unsigned)*name;
@@ -120,7 +120,8 @@ HL_PRIM int hl_hash_gen( const uchar *name, bool cache_name ) {
 				// resize
 				int newsize = hl_cache_size ? (hl_cache_size * 3) >> 1 : 16;
 				hl_field_lookup *cache = (hl_field_lookup*)malloc(sizeof(hl_field_lookup) * newsize);
-				memcpy(cache,hl_cache,sizeof(hl_field_lookup) * hl_cache_count);
+				if( hl_cache_count > 0 )
+					memcpy(cache,hl_cache,sizeof(hl_field_lookup) * hl_cache_count);
 				free(hl_cache);
 				hl_cache = cache;
 				hl_cache_size = newsize;
@@ -234,7 +235,8 @@ HL_PRIM hl_runtime_obj *hl_get_obj_rt( hl_type *ot ) {
 	start = 0;
 	if( p ) {
 		start = p->nfields;
-		memcpy(t->fields_indexes, p->fields_indexes, sizeof(int)*p->nfields);
+		if( p->nfields > 0 )
+			memcpy(t->fields_indexes, p->fields_indexes, sizeof(int)*p->nfields);
 	}
 	size = p ? p->size - p->pad_size : (ot->kind == HSTRUCT ? 0 : HL_WSIZE); // hl_type*
 	nlookup = 0;
@@ -318,7 +320,7 @@ HL_PRIM hl_runtime_obj *hl_get_obj_rt( hl_type *ot ) {
 						memcpy(mark + (pos>>5), rts->t->mark_bits, hl_mark_size(rts->size));
 					continue;
 				}
-				mark[pos >> 5] |= 1 << (pos & 31);
+				mark[pos >> 5] |= 1u << (pos & 31);
 			}
 		}
 	}
@@ -352,7 +354,7 @@ HL_API hl_runtime_obj *hl_get_obj_proto( hl_type *ot ) {
 	if( t->nproto ) {
 		void **fptr = (void**)hl_malloc(alloc, sizeof(void*) * t->nproto);
 		ot->vobj_proto = fptr;
-		if( p )
+		if( p && p->nproto > 0 )
 			memcpy(fptr, p->t->vobj_proto, p->nproto * sizeof(void*));
 		for(i=0;i<o->nproto;i++) {
 			hl_obj_proto *p = o->proto + i;
@@ -362,7 +364,7 @@ HL_API hl_runtime_obj *hl_get_obj_proto( hl_type *ot ) {
 		ot->vobj_proto = (void*)1;
 
 	t->methods = (void**)hl_malloc(alloc, sizeof(void*) * t->nmethods);
-	if( p ) memcpy(t->methods,p->methods,p->nmethods * sizeof(void*));
+	if( p && p->nmethods > 0 ) memcpy(t->methods,p->methods,p->nmethods * sizeof(void*));
 
 	nmethods = p ? p->nmethods : 0;
 	for(i=0;i<o->nproto;i++) {
@@ -394,7 +396,8 @@ HL_API hl_runtime_obj *hl_get_obj_proto( hl_type *ot ) {
 	// bindings
 	if( p ) {
 		nbindings = p->nbindings;
-		memcpy(t->bindings,p->bindings,p->nbindings*sizeof(hl_runtime_binding));
+		if( p->nbindings > 0 )
+			memcpy(t->bindings,p->bindings,p->nbindings*sizeof(hl_runtime_binding));
 	} else
 		nbindings = 0;
 	for(i=0;i<o->nbindings;i++) {
@@ -505,7 +508,7 @@ HL_API void hl_init_virtual( hl_type *vt, hl_module_context *ctx ) {
 		hl_obj_field *f = vt->virt->fields + i;
 		if( hl_is_ptr(f->t) ) {
 			int pos = indexes[i] / HL_WSIZE;
-			mark[pos >> 5] |= 1 << (pos & 31);
+			mark[pos >> 5] |= 1u << (pos & 31);
 		}
 	}
 }
@@ -756,7 +759,8 @@ static hl_field_lookup *hl_dynobj_add_field( vdynobj *o, int hfield, hl_type *t 
 		index = o->nvalues;
 		if( index > HL_DYNOBJ_INDEX_MASK ) hl_error("Too many dynobj values");
 		void **nvalues = hl_gc_alloc_raw( (o->nvalues + 1) * sizeof(void*) );
-		memcpy(nvalues,o->values,o->nvalues * sizeof(void*));
+		if( o->nvalues > 0 )
+			memcpy(nvalues,o->values,o->nvalues * sizeof(void*));
 		nvalues[index] = NULL;
 		address_offset = (char*)nvalues - (char*)o->values;
 		o->values = nvalues;
@@ -778,8 +782,10 @@ static hl_field_lookup *hl_dynobj_add_field( vdynobj *o, int hfield, hl_type *t 
 		if( raw_size + pad > HL_DYNOBJ_INDEX_MASK ) hl_error("Too many dynobj values");
 
 		char *newData = (char*)hl_gc_alloc_noptr(raw_size + pad + size);
-		if( raw_size == o->raw_size )
-			memcpy(newData,o->raw_data,o->raw_size);
+		if( raw_size == o->raw_size ) {
+			if( o->raw_size > 0 )
+				memcpy(newData,o->raw_data,o->raw_size);
+		}
 		else {
 			raw_size = 0;
 			for(i=0;i<o->nfields;i++) {
@@ -805,12 +811,14 @@ static hl_field_lookup *hl_dynobj_add_field( vdynobj *o, int hfield, hl_type *t 
 	// update field table
 	hl_field_lookup *new_lookup = (hl_field_lookup*)hl_gc_alloc_noptr(sizeof(hl_field_lookup) * (o->nfields + 1));
 	int field_pos = hl_lookup_find_index(o->lookup, o->nfields, hfield);
-	memcpy(new_lookup,o->lookup,field_pos * sizeof(hl_field_lookup));
+	if( field_pos > 0 )
+		memcpy(new_lookup,o->lookup,field_pos * sizeof(hl_field_lookup));
 	hl_field_lookup *f = new_lookup + field_pos;
 	f->t = t;
 	f->hashed_name = hfield;
 	f->field_index = index | (o->nfields << HL_DYNOBJ_INDEX_SHIFT);
-	memcpy(new_lookup + (field_pos + 1),o->lookup + field_pos, (o->nfields - field_pos) * sizeof(hl_field_lookup));
+	if( o->nfields > field_pos )
+		memcpy(new_lookup + (field_pos + 1),o->lookup + field_pos, (o->nfields - field_pos) * sizeof(hl_field_lookup));
 	o->nfields++;
 	o->lookup = new_lookup;
 

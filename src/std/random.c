@@ -84,7 +84,7 @@ HL_PRIM rnd *hl_rnd_init_system() {
 	time = 4644546;
 	pid = 0;
 #endif
-	hl_rnd_set_seed(r,time ^ (pid | (pid << 16)));
+	hl_rnd_set_seed(r,time ^ ((unsigned int)pid | ((unsigned int)pid << 16)));
 	return r;
 }
 
