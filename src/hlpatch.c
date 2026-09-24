@@ -554,8 +554,10 @@ static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function 
 		case ONull:case OGetThis:case OSetThis:case OToDyn:case OToSFloat:case OToUFloat:case OToInt:case OSafeCast:case OUnsafeCast:case OToVirtual:
 			if(!valid_reg(f,p[0])||(op->operand_count>1&&!valid_reg(f,p[1]))){*error="Invalid unary operation";return false;}
 			break;
-		case OJTrue:if(!valid_reg(f,p[0])||i+1+p[1]<0||i+1+p[1]>=f->instruction_count){*error="Invalid conditional branch";return false;}break;
-		case OJSLt:case OJSLte:case OJEq:if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||i+1+p[2]<0||i+1+p[2]>=f->instruction_count){*error="Invalid comparison branch";return false;}break;
+		case OJTrue:case OJFalse:case OJNull:case OJNotNull:
+			if(!valid_reg(f,p[0])||i+1+p[1]<0||i+1+p[1]>=f->instruction_count){*error="Invalid conditional branch";return false;}break;
+		case OJSLt:case OJSGte:case OJSGt:case OJSLte:case OJULt:case OJUGte:case OJNotLt:case OJNotGte:case OJEq:case OJNotEq:
+			if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||i+1+p[2]<0||i+1+p[2]>=f->instruction_count){*error="Invalid comparison branch";return false;}break;
 		case OJAlways:if(i+1+p[0]<0||i+1+p[0]>=f->instruction_count){*error="Invalid branch";return false;}break;
 		case ORet:if(!valid_reg(f,p[0])){*error="Invalid return register";return false;}break;
 		case OThrow:case ORethrow:if(!valid_reg(f,p[0])){*error="Invalid throw register";return false;}break;
