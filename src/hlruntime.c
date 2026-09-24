@@ -161,10 +161,10 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 	}
 	if( module == NULL || module->debug_hlb == NULL || !hl_module_init(module,HL_MODULE_PATCHABLE) ) {
 		if( module != NULL ) hl_module_free_shutdown(module);
-		hl_code_free(code);
+		hl_code_destroy(code);
 		return HL_RUNTIME_JIT_FAILED;
 	}
-	hl_code_free(code);
+	hl_code_free_function_data(code);
 	runtime = (hl_runtime_module*)malloc(sizeof(hl_runtime_module));
 	if( runtime == NULL ) {
 		hl_module_unload(module);

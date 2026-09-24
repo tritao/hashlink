@@ -290,7 +290,14 @@ HL_EXTERN_C HL_EXPORT hl_code *hl_code_read( const unsigned char *data, int size
 hl_code_hash *hl_code_hash_alloc( hl_code *c );
 void hl_code_hash_finalize( hl_code_hash *h );
 void hl_code_hash_free( hl_code_hash *h );
+/* Releases temporary decoded function bodies after module initialization.
+	The hl_code object and its persistent metadata remain alive. */
+HL_EXTERN_C HL_EXPORT void hl_code_free_function_data( hl_code *c );
+/* Legacy name retained for source and ABI compatibility. */
 HL_EXTERN_C HL_EXPORT void hl_code_free( hl_code *c );
+/* Releases both temporary function data and persistent hl_code storage.
+	No module may still reference the code. */
+HL_EXTERN_C HL_EXPORT void hl_code_destroy( hl_code *c );
 int hl_code_hash_type( hl_code_hash *h, hl_type *t );
 void hl_code_hash_remap_globals( hl_code_hash *hnew, hl_code_hash *hold );
 
