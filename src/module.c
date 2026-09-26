@@ -418,10 +418,20 @@ static int module_capture_stack( void **stack, int size ) {
 	}
 	hl_module_registry_snapshot_free(modules,module_count);
 	return count;
-#elif defined(__aarch64__) || defined(_M_ARM64)
-	// AArch64 JIT frames use the platform frame-pointer chain.  Scanning the
-	// raw stack is unreliable here because callee-saved register spills can
-	// look like (frame, return-address) pairs.
+#elif defined(__aarch64__) || defined(_M_ARM64) || defined(__x86_64__) || defined(_M_X64)
+	// Every JIT function keeps a standard frame-pointer chain for its whole body
+	// (ENTER/RET in jit_regs.c: [fp+0] = saved fp, [fp+HL_WSIZE] = return address,
+	// the same layout x86-64's rbp and AArch64's x29/x30 frame record already use).
+	// Walking that chain finds exactly the live frames. A raw stack scan is
+	// unreliable in comparison: a stale (frame, return-address) pair left behind by
+	// a sibling call that has already returned can still look like a live frame,
+	// and so can a callee-saved register spill.
+	//
+	// The chain can still run into a native frame this convention doesn't cover -
+	// C code built without frame pointers, most likely - in which case `next_fp`
+	// stops looking like a plausible frame pointer. Recover any further JIT frames
+	// with a best-effort scan of the remaining range instead of stopping short;
+	// only that tail is approximate, not the frames already found by the chain.
 	void *stack_top = hl_get_thread()->stack_top;
 	void **fp = (void **)__builtin_frame_address(0);
 	int module_count;
@@ -451,7 +461,14 @@ static int module_capture_stack( void **stack, int size ) {
 			count++;
 			break;
 		}
-		if( next_fp == NULL || next_fp <= (void *)fp || next_fp >= stack_top ) break;
+		if( next_fp == NULL ) break; // a clean, ordinary end of the chain
+		if( next_fp <= (void *)fp || next_fp >= stack_top ) {
+			// The chain looks broken rather than finished: fall back to scanning
+			// the rest of the stack for any further JIT frames.
+			hl_module_registry_snapshot_free(modules,module_count);
+			if( stack && count == size ) return count;
+			return count + hl_module_capture_stack_range(stack_top, fp + 2, stack ? stack + count : NULL, stack ? size - count : 0);
+		}
 		fp = (void **)next_fp;
 	}
 	hl_module_registry_snapshot_free(modules,module_count);

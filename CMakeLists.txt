@@ -74,6 +74,14 @@ if (MINGW)
     add_link_options(-municode)
 endif()
 
+# hl_module_capture_stack walks the platform frame-pointer chain (module.c) to
+# report accurate JIT stack traces; that walk starts from this runtime's own
+# native frame, so it needs one too, regardless of what a given toolchain
+# defaults to at this optimization level.
+if(NOT MSVC)
+    add_compile_options(-fno-omit-frame-pointer)
+endif()
+
 list(APPEND CMAKE_MODULE_PATH
     ${CMAKE_CURRENT_SOURCE_DIR}/other/cmake
 )
