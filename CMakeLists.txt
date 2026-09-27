@@ -183,6 +183,8 @@ endif()
 
 add_library(libhl
     src/gc.c
+    src/ryu/d2s.c
+    src/ryu/f2s.c
     ${std_srcs}
 )
 

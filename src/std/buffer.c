@@ -20,6 +20,53 @@
  * DEALINGS IN THE SOFTWARE.
  */
 #include <hl.h>
+#include <math.h>
+#include "ryu/ryu.h"
+
+static int hl_format_float(uchar *output, double value, int single) {
+	char scientific[32], digits[32], text[32];
+	int count = 0, point = 0, exponent = 0, length = 0, index;
+	const char *cursor;
+	if( isnan(value) ) return usprintf(output,32,USTR("NaN"));
+	if( isinf(value) ) return usprintf(output,32,value < 0 ? USTR("-Infinity") : USTR("Infinity"));
+	if( value == 0 ) return usprintf(output,32,USTR("0"));
+	length = single ? f2s_buffered_n((float)value,scientific) : d2s_buffered_n(value,scientific);
+	scientific[length] = 0;
+	cursor = scientific;
+	if( *cursor == '-' ) cursor++;
+	while( *cursor && *cursor != 'E' && *cursor != 'e' ) {
+		if( *cursor == '.' ) point = count;
+		else digits[count++] = *cursor;
+		cursor++;
+	}
+	if( strchr(scientific,'.') == NULL ) point = count;
+	if( *cursor ) exponent = (int)strtol(cursor + 1,NULL,10);
+	point += exponent;
+	while( count > 1 && digits[count - 1] == '0' ) count--;
+	length = 0;
+	if( scientific[0] == '-' ) text[length++] = '-';
+	if( point > 21 || point <= -6 ) {
+		text[length++] = digits[0];
+		if( count > 1 ) {
+			text[length++] = '.';
+			memcpy(text + length,digits + 1,count - 1);
+			length += count - 1;
+		}
+		length += snprintf(text + length,sizeof(text) - length,"e%+d",point - 1);
+	} else if( point <= 0 ) {
+		text[length++] = '0'; text[length++] = '.';
+		while( point++ < 0 ) text[length++] = '0';
+		memcpy(text + length,digits,count); length += count;
+	} else {
+		for( index = 0; index < count || index < point; index++ ) {
+			if( index == point ) text[length++] = '.';
+			text[length++] = index < count ? digits[index] : '0';
+		}
+	}
+	for( index = 0; index < length; index++ ) output[index] = (uchar)text[index];
+	output[length] = 0;
+	return length;
+}
 
 #ifdef PRId64
 #	define PR_I64 USTR("%" PRId64)
@@ -154,10 +201,10 @@ static void hl_buffer_addr( hl_buffer *b, void *data, hl_type *t, vlist *stack )
 		hl_buffer_str_sub(b,buf,usprintf(buf,32,PR_I64,*(int64*)data));
 		break;
 	case HF32:
-		hl_buffer_str_sub(b,buf,usprintf(buf,32,USTR("%.9g"),*(float*)data));
+		hl_buffer_str_sub(b,buf,hl_format_float(buf,*(float*)data,1));
 		break;
 	case HF64:
-		hl_buffer_str_sub(b,buf,usprintf(buf,32,USTR("%.17g"),*(double*)data));
+		hl_buffer_str_sub(b,buf,hl_format_float(buf,*(double*)data,0));
 		break;
 	case HBYTES:
 		hl_buffer_str(b,*(uchar**)data);
@@ -220,10 +267,10 @@ static void hl_buffer_rec( hl_buffer *b, vdynamic *v, vlist *stack ) {
 		hl_buffer_str_sub(b,buf,usprintf(buf,32,PR_I64,v->v.i64));
 		break;
 	case HF32:
-		hl_buffer_str_sub(b,buf,usprintf(buf,32,USTR("%.9g"),v->v.f));
+		hl_buffer_str_sub(b,buf,hl_format_float(buf,v->v.f,1));
 		break;
 	case HF64:
-		hl_buffer_str_sub(b,buf,usprintf(buf,32,USTR("%.17g"),v->v.d));
+		hl_buffer_str_sub(b,buf,hl_format_float(buf,v->v.d,0));
 		break;
 	case HBOOL:
 		if( v->v.b )
