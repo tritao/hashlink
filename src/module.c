@@ -1059,6 +1059,7 @@ int hl_module_init( hl_module *m, int flags ) {
 		m->functions_ptrs[f->findex] = ((unsigned char*)m->jit_code) + ((int_val)m->functions_ptrs[f->findex]);
 	}
 	if( m->patchable && !module_init_patch_entries(m) ) return 0;
+	for(i=0;i<m->code->ntypes;i++) hl_register_string_type(m->code->types + i);
 	// INIT constants
 	for(i=0;i<m->code->nconstants;i++) {
 		hl_constant *c = m->code->constants + i;

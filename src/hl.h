@@ -570,6 +570,8 @@ struct hl_runtime_obj {
 	int ninterfaces;
 	hl_field_lookup *lookup;
 	int *interfaces;
+	// __string returns a String object rather than UTF-16 bytes
+	bool toStringObject;
 };
 
 typedef struct {
@@ -959,6 +961,13 @@ typedef struct {
 	uchar *bytes;
 	int length;
 } vstring;
+
+/* The first loaded module's `String` object type; strings from any module share its layout. */
+HL_API hl_type *hl_string_type;
+HL_API bool hl_is_string_type( hl_type *t );
+HL_API void hl_register_string_type( hl_type *t );
+/* Wraps UTF-16 data (not copied) in a String object; NULL when no String type is registered. */
+HL_API vstring *hl_alloc_string( uchar *bytes, int length );
 
 #if defined(HL_GCC) && !defined(HL_CONSOLE)
 #	ifdef HL_CLANG

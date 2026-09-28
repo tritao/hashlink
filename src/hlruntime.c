@@ -95,6 +95,12 @@ int hl_runtime_failed_retirements_count() {
 static int resolve_stable_id( hl_runtime_module *runtime, int stable_id );
 static hl_function *find_function( hl_module *module, int stable_id );
 
+/* String results are String objects; HBYTES is kept for modules predating them. */
+static bool result_kind_matches( hl_type *result, hl_type_kind kind ) {
+	if( kind == (hl_type_kind)-1 || result->kind == kind ) return true;
+	return kind == HBYTES && hl_is_string_type(result);
+}
+
 static void runtime_clear_exception_state() {
 	hl_thread_info *thread = hl_get_thread();
 	if( thread == NULL ) return;
@@ -113,7 +119,7 @@ hl_runtime_status hl_runtime_module_validate_call( hl_runtime_module *runtime, i
 	hl_mutex_acquire(runtime->lock);
 	stable_id = resolve_stable_id(runtime,stable_id);
 	function = find_function(runtime->module,stable_id);
-	if( function == NULL || function->type->kind != HFUN || function->type->fun->nargs != nargs || (result_kind != (hl_type_kind)-1 && function->type->fun->ret->kind != result_kind) ) {
+	if( function == NULL || function->type->kind != HFUN || function->type->fun->nargs != nargs || !result_kind_matches(function->type->fun->ret,result_kind) ) {
 		hl_mutex_release(runtime->lock);
 		return HL_RUNTIME_BAD_FUNCTION;
 	}
@@ -283,7 +289,7 @@ static hl_runtime_status call_checked( hl_runtime_module *runtime, int stable_id
 	hl_mutex_acquire(runtime->lock);
 	slot = resolve_stable_id(runtime,stable_id);
 	function = find_function(runtime->module,slot);
-	if( function == NULL || function->type->kind != HFUN || function->type->fun->nargs != nargs || (result_kind != (hl_type_kind)-1 && function->type->fun->ret->kind != result_kind) ) {
+	if( function == NULL || function->type->kind != HFUN || function->type->fun->nargs != nargs || !result_kind_matches(function->type->fun->ret,result_kind) ) {
 		hl_mutex_release(runtime->lock);
 		return HL_RUNTIME_BAD_FUNCTION;
 	}
@@ -310,7 +316,8 @@ hl_runtime_status hl_runtime_module_call_bytes( hl_runtime_module *runtime, int 
 	hl_runtime_status status;
 	if( out == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
 	status = call_checked(runtime,stable_id,0,HBYTES,NULL,&result,exception);
-	if( status == HL_RUNTIME_OK ) *out = result == NULL ? NULL : result->v.bytes;
+	if( status == HL_RUNTIME_OK )
+		*out = result == NULL ? NULL : hl_is_string_type(result->t) ? (vbyte*)((vstring*)result)->bytes : result->v.bytes;
 	return status;
 }
 
@@ -330,8 +337,14 @@ hl_runtime_status hl_runtime_module_call_abstract( hl_runtime_module *runtime, i
 hl_runtime_status hl_runtime_module_call_bytes1( hl_runtime_module *runtime, int stable_id, vbyte *argument, vdynamic **exception ) {
 	vdynamic *args[1];
 	if( runtime == NULL ) return HL_RUNTIME_BAD_ARGUMENT;
-	args[0] = hl_alloc_dynamic(&hlt_bytes);
-	args[0]->v.bytes = argument;
+	if( argument == NULL )
+		args[0] = NULL;
+	else if( hl_string_type != NULL )
+		args[0] = (vdynamic*)hl_alloc_string((uchar*)argument,(int)ustrlen((uchar*)argument));
+	else {
+		args[0] = hl_alloc_dynamic(&hlt_bytes);
+		args[0]->v.bytes = argument;
+	}
 	return call_checked(runtime,stable_id,1,HVOID,args,NULL,exception);
 }
 

@@ -443,6 +443,7 @@ HL_API hl_runtime_obj *hl_get_obj_proto( hl_type *ot ) {
 	castField = obj_resolve_field(o,hl_hash_gen(USTR("__cast"),false));
 	getField = obj_resolve_field(o,hl_hash_gen(USTR("__get_field"),false));
 	t->toStringFun = strField ? t->methods[-(strField->field_index+1)] : NULL;
+	t->toStringObject = strField && strField->t->kind == HFUN && hl_is_string_type(strField->t->fun->ret);
 	t->compareFun = cmpField && t->compareFun ? t->methods[-(cmpField->field_index+1)] : NULL;
 	t->castFun = castField ? t->methods[-(castField->field_index+1)] : NULL;
 	t->getFieldFun = getField ? t->methods[-(getField->field_index+1)] : NULL;

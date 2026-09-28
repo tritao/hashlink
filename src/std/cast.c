@@ -453,6 +453,14 @@ HL_PRIM int hl_dyn_compare( vdynamic *a, vdynamic *b ) {
 	case TK2(HF32, HF64):
 		return dcompare((double)a->v.f,b->v.d);
 	case TK2(HOBJ,HOBJ):
+		if( hl_is_string_type(a->t) && hl_is_string_type(b->t) ) {
+			vstring *x = (vstring*)a, *y = (vstring*)b;
+			int length = x->length < y->length ? x->length : y->length;
+			for(int i=0;i<length;i++)
+				if( x->bytes[i] != y->bytes[i] ) return x->bytes[i] < y->bytes[i] ? -1 : 1;
+			return x->length - y->length;
+		}
+		// fallthrough
 	case TK2(HSTRUCT,HSTRUCT):
 		if( a->t->obj->rt->compareFun )
 			return a->t->obj->rt->compareFun(a,b);

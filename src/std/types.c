@@ -24,6 +24,27 @@
 
 HL_PRIM hl_type hlt_array = { HARRAY };
 HL_PRIM hl_type hlt_bytes = { HBYTES };
+HL_PRIM hl_type *hl_string_type = NULL;
+
+HL_PRIM bool hl_is_string_type( hl_type *t ) {
+	if( t == hl_string_type ) return t != NULL;
+	if( t == NULL || t->kind != HOBJ ) return false;
+	hl_type_obj *o = t->obj;
+	return o->super == NULL && o->nfields == 2 && ucmp(o->name,USTR("String")) == 0
+		&& o->fields[0].t->kind == HBYTES && o->fields[1].t->kind == HI32;
+}
+
+HL_PRIM void hl_register_string_type( hl_type *t ) {
+	if( hl_string_type == NULL && hl_is_string_type(t) ) hl_string_type = t;
+}
+
+HL_PRIM vstring *hl_alloc_string( uchar *bytes, int length ) {
+	if( hl_string_type == NULL ) return NULL;
+	vstring *s = (vstring*)hl_alloc_obj(hl_string_type);
+	s->bytes = bytes;
+	s->length = length;
+	return s;
+}
 HL_PRIM hl_type hlt_dynobj = { HDYNOBJ };
 HL_PRIM hl_type hlt_dyn = { HDYN };
 HL_PRIM hl_type hlt_i32 = { HI32 };
@@ -243,6 +264,8 @@ HL_PRIM bool hl_safe_cast( hl_type *t, hl_type *to ) {
 		{
 			hl_type_obj *o = t->obj;
 			hl_type_obj *oto = to->obj;
+			// Each module declares its own String type with the same layout.
+			if( hl_is_string_type(t) && hl_is_string_type(to) ) return true;
 			while( true ) {
 				if( o == oto || o->name == oto->name ) return true;
 				if( o->super == NULL ) return false;

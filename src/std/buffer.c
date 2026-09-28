@@ -185,6 +185,12 @@ typedef struct vlist {
 
 static void hl_buffer_rec( hl_buffer *b, vdynamic *v, vlist *stack );
 
+static const uchar *hl_obj_to_ustring( hl_runtime_obj *rt, vdynamic *obj ) {
+	const uchar *s = rt->toStringFun(obj);
+	if( rt->toStringObject && s != NULL ) s = ((vstring*)s)->bytes;
+	return s;
+}
+
 static void hl_buffer_addr( hl_buffer *b, void *data, hl_type *t, vlist *stack ) {
 	uchar buf[32];
 	switch( t->kind ) {
@@ -235,7 +241,7 @@ static void hl_buffer_addr( hl_buffer *b, void *data, hl_type *t, vlist *stack )
 				hl_buffer_char(b,'@');
 				hl_buffer_str(b,o->name);
 			} else
-				hl_buffer_str(b,o->rt->toStringFun(*(vdynamic**)data));
+				hl_buffer_str(b,hl_obj_to_ustring(o->rt,*(vdynamic**)data));
 		}
 		break;
 	default:
@@ -291,13 +297,18 @@ static void hl_buffer_rec( hl_buffer *b, vdynamic *v, vlist *stack ) {
 		break;
 	case HOBJ:
 	case HSTRUCT:
+		if( hl_is_string_type(v->t) ) {
+			vstring *s = (vstring*)v;
+			if( s->bytes ) hl_buffer_str_sub(b,s->bytes,s->length);
+			break;
+		}
 		{
 			hl_type_obj *o = v->t->obj;
 			if( o->rt == NULL || hl_get_obj_proto(v->t)->toStringFun == NULL ) {
 				if( v->t->kind == HSTRUCT ) hl_buffer_char(b,'@');
 				hl_buffer_str(b,o->name);
 			} else
-				hl_buffer_str(b,o->rt->toStringFun(v->t->kind == HSTRUCT ? (vdynamic*)v->v.ptr : v));
+				hl_buffer_str(b,hl_obj_to_ustring(o->rt,v->t->kind == HSTRUCT ? (vdynamic*)v->v.ptr : v));
 		}
 		break;
 	case HARRAY:
