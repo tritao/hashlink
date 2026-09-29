@@ -229,6 +229,8 @@ static struct {
 	int mark_bytes;
 	int mark_time;
 	double mark_duration_ms;
+	double last_mark_ms;
+	double max_mark_ms;
 	int mark_count;
 	int alloc_time; // only measured if gc_profile active
 } gc_stats = {0};
@@ -984,7 +986,10 @@ static void gc_major() {
 	dt = TIMESTAMP() - time;
 	gc_stats.mark_count++;
 	gc_stats.mark_time += dt;
-	gc_stats.mark_duration_ms += (hl_sys_time() - mark_started) * 1000.0;
+	double mark_ms = (hl_sys_time() - mark_started) * 1000.0;
+	gc_stats.mark_duration_ms += mark_ms;
+	gc_stats.last_mark_ms = mark_ms;
+	if( mark_ms > gc_stats.max_mark_ms ) gc_stats.max_mark_ms = mark_ms;
 	if( gc_flags & GC_PROFILE ) {
 		printf("GC-PROFILE %d\n\tmark-time %.3g\n\talloc-time %.3g\n\ttotal-mark-time %.3g\n\ttotal-alloc-time %.3g\n\tallocated %d (%dKB)\n",
 			gc_stats.mark_count,
@@ -1483,6 +1488,29 @@ HL_PRIM double hl_gc_collections() {
 	return (double)gc_stats.mark_count;
 }
 
+HL_PRIM double hl_gc_last_pause_micros() {
+	return gc_stats.last_mark_ms * 1000.0;
+}
+
+HL_PRIM double hl_gc_max_pause_micros() {
+	return gc_stats.max_mark_ms * 1000.0;
+}
+
+HL_PRIM double hl_gc_heap_bytes() {
+	return (double)gc_stats.pages_total_memory;
+}
+
+// A collection starts once the bytes (or blocks) allocated since the last one exceed this fraction of the heap.
+HL_PRIM void hl_gc_set_mark_threshold( double fraction ) {
+	if( fraction < 0.05 ) fraction = 0.05;
+	if( fraction > 4.0 ) fraction = 4.0;
+	gc_mark_threshold = (float)fraction;
+}
+
+HL_PRIM double hl_gc_get_mark_threshold() {
+	return (double)gc_mark_threshold;
+}
+
 HL_PRIM double hl_gc_mark_micros() {
 	return gc_stats.mark_duration_ms * 1000.0;
 }
@@ -1702,6 +1730,11 @@ DEFINE_PRIM(_VOID, gc_stats, _REF(_F64) _REF(_F64) _REF(_F64));
 DEFINE_PRIM(_F64, gc_total_allocated, _NO_ARG);
 DEFINE_PRIM(_F64, gc_collections, _NO_ARG);
 DEFINE_PRIM(_F64, gc_mark_micros, _NO_ARG);
+DEFINE_PRIM(_F64, gc_last_pause_micros, _NO_ARG);
+DEFINE_PRIM(_F64, gc_max_pause_micros, _NO_ARG);
+DEFINE_PRIM(_F64, gc_heap_bytes, _NO_ARG);
+DEFINE_PRIM(_VOID, gc_set_mark_threshold, _F64);
+DEFINE_PRIM(_F64, gc_get_mark_threshold, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_detailed_stats, _REF(_F64) _REF(_F64) _REF(_F64) _REF(_F64));
 DEFINE_PRIM(_VOID, gc_dump_memory, _BYTES);
 DEFINE_PRIM(_I32, gc_get_live_objects, _TYPE _ARR);
