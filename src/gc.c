@@ -1496,6 +1496,10 @@ HL_PRIM double hl_gc_max_pause_micros() {
 	return gc_stats.max_mark_ms * 1000.0;
 }
 
+HL_PRIM double hl_gc_allocated_since_collection() {
+	return (double)(gc_stats.total_allocated - gc_stats.last_mark);
+}
+
 HL_PRIM double hl_gc_heap_bytes() {
 	return (double)gc_stats.pages_total_memory;
 }
@@ -1733,6 +1737,7 @@ DEFINE_PRIM(_F64, gc_mark_micros, _NO_ARG);
 DEFINE_PRIM(_F64, gc_last_pause_micros, _NO_ARG);
 DEFINE_PRIM(_F64, gc_max_pause_micros, _NO_ARG);
 DEFINE_PRIM(_F64, gc_heap_bytes, _NO_ARG);
+DEFINE_PRIM(_F64, gc_allocated_since_collection, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_set_mark_threshold, _F64);
 DEFINE_PRIM(_F64, gc_get_mark_threshold, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_detailed_stats, _REF(_F64) _REF(_F64) _REF(_F64) _REF(_F64));
