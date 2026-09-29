@@ -68,6 +68,11 @@ static int hl_format_float(uchar *output, double value, int single) {
 	return length;
 }
 
+/* Formats a double the way Std.string does, without going through a buffer object. `output` needs 32 characters. */
+HL_PRIM int hl_format_double( uchar *output, double value ) {
+	return hl_format_float(output,value,0);
+}
+
 #ifdef PRId64
 #	define PR_I64 USTR("%" PRId64)
 #else
