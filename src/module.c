@@ -1004,7 +1004,10 @@ static void hl_module_add( hl_module *m ) {
 int hl_module_init( hl_module *m, int flags ) {
 	int i;
 	jit_ctx *ctx;
-	for(i=0;i<m->code->ntypes;i++) m->code->types[i].gc_owner = m;
+	// Allocation ownership costs a ledger entry per allocation and a walk of the whole ledger per
+	// collection, and only runtime-owned (patchable) modules are ever retired against it.
+	void *gc_owner = (flags & HL_MODULE_PATCHABLE) != 0 ? m : NULL;
+	for(i=0;i<m->code->ntypes;i++) m->code->types[i].gc_owner = gc_owner;
 	bool hot_reload = (flags & HL_MODULE_HOT_RELOAD) != 0;
 	// expand globals
 	if( hot_reload ) {
