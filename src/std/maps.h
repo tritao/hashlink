@@ -230,6 +230,29 @@ HL_PRIM void _MNAME(clear)( t_map *m ) {
 	memset(m,0,sizeof(t_map));
 }
 
+// A structural copy: same entries, no rehash. Every buffer is duplicated on its own, since `nexts` is either
+// part of the `cells` allocation or a separate one depending on how the map last grew.
+HL_PRIM t_map *_MNAME(copy)( t_map *m ) {
+	t_map *c = (t_map*)hl_gc_alloc_raw(sizeof(t_map));
+	*c = *m;
+	if( !m->values )
+		return c;
+	int ksize = m->maxentries < _MLIMIT ? 1 : sizeof(int);
+	c->entries = (t_entry*)hl_gc_alloc_noptr(m->maxentries * sizeof(t_entry));
+	memcpy(c->entries,m->entries,m->maxentries * sizeof(t_entry));
+	c->values = (t_value*)hl_gc_alloc_raw(m->maxentries * sizeof(t_value));
+	memcpy(c->values,m->values,m->maxentries * sizeof(t_value));
+	c->cells = hl_gc_alloc_noptr(m->ncells * ksize);
+	memcpy(c->cells,m->cells,m->ncells * ksize);
+	c->nexts = hl_gc_alloc_noptr(m->maxentries * ksize);
+	memcpy(c->nexts,m->nexts,m->maxentries * ksize);
+	if( m->lfree.buckets ) {
+		c->lfree.buckets = (hl_free_bucket*)hl_gc_alloc_noptr(sizeof(hl_free_bucket) * m->lfree.nbuckets);
+		memcpy(c->lfree.buckets,m->lfree.buckets,m->lfree.head * sizeof(hl_free_bucket));
+	}
+	return c;
+}
+
 HL_PRIM int _MNAME(size)( t_map *m ) {
 	return m->nentries;
 }

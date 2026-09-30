@@ -282,6 +282,7 @@ DEFINE_PRIM( _BOOL, hiremove, _IMAP _I32 );
 DEFINE_PRIM( _ARR, hikeys, _IMAP );
 DEFINE_PRIM( _ARR, hivalues, _IMAP );
 DEFINE_PRIM( _VOID, hiclear, _IMAP );
+DEFINE_PRIM( _IMAP, hicopy, _IMAP );
 DEFINE_PRIM( _I32, hisize, _IMAP );
 
 #define _I64MAP _ABSTRACT(hl_int64_map)
@@ -293,6 +294,7 @@ DEFINE_PRIM( _BOOL, hi64remove, _I64MAP _I64 );
 DEFINE_PRIM( _ARR, hi64keys, _I64MAP );
 DEFINE_PRIM( _ARR, hi64values, _I64MAP );
 DEFINE_PRIM( _VOID, hi64clear, _I64MAP );
+DEFINE_PRIM( _I64MAP, hi64copy, _I64MAP );
 DEFINE_PRIM( _I32, hi64size, _I64MAP );
 
 #define _BMAP _ABSTRACT(hl_bytes_map)
@@ -304,6 +306,7 @@ DEFINE_PRIM( _BOOL, hbremove, _BMAP _BYTES );
 DEFINE_PRIM( _ARR, hbkeys, _BMAP );
 DEFINE_PRIM( _ARR, hbvalues, _BMAP );
 DEFINE_PRIM( _VOID, hbclear, _BMAP );
+DEFINE_PRIM( _BMAP, hbcopy, _BMAP );
 DEFINE_PRIM( _I32, hbsize, _BMAP );
 
 #define _OMAP _ABSTRACT(hl_obj_map)
@@ -315,4 +318,5 @@ DEFINE_PRIM( _BOOL, horemove, _OMAP _DYN );
 DEFINE_PRIM( _ARR, hokeys, _OMAP );
 DEFINE_PRIM( _ARR, hovalues, _OMAP );
 DEFINE_PRIM( _VOID, hoclear, _OMAP );
+DEFINE_PRIM( _OMAP, hocopy, _OMAP );
 DEFINE_PRIM( _I32, hosize, _OMAP );
