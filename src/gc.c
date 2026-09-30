@@ -557,6 +557,209 @@ static void gc_free_page( gc_pheader *ph, int block_count ) {
 static void gc_check_mark();
 static void (* volatile gc_profile_allocation_callback)(hl_type*,int,int,void*);
 
+// ------------------------- ALLOCATION CENSUS ------------------------------------------
+// Optional accounting of every allocation by type, plus sampled call stacks. Off unless started with hl_gc_census_start.
+
+HL_API uchar *hl_resolve_symbol( void *addr, uchar *out, int *outSize );
+
+#define CENSUS_FRAMES 6
+
+typedef struct {
+	hl_type *t;
+	int64 count;
+	int64 bytes;
+} gc_census_type;
+
+typedef struct {
+	hl_type *t;
+	void *frames[CENSUS_FRAMES];
+	int nframes;
+	int64 samples;
+	int64 bytes;
+} gc_census_stack;
+
+static bool gc_census_on = false;
+static int gc_census_every = 0;
+static int64 gc_census_budget = 0;
+static unsigned int gc_census_rng = 2463534242u;
+static int64 gc_census_total = 0;
+static gc_census_type *gc_census_types = NULL;
+static int gc_census_type_cap = 0, gc_census_type_count = 0;
+static gc_census_stack *gc_census_stacks = NULL;
+static int gc_census_stack_cap = 0, gc_census_stack_count = 0;
+
+static unsigned int gc_census_hash( void *a, void **frames, int nframes ) {
+	uint64 h = ((uint64)(int_val)a) * 0x9E3779B97F4A7C15ULL;
+	int i;
+	for(i=0;i<nframes;i++)
+		h = (h ^ (uint64)(int_val)frames[i]) * 0x100000001B3ULL;
+	return (unsigned int)(h >> 32);
+}
+
+static void gc_census_grow_types( void ) {
+	int cap = gc_census_type_cap ? gc_census_type_cap * 2 : 1024, i;
+	gc_census_type *next = (gc_census_type*)calloc(cap,sizeof(gc_census_type));
+	if( next == NULL ) return;
+	for(i=0;i<gc_census_type_cap;i++) {
+		gc_census_type *e = gc_census_types + i;
+		unsigned int k;
+		if( e->count == 0 ) continue;
+		k = gc_census_hash(e->t,NULL,0) & (cap - 1);
+		while( next[k].count ) k = (k + 1) & (cap - 1);
+		next[k] = *e;
+	}
+	free(gc_census_types);
+	gc_census_types = next;
+	gc_census_type_cap = cap;
+}
+
+static void gc_census_count( hl_type *t, int bytes ) {
+	unsigned int k;
+	gc_census_total++;
+	if( gc_census_type_count * 2 >= gc_census_type_cap ) gc_census_grow_types();
+	if( gc_census_type_cap == 0 ) return;
+	k = gc_census_hash(t,NULL,0) & (gc_census_type_cap - 1);
+	while( gc_census_types[k].count && gc_census_types[k].t != t ) k = (k + 1) & (gc_census_type_cap - 1);
+	if( gc_census_types[k].count == 0 ) {
+		gc_census_types[k].t = t;
+		gc_census_type_count++;
+	}
+	gc_census_types[k].count++;
+	gc_census_types[k].bytes += bytes;
+}
+
+static void gc_census_grow_stacks( void ) {
+	int cap = gc_census_stack_cap ? gc_census_stack_cap * 2 : 1024, i;
+	gc_census_stack *next = (gc_census_stack*)calloc(cap,sizeof(gc_census_stack));
+	if( next == NULL ) return;
+	for(i=0;i<gc_census_stack_cap;i++) {
+		gc_census_stack *e = gc_census_stacks + i;
+		unsigned int k;
+		if( e->samples == 0 ) continue;
+		k = gc_census_hash(e->t,e->frames,e->nframes) & (cap - 1);
+		while( next[k].samples ) k = (k + 1) & (cap - 1);
+		next[k] = *e;
+	}
+	free(gc_census_stacks);
+	gc_census_stacks = next;
+	gc_census_stack_cap = cap;
+}
+
+static void gc_census_sample( hl_type *t, void **frames, int nframes, int weight ) {
+	unsigned int k;
+	if( gc_census_stack_count * 2 >= gc_census_stack_cap ) gc_census_grow_stacks();
+	if( gc_census_stack_cap == 0 ) return;
+	k = gc_census_hash(t,frames,nframes) & (gc_census_stack_cap - 1);
+	while( gc_census_stacks[k].samples ) {
+		gc_census_stack *e = &gc_census_stacks[k];
+		if( e->t == t && e->nframes == nframes && memcmp(e->frames,frames,nframes*sizeof(void*)) == 0 ) break;
+		k = (k + 1) & (gc_census_stack_cap - 1);
+	}
+	gc_census_stack *e = &gc_census_stacks[k];
+	if( e->samples == 0 ) {
+		e->t = t;
+		e->nframes = nframes;
+		memcpy(e->frames,frames,nframes*sizeof(void*));
+		gc_census_stack_count++;
+	}
+	e->samples += weight;
+	e->bytes += (int64)weight * gc_census_every;
+}
+
+HL_PRIM void hl_gc_census_reset( void ) {
+	gc_global_lock(true);
+	if( gc_census_types ) memset(gc_census_types,0,gc_census_type_cap*sizeof(gc_census_type));
+	if( gc_census_stacks ) memset(gc_census_stacks,0,gc_census_stack_cap*sizeof(gc_census_stack));
+	gc_census_type_count = gc_census_stack_count = 0;
+	gc_census_total = 0;
+	gc_census_budget = 0;
+	gc_global_lock(false);
+}
+
+/** Starts counting every allocation by type; when `every` > 0 also samples call stacks once per `every` allocated bytes (jittered). */
+HL_PRIM void hl_gc_census_start( int every ) {
+	gc_global_lock(true);
+	gc_census_every = every < 0 ? 0 : every;
+	gc_census_on = true;
+	gc_global_lock(false);
+}
+
+HL_PRIM void hl_gc_census_stop( void ) {
+	gc_global_lock(true);
+	gc_census_on = false;
+	gc_global_lock(false);
+}
+
+static void gc_census_write_string( FILE *f, const uchar *s ) {
+	fputc('"',f);
+	while( s && *s ) {
+		uchar c = *s++;
+		if( c == '"' || c == '\\' ) { fputc('\\',f); fputc((char)c,f); }
+		else if( c < 32 || c > 126 ) fputc('?',f);
+		else fputc((char)c,f);
+	}
+	fputc('"',f);
+}
+
+static void gc_census_write_frame( FILE *f, void *addr ) {
+	uchar out[512];
+	int size = 512;
+	uchar *name = hl_resolve_symbol(addr,out,&size);
+	if( name == NULL ) {
+		fprintf(f,"\"?\"");
+		return;
+	}
+	gc_census_write_string(f,name);
+}
+
+/** Writes the census as JSON: exact per-type counts and sampled stacks (symbols resolved). Counting continues afterwards. */
+HL_PRIM void hl_gc_census_dump( const char *filename ) {
+	gc_census_type *types;
+	gc_census_stack *stacks;
+	int ntypes = 0, nstacks = 0, i, every;
+	int64 total;
+	FILE *f;
+	gc_global_lock(true);
+	types = (gc_census_type*)malloc(sizeof(gc_census_type) * (gc_census_type_count + 1));
+	stacks = (gc_census_stack*)malloc(sizeof(gc_census_stack) * (gc_census_stack_count + 1));
+	for(i=0;i<gc_census_type_cap;i++)
+		if( gc_census_types[i].count && ntypes < gc_census_type_count ) types[ntypes++] = gc_census_types[i];
+	for(i=0;i<gc_census_stack_cap;i++)
+		if( gc_census_stacks[i].samples && nstacks < gc_census_stack_count ) stacks[nstacks++] = gc_census_stacks[i];
+	every = gc_census_every;
+	total = gc_census_total;
+	gc_global_lock(false);
+	f = fopen(filename,"wb");
+	if( f == NULL ) {
+		free(types);
+		free(stacks);
+		hl_error("Failed to open file");
+		return;
+	}
+	fprintf(f,"{\"every\":%d,\"allocations\":%lld,\"types\":[",every,(long long)total);
+	for(i=0;i<ntypes;i++) {
+		fprintf(f,"%s{\"type\":",i ? "," : "");
+		gc_census_write_string(f,types[i].t ? hl_type_str(types[i].t) : USTR("(untyped)"));
+		fprintf(f,",\"count\":%lld,\"bytes\":%lld}",(long long)types[i].count,(long long)types[i].bytes);
+	}
+	fprintf(f,"],\"stacks\":[");
+	for(i=0;i<nstacks;i++) {
+		int j;
+		fprintf(f,"%s{\"type\":",i ? "," : "");
+		gc_census_write_string(f,stacks[i].t ? hl_type_str(stacks[i].t) : USTR("(untyped)"));
+		fprintf(f,",\"samples\":%lld,\"bytes\":%lld,\"frames\":[",(long long)stacks[i].samples,(long long)stacks[i].bytes);
+		for(j=0;j<stacks[i].nframes;j++) {
+			if( j ) fputc(',',f);
+			gc_census_write_frame(f,stacks[i].frames[j]);
+		}
+		fprintf(f,"]}");
+	}
+	fprintf(f,"]}\n");
+	fclose(f);
+	free(types);
+	free(stacks);
+}
+
 HL_API void hl_gc_set_profile_allocation_callback( void (*callback)(hl_type*,int,int,void*) ) {
 	gc_profile_allocation_callback = callback;
 }
@@ -565,6 +768,7 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 	void *ptr;
 	int time = 0;
 	int allocated = 0;
+	int census_sample = 0;
 	if( size == 0 )
 		return NULL;
 	if( size < 0 )
@@ -613,6 +817,20 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 			hl_fatal("TODO");
 		}
 		gc_stats.total_allocated += allocated;
+		if( gc_census_on ) {
+			gc_census_count(t,allocated);
+			if( gc_census_every > 0 ) {
+				// sample by allocated bytes with a jittered interval so periodic allocation patterns cannot alias
+				gc_census_budget -= allocated;
+				while( gc_census_budget <= 0 ) {
+					gc_census_rng ^= gc_census_rng << 13;
+					gc_census_rng ^= gc_census_rng >> 17;
+					gc_census_rng ^= gc_census_rng << 5;
+					gc_census_budget += gc_census_every / 2 + (gc_census_rng % (unsigned int)gc_census_every) + 1;
+					census_sample++;
+				}
+			}
+		}
 	}
 	if( gc_flags & GC_PROFILE ) gc_stats.alloc_time += TIMESTAMP() - time;
 #	ifdef GC_DEBUG
@@ -634,6 +852,15 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 		gc_owned_allocs = owned;
 	}
 	gc_global_lock(false);
+	if( census_sample && hl_get_thread() != NULL ) {
+		void *frames[CENSUS_FRAMES + 4];
+		int n = hl_setup.capture_stack ? hl_setup.capture_stack(frames,CENSUS_FRAMES + 4) : 0;
+		int skip = 0;
+		if( n - skip > CENSUS_FRAMES ) n = skip + CENSUS_FRAMES;
+		gc_global_lock(true);
+		if( gc_census_on ) gc_census_sample(t,frames + skip,n - skip,census_sample);
+		gc_global_lock(false);
+	}
 	void (*allocation_callback)(hl_type*,int,int,void*) = gc_profile_allocation_callback;
 	if( allocation_callback ) {
 #ifdef HL_WIN
@@ -1742,6 +1969,10 @@ DEFINE_PRIM(_VOID, gc_set_mark_threshold, _F64);
 DEFINE_PRIM(_F64, gc_get_mark_threshold, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_detailed_stats, _REF(_F64) _REF(_F64) _REF(_F64) _REF(_F64));
 DEFINE_PRIM(_VOID, gc_dump_memory, _BYTES);
+DEFINE_PRIM(_VOID, gc_census_start, _I32);
+DEFINE_PRIM(_VOID, gc_census_stop, _NO_ARG);
+DEFINE_PRIM(_VOID, gc_census_reset, _NO_ARG);
+DEFINE_PRIM(_VOID, gc_census_dump, _BYTES);
 DEFINE_PRIM(_I32, gc_get_live_objects, _TYPE _ARR);
 DEFINE_PRIM(_I32, gc_get_flags, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_set_flags, _I32);
