@@ -147,6 +147,33 @@ static bool build_debug_line( hl_module *m, byte_buffer *buffer ) {
 	return true;
 }
 
+static int compare_starts( const void *a, const void *b ) {
+	int x = *(const int*)a, y = *(const int*)b;
+	return x < y ? -1 : x > y ? 1 : 0;
+}
+
+/** The start offsets of every function with code, sorted: a function ends where the next one starts. */
+static int *sorted_function_starts( hl_module *m, int *count ) {
+	int *starts = (int*)malloc(sizeof(int) * (m->code->nfunctions + 1));
+	int n = 0;
+	if( starts == NULL ) return NULL;
+	for(int i=0;i<m->code->nfunctions;i++)
+		if( m->jit_debug[i].offsets ) starts[n++] = m->jit_debug[i].start;
+	qsort(starts,n,sizeof(int),compare_starts);
+	*count = n;
+	return starts;
+}
+
+/** The first start greater than `start`, or `limit` if there is none below it. */
+static int next_function_start( const int *starts, int count, int start, int limit ) {
+	int low = 0, high = count;
+	while( low < high ) {
+		int mid = (low + high) / 2;
+		if( starts[mid] > start ) high = mid; else low = mid + 1;
+	}
+	return low < count && starts[low] < limit ? starts[low] : limit;
+}
+
 static bool build_debug_frame( hl_module *m, byte_buffer *buffer ) {
 #if defined(__x86_64__)
 	size_t start;
@@ -161,6 +188,11 @@ static bool build_debug_frame( hl_module *m, byte_buffer *buffer ) {
 	while( buffer->size & 7 ) if( !buffer_u8(buffer,0) ) return false;
 	length = (uint32_t)(buffer->size-start-4);
 	memcpy(buffer->data+start,&length,sizeof(length));
+	// A function ends where the next one starts. Looking for that start among every function for each function takes time
+	// quadratic in the module size (seconds at startup for a large app), so sort the starts once and search them.
+	int start_count = 0;
+	int *starts = sorted_function_starts(m,&start_count);
+	if( starts == NULL ) return false;
 	for(i=0;i<m->code->nfunctions;i++) {
 		hl_debug_infos *debug = m->jit_debug+i;
 		int end = m->codesize;
@@ -169,18 +201,18 @@ static bool build_debug_frame( hl_module *m, byte_buffer *buffer ) {
 		code = (unsigned char*)m->jit_code + debug->start;
 		if( debug->start < 0 || debug->start + 4 > m->codesize ||
 			code[0] != 0x55 || code[1] != 0x48 || code[2] != 0x89 || code[3] != 0xE5 ) continue;
-		for(j=0;j<m->code->nfunctions;j++)
-			if( m->jit_debug[j].offsets && m->jit_debug[j].start > debug->start && m->jit_debug[j].start < end ) end = m->jit_debug[j].start;
+		end = next_function_start(starts,start_count,debug->start,end);
 		start = buffer->size;
 		if( !buffer_u32(buffer,0) || !buffer_u32(buffer,0) ||
 			!buffer_u64(buffer,(uint64_t)(uintptr_t)code) || !buffer_u64(buffer,(uint64_t)(end-debug->start)) ||
 			!buffer_u8(buffer,0x41) || !buffer_u8(buffer,0x0E) || !buffer_uleb(buffer,16) ||
 			!buffer_u8(buffer,0x86) || !buffer_uleb(buffer,2) ||
-			!buffer_u8(buffer,0x43) || !buffer_u8(buffer,0x0D) || !buffer_uleb(buffer,6) ) return false;
-		while( buffer->size & 7 ) if( !buffer_u8(buffer,0) ) return false;
+			!buffer_u8(buffer,0x43) || !buffer_u8(buffer,0x0D) || !buffer_uleb(buffer,6) ) { free(starts); return false; }
+		while( buffer->size & 7 ) if( !buffer_u8(buffer,0) ) { free(starts); return false; }
 		length = (uint32_t)(buffer->size-start-4);
 		memcpy(buffer->data+start,&length,sizeof(length));
 	}
+	free(starts);
 #else
 	(void)m;
 #endif
@@ -315,12 +347,14 @@ void hl_gdb_jit_register( hl_module *m ) {
 	free(frames.data);
 	string_size = 1;
 	count = 1;
+	int symbol_start_count = 0;
+	int *symbol_starts = sorted_function_starts(m,&symbol_start_count);
+	if( symbol_starts == NULL ) { free(entry); return; }
 	for(i=0;i<m->code->nfunctions;i++) if( m->jit_debug[i].offsets ) {
 		int length = function_name(m->code,m->code->functions+i,name,sizeof(name));
-		int end = m->codesize;
+		int end;
 		if( length >= (int)sizeof(name) ) length = sizeof(name) - 1;
-		for(j=0;j<m->code->nfunctions;j++)
-			if( m->jit_debug[j].offsets && m->jit_debug[j].start > m->jit_debug[i].start && m->jit_debug[j].start < end ) end=m->jit_debug[j].start;
+		end = next_function_start(symbol_starts,symbol_start_count,m->jit_debug[i].start,m->codesize);
 		memcpy(strings+string_size,name,length+1);
 		symbols[count].st_name = string_size;
 		symbols[count].st_info = ELF64_ST_INFO(STB_GLOBAL,STT_FUNC);
@@ -330,6 +364,7 @@ void hl_gdb_jit_register( hl_module *m ) {
 		string_size += length + 1;
 		count++;
 	}
+	free(symbol_starts);
 	entry->entry.symfile_addr = (const char*)entry->data;
 	entry->entry.symfile_size = total;
 	pthread_mutex_lock(&jit_lock);

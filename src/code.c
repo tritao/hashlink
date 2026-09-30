@@ -348,13 +348,23 @@ static void hl_read_function_identities( hl_reader *r, const unsigned char *data
 	hl_reader section = { data, size, 0, 0, r->code };
 	hl_reader *s = &section;
 	int count = hl_read_uindex(s);
+	// Each entry looks its function up by index and checks its stable ID is new. Scanning every function for both makes
+	// reading a large module take time quadratic in its size, so index the functions and keep the IDs seen in a hash set.
+	int max_findex = -1, set_size = 16;
+	for(int j=0;j<r->code->nfunctions;j++) if(r->code->functions[j].findex > max_findex) max_findex = r->code->functions[j].findex;
+	int *by_findex = (int*)hl_malloc(&r->code->alloc,sizeof(int) * (max_findex + 1 > 0 ? max_findex + 1 : 1));
+	for(int j=0;j<max_findex+1;j++) by_findex[j] = -1;
+	for(int j=0;j<r->code->nfunctions;j++) if(by_findex[r->code->functions[j].findex] < 0) by_findex[r->code->functions[j].findex] = j;
+	while( set_size < 2 * (count > 0 ? count : 1) ) set_size *= 2;
+	int *seen_ids = (int*)hl_malloc(&r->code->alloc,sizeof(int) * set_size);
+	for(int j=0;j<set_size;j++) seen_ids[j] = -1;
 	for(int i=0;i<count;i++) {
 		int stable_id = hl_read_uindex(s);
 		int function_index = hl_read_uindex(s);
 		int target = -1;
 		const unsigned char *qualified_name = NULL;
 		int qualified_name_length = 0;
-		for(int j=0;j<r->code->nfunctions;j++) if(r->code->functions[j].findex == function_index) { target = j; break; }
+		if( function_index >= 0 && function_index <= max_findex ) target = by_findex[function_index];
 		for(int field=0;field<3;field++) {
 			int length = hl_read_uindex(s);
 			if( length < 0 || s->pos + length > s->size ) { ERROR("Invalid function identity string"); return; }
@@ -363,7 +373,12 @@ static void hl_read_function_identities( hl_reader *r, const unsigned char *data
 		}
 		(void)hl_read_index(s); (void)hl_read_index(s);
 		(void)hl_read_uindex(s); (void)hl_read_uindex(s);
-		for(int j=0;j<r->code->nfunctions;j++) if(r->code->function_stable_ids[j] == stable_id) { ERROR("Duplicate stable function identity"); return; }
+		if( stable_id >= 0 ) {
+			unsigned int slot = ((unsigned int)stable_id * 2654435761u) & (unsigned int)(set_size - 1);
+			while( seen_ids[slot] >= 0 && seen_ids[slot] != stable_id ) slot = (slot + 1) & (unsigned int)(set_size - 1);
+			if( seen_ids[slot] == stable_id ) { ERROR("Duplicate stable function identity"); return; }
+			seen_ids[slot] = stable_id;
+		}
 		if( s->error || target < 0 || r->code->function_stable_ids[target] >= 0 ) { ERROR("Invalid function identity"); return; }
 		r->code->function_stable_ids[target] = stable_id;
 		r->code->function_names[target] = (char*)hl_malloc(&r->code->alloc,qualified_name_length+1);
@@ -413,6 +428,12 @@ const char *hl_op_name( int op ) {
 
 const char *hl_code_function_name( hl_code *code, hl_function *function ) {
 	if( code == NULL || function == NULL || code->function_names == NULL ) return NULL;
+	// Callers mostly hold a pointer into the function table, and asking for every function's name would otherwise scan the
+	// whole table each time.
+	if( function >= code->functions && function < code->functions + code->nfunctions ) {
+		int at = (int)(function - code->functions);
+		if( code->functions[at].findex == function->findex ) return code->function_names[at];
+	}
 	for(int i=0;i<code->nfunctions;i++)
 		if( code->functions[i].findex == function->findex ) return code->function_names[i];
 	return NULL;
