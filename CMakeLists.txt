@@ -339,6 +339,11 @@ if(WIN32)
     target_link_libraries(hlprof-live PRIVATE ws2_32)
 endif()
 
+# Prints a bytecode file as text, for diffing builds (see tools/hldump.c). It reads with the VM's own reader.
+add_executable(hldump tools/hldump.c src/code.c)
+target_include_directories(hldump PRIVATE src)
+target_link_libraries(hldump PRIVATE libhl)
+
 if(BUILD_TESTING)
 
     find_program(
