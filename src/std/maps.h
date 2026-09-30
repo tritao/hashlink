@@ -212,7 +212,21 @@ HL_PRIM varray* _MNAME(values)( t_map *m ) {
 	return a;
 }
 
+// Maps that are cleared and refilled every frame would otherwise regrow through the whole size ladder each time,
+// so a cleared map of moderate size keeps its storage and only forgets its entries.
+#define _MCLEAR_KEEP_ENTRIES 65536
+
 HL_PRIM void _MNAME(clear)( t_map *m ) {
+	if( m->values && m->maxentries <= _MCLEAR_KEEP_ENTRIES ) {
+		int ksize = m->maxentries < _MLIMIT ? 1 : sizeof(int);
+		memset(m->cells,0xFF,m->ncells * ksize);
+		memset(m->entries,0,m->maxentries * sizeof(t_entry));
+		memset(m->values,0,m->maxentries * sizeof(t_value));
+		m->nentries = 0;
+		hl_freelist_init(&m->lfree);
+		hl_freelist_add_range(&m->lfree,0,m->maxentries);
+		return;
+	}
 	memset(m,0,sizeof(t_map));
 }
 
