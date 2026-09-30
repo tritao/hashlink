@@ -19,6 +19,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+#include <dlfcn.h>
 #include <hl.h>
 #include <hlmodule.h>
 
@@ -375,6 +376,90 @@ int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out
 	}
 	hl_module_registry_snapshot_free(modules,module_count);
 	return count;
+}
+
+/** Whether `lr` is a return address into JIT code that should be reported (same rule the stack scanner applies). */
+static bool module_reportable_address( hl_module **modules, int module_count, void *lr ) {
+	for(int i=0;i<module_count;i++) {
+		hl_module *m = modules[i];
+		if( !module_contains_trace_address(m,lr) ) continue;
+		if( m->jit_debug && lr >= m->jit_code && lr < (void*)((char*)m->jit_code + m->codesize) ) {
+			unsigned char *code = m->jit_code + m->jit_debug[0].start;
+			int code_size = m->codesize - m->jit_debug[0].start;
+			if( lr < (void*)code || lr >= (void*)(code + code_size) ) continue;
+		}
+		return true;
+	}
+	return false;
+}
+
+/** How far, in words, a capture looks for the next frame after native code, instead of reading the whole stack. */
+#define CAPTURE_RESYNC_WORDS 8192
+
+/** The first frame record (saved frame pointer, then a JIT return address) at or above `from`, or NULL. */
+static void **module_find_frame_record( hl_module **modules, int module_count, void **from, void *stack_top ) {
+	void **end = from + CAPTURE_RESYNC_WORDS;
+	if( end > (void**)stack_top - 1 ) end = (void**)stack_top - 1;
+	for(void **q=from; q<end; q++) {
+		void *saved = q[0];
+		if( saved > (void*)q && saved < stack_top && ((uintptr_t)saved & (sizeof(void*)-1)) == 0 && module_reportable_address(modules,module_count,q[1]) )
+			return q;
+	}
+	return NULL;
+}
+
+/*
+	Captures the JIT frames of a thread that was stopped by the profiler, from the registers it stopped with.
+
+	The scan in hl_module_capture_stack_range reads every word of the stack, which for a deep UI build is tens of
+	kilobytes while the thread is held stopped, and it reports stale (frame, return address) pairs left behind by calls
+	that already returned. JIT functions keep a frame-pointer chain, so when the thread stopped in JIT code the live frames
+	are found by following it.
+
+	Native code is the difficulty. It may not keep a chain (and may use the frame-pointer register for something else),
+	so a thread stopped in native code, and a chain that runs into a native frame between two JIT frames, are continued
+	from the nearest frame record found just above, which is a short, bounded read because native frames are small.
+*/
+int hl_module_capture_stack_from_frame( void *stack_top, void **stack_ptr, void **frame_ptr, bool jit_leaf, void **out, int size ) {
+	int module_count;
+	hl_module **modules = hl_module_registry_snapshot(&module_count);
+	int count = 0;
+	void **fp = NULL;
+	bool usable = frame_ptr && frame_ptr >= stack_ptr && (void*)frame_ptr < stack_top && ((uintptr_t)frame_ptr & (sizeof(void*)-1)) == 0
+		&& (frame_ptr[0] == NULL || (frame_ptr[0] > (void*)frame_ptr && frame_ptr[0] <= stack_top));
+	if( jit_leaf && usable )
+		fp = frame_ptr;
+	else {
+		void **from = stack_ptr;
+		if( !jit_leaf ) {
+			// The JIT function that called into native code is at the first return address above the stack pointer.
+			void **end = stack_ptr + CAPTURE_RESYNC_WORDS;
+			if( end > (void**)stack_top ) end = (void**)stack_top;
+			for(void **p=stack_ptr; p<end; p++)
+				if( module_reportable_address(modules,module_count,*p) ) {
+					if( out && count < size ) out[count] = *p;
+					count++;
+					from = p + 1;
+					break;
+				}
+		}
+		fp = usable && frame_ptr >= from ? frame_ptr : module_find_frame_record(modules,module_count,from,stack_top);
+	}
+	while( fp && (void*)fp < stack_top && (!out || count < size) ) {
+		void *lr = fp[1];
+		void *next_fp = fp[0];
+		if( module_reportable_address(modules,module_count,lr) ) {
+			if( out ) out[count] = lr;
+			count++;
+		}
+		if( next_fp == NULL || next_fp >= stack_top ) break; // the outermost frame
+		if( next_fp <= (void*)fp || ((uintptr_t)next_fp & (sizeof(void*)-1)) != 0 )
+			fp = module_find_frame_record(modules,module_count,fp + 2,stack_top);
+		else
+			fp = (void**)next_fp;
+	}
+	hl_module_registry_snapshot_free(modules,module_count);
+	return out && count > size ? size : count;
 }
 
 static int module_capture_stack( void **stack, int size ) {

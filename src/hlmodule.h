@@ -283,6 +283,9 @@ typedef struct {
 #ifdef HL_VTUNE
 	unsigned int *vtune_method_ids;
 #endif
+	/* Bounds of every patch code region ever installed (retired ones included), so an address outside them is not patch code. */
+	void *patch_lo;
+	void *patch_hi;
 } hl_module;
 
 HL_EXTERN_C HL_EXPORT hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg );

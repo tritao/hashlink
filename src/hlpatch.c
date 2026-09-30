@@ -115,6 +115,9 @@ static bool patch_code_resolve_pos( hl_module *m, hl_patch_code *owner, void *ad
 
 bool hl_module_patch_resolve_pos( hl_module *m, void *addr, hl_function **function, int *opcode ) {
 	if( m == NULL || m->patch_owners == NULL ) return false;
+	// Most addresses asked about are not patch code (a stack scan asks about every candidate), and deciding that by
+	// walking every function's owner costs time proportional to the module size.
+	if( m->patch_hi == NULL || addr < m->patch_lo || addr >= m->patch_hi ) return false;
 	for(int i=0;i<m->code->nfunctions+m->code->nnatives;i++) {
 		hl_patch_code *owner = m->patch_owners[i];
 		if( owner == NULL ) continue;
@@ -664,6 +667,8 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	if(type_allocation_count){int needed=m->patch_type_allocation_count+type_allocation_count;if(needed>m->patch_type_allocation_capacity){int capacity=needed<16?16:needed*2;void **owners=(void**)realloc(m->patch_type_allocations,sizeof(void*)*capacity);if(!owners){error="Out of memory publishing patch types";goto fail;}m->patch_type_allocations=owners;m->patch_type_allocation_capacity=capacity;}}
 	for(int i=0;i<type_allocation_count;i++)m->patch_type_allocations[m->patch_type_allocation_count++]=type_allocations[i];
 	free(type_allocations);type_allocations=NULL;type_allocation_count=0;for(int i=m->code->ntypes;i<code.ntypes;i++)m->code->types[i].gc_owner=m;m->code->ntypes=code.ntypes;
+	if(m->patch_lo==NULL||allocation->code<m->patch_lo)m->patch_lo=allocation->code;
+	if(m->patch_hi==NULL||(void*)((unsigned char*)allocation->code+allocation->code_size)>m->patch_hi)m->patch_hi=(unsigned char*)allocation->code+allocation->code_size;
 	for(int i=0;i<patch->function_count;i++){int slot=allocation->functions[i].findex;hl_patch_code *old=m->patch_owners[slot];void *target=(unsigned char*)allocation->code+offsets[i];if(m->patch_targets){if(old==NULL)hl_jit_patch_method(m->patch_targets[slot],m->patch_targets+slot);m->patch_targets[slot]=target;}else{hl_jit_patch_method(m->functions_ptrs[slot],m->functions_ptrs+slot);m->functions_ptrs[slot]=target;}m->patch_owners[slot]=allocation;allocation->references++;if(old&&--old->references==0){if(m->patch_targets)patch_code_free(old);else{old->next_retired=m->retired_patch_code;m->retired_patch_code=old;}}}
 	if(m->patch_ustrings==NULL)m->patch_initial_string_count=patch->base_string_count;
 	free(m->patch_ints);free(m->patch_floats);free(m->patch_strings);free(m->patch_string_lens);free(m->patch_ustrings);free(m->patch_string_data);

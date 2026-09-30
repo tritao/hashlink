@@ -68,6 +68,7 @@
 
 HL_API double hl_sys_time( void );
 int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out, int size );
+int hl_module_capture_stack_from_frame( void *stack_top, void **stack_ptr, void **frame_ptr, bool jit_leaf, void **out, int size );
 uchar *hl_module_resolve_symbol_full( void *addr, uchar *out, int *outSize, int **r_debug_addr );
 bool hl_module_is_jit_code( void *addr );
 
@@ -315,6 +316,20 @@ static void sigprof_handler(int sig, siginfo_t *info, void *ucontext)
 }
 #endif
 
+/** The frame pointer the thread stopped with, or NULL when this target cannot provide it. */
+static void *get_thread_frameptr( void ) {
+#if defined(HL_LINUX) && defined(__x86_64__)
+	return (void*)shared_context.context.uc_mcontext.gregs[REG_RBP];
+#elif defined(HL_LINUX) && defined(__aarch64__)
+	return (void*)shared_context.context.uc_mcontext.regs[29];
+#elif defined(HL_MAC) && defined(__x86_64__)
+	struct __darwin_mcontext64 *mcontext = shared_context.context.uc_mcontext;
+	return mcontext ? (void*)mcontext->__ss.__rbp : NULL;
+#else
+	return NULL;
+#endif
+}
+
 static void *get_thread_stackptr( thread_handle *t, void **eip ) {
 #ifdef HL_WIN_DESKTOP
 	CONTEXT c;
@@ -412,10 +427,21 @@ static void record_data( void *ptr, int size ) {
 	r->currentPos += size;
 }
 
+/* What sampling costs the program: set HL_PROFILE_STATS=1 to have it printed to stderr when the profiler stops. */
+static struct {
+	unsigned long long samples;
+	double capture;   /* seconds of it spent reading the stack */
+	double stopped;   /* seconds a sampled thread was held stopped, handshake included */
+	double total;     /* seconds spent per sample, symbol lookup and recording included */
+	double first, last;
+} sampling_cost;
+
 static void read_thread_data( thread_handle *t ) {
 	double sample_started = hl_sys_time();
+	double stopped_at;
 	if( !pause_thread(t,true) )
 		return;
+	stopped_at = hl_sys_time();
 	void *eip;
 	void *stack = get_thread_stackptr(t,&eip);
 	if( !stack ) {
@@ -424,8 +450,15 @@ static void read_thread_data( thread_handle *t ) {
 	}
 
 #if defined(HL_LINUX) || defined(HL_MAC)
-    int count = hl_module_capture_stack_range(t->inf->stack_top, stack, data.stackOut, MAX_STACK_COUNT);
+    double capture_started = hl_sys_time();
+    void *frame = get_thread_frameptr();
+    bool stopped_in_jit = eip && hl_module_is_jit_code(eip);
+    int count = frame ?
+        hl_module_capture_stack_from_frame(t->inf->stack_top, stack, frame, stopped_in_jit, data.stackOut, MAX_STACK_COUNT) :
+        hl_module_capture_stack_range(t->inf->stack_top, stack, data.stackOut, MAX_STACK_COUNT);
+    sampling_cost.capture += hl_sys_time() - capture_started;
     pause_thread(t, false);
+    sampling_cost.stopped += hl_sys_time() - stopped_at;
 #else
 	int size = (int)((unsigned char*)t->inf->stack_top - (unsigned char*)stack);
 	if( size > MAX_STACK_SIZE-32 ) size = MAX_STACK_SIZE-32;
@@ -483,6 +516,10 @@ static void read_thread_data( thread_handle *t ) {
 		memcpy(t->name, t->inf->thread_name, sizeof(t->name));
 		stream_record(PROFILE_STREAM_EVENT,0,hl_sys_time(),t->tid,PROFILE_EVENT_THREAD_NAME,t->name,(unsigned int)strlen(t->name));
 	}
+	sampling_cost.samples++;
+	sampling_cost.total += hl_sys_time() - sample_started;
+	if( sampling_cost.first == 0 ) sampling_cost.first = sample_started;
+	sampling_cost.last = sample_started;
 	if( stream.lock ) {
 		double elapsed = hl_sys_time() - sample_started;
 		hl_mutex_acquire(stream.lock);
@@ -886,7 +923,17 @@ static void profile_dump( vbyte* ptr ) {
 	profile_resume();
 }
 
+static void profile_print_cost( void ) {
+	double window = sampling_cost.last - sampling_cost.first;
+	if( !getenv("HL_PROFILE_STATS") || !sampling_cost.samples ) return;
+	fprintf(stderr,"profiler: %llu thread samples over %.2fs (%.0f/s); a thread was stopped %.1f us per sample (%.1f%% of the time, summed over threads; %.1f us of it reading the stack), %.1f us per sample in all\n",
+		sampling_cost.samples, window, window > 0 ? sampling_cost.samples / window : 0.0,
+		sampling_cost.stopped * 1e6 / sampling_cost.samples, window > 0 ? 100.0 * sampling_cost.stopped / window : 0.0,
+		sampling_cost.capture * 1e6 / sampling_cost.samples, sampling_cost.total * 1e6 / sampling_cost.samples);
+}
+
 void hl_profile_end() {
+	profile_print_cost();
 	profile_dump(NULL);
 	if( !data.sample_count ) {
 		hl_setup.stop_profiler = NULL;
