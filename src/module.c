@@ -417,8 +417,9 @@ static void **module_find_frame_record( hl_module **modules, int module_count, v
 	are found by following it.
 
 	Native code is the difficulty. It may not keep a chain (and may use the frame-pointer register for something else),
-	so a thread stopped in native code, and a chain that runs into a native frame between two JIT frames, are continued
-	from the nearest frame record found just above, which is a short, bounded read because native frames are small.
+	so a chain that runs into a native frame between two JIT frames is continued from the nearest frame record found just
+	above, which is a short, bounded read because native frames are small. Build native libraries with
+	-fno-omit-frame-pointer to get every frame.
 */
 int hl_module_capture_stack_from_frame( void *stack_top, void **stack_ptr, void **frame_ptr, bool jit_leaf, void **out, int size ) {
 	int module_count;
@@ -427,23 +428,14 @@ int hl_module_capture_stack_from_frame( void *stack_top, void **stack_ptr, void 
 	void **fp = NULL;
 	bool usable = frame_ptr && frame_ptr >= stack_ptr && (void*)frame_ptr < stack_top && ((uintptr_t)frame_ptr & (sizeof(void*)-1)) == 0
 		&& (frame_ptr[0] == NULL || (frame_ptr[0] > (void*)frame_ptr && frame_ptr[0] <= stack_top));
-	if( jit_leaf && usable )
-		fp = frame_ptr;
-	else {
-		void **from = stack_ptr;
-		if( !jit_leaf ) {
-			// The JIT function that called into native code is at the first return address above the stack pointer.
-			void **end = stack_ptr + CAPTURE_RESYNC_WORDS;
-			if( end > (void**)stack_top ) end = (void**)stack_top;
-			for(void **p=stack_ptr; p<end; p++)
-				if( module_reportable_address(modules,module_count,*p) ) {
-					if( out && count < size ) out[count] = *p;
-					count++;
-					from = p + 1;
-					break;
-				}
-		}
-		fp = usable && frame_ptr >= from ? frame_ptr : module_find_frame_record(modules,module_count,from,stack_top);
+	(void)jit_leaf;
+	{
+		// In JIT code the register is the frame pointer. Stopped in native code. If it keeps frame pointers, the register still heads a chain whose first record returns
+		// into the JIT function that called it. If not, the register is the JIT caller's own (that one frame is then
+		// missing) or something unrelated, in which case only a real frame record further up is trusted. Guessing the
+		// caller from return addresses left on the stack is worse than missing it: the JIT does not clear its frames, and
+		// their stale contents name functions that are not running.
+		fp = usable ? frame_ptr : module_find_frame_record(modules,module_count,stack_ptr,stack_top);
 	}
 	while( fp && (void*)fp < stack_top && (!out || count < size) ) {
 		void *lr = fp[1];
