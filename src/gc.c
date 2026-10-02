@@ -996,7 +996,7 @@ static float gc_mark_threshold = 0.2f;
 
 // A major collection also waits for at least this much allocation, so a small live heap is not re-marked after every
 // few megabytes of garbage. Large heaps are unaffected: 20% of them is already above it.
-static int64 gc_min_trigger_bytes = 16 << 20;
+static int64 gc_min_trigger_bytes = 64 << 20;
 static int mark_size = 0;
 static unsigned char *mark_data = NULL;
 static gc_mstack global_mark_stack = {0};
@@ -1418,7 +1418,7 @@ static void hl_gc_init() {
 		gc_flags |= GC_PROFILE_MEM;
 	if( getenv("HL_DUMP_MEMORY") )
 		gc_flags |= GC_DUMP_MEM;
-	// HL_GC_MIN_TRIGGER=<bytes>: the least allocation between two major collections (default 16 MB).
+	// HL_GC_MIN_TRIGGER=<bytes>: the least allocation between two major collections (default 64 MB).
 	const char *min_trigger = getenv("HL_GC_MIN_TRIGGER");
 	if( min_trigger && atoll(min_trigger) >= 0 )
 		gc_min_trigger_bytes = atoll(min_trigger);
