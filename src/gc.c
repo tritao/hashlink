@@ -234,7 +234,12 @@ static void gc_sweep_owned_allocs() {
 
 static hl_threads_info gc_threads;
 
+#if defined(__linux__) && !defined(__ANDROID__) && defined(__GNUC__)
+// The VM is linked in at startup, so the cheap initial-exec TLS model applies and each allocation skips __tls_get_addr.
+HL_THREAD_STATIC_VAR hl_thread_info *current_thread __attribute__((tls_model("initial-exec")));
+#else
 HL_THREAD_STATIC_VAR hl_thread_info *current_thread;
+#endif
 
 static struct {
 	int64 total_requested;
@@ -834,8 +839,10 @@ static void *gc_tlab_alloc( hl_thread_info *th, int size, int flags ) {
 	}
 	unsigned char *ptr = slot->cur;
 	slot->cur += block;
-	if( flags & MEM_ZERO )
-		MZERO(ptr,block);
+	if( flags & MEM_ZERO ) {
+		// Blocks are at most five words, so zero them with plain stores rather than a memset call.
+		for(int i=0;i<block;i+=(int)sizeof(uintptr_t)) *(uintptr_t*)(ptr+i) = 0;
+	}
 	else if( MEM_HAS_PTR(flags) && block != size )
 		MZERO(ptr+size,block-size); // erase possible pointers after data
 	return ptr;
