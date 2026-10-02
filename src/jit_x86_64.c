@@ -141,6 +141,7 @@ typedef enum {
 	ANDNPD,
 	ORPD,
 	XORPD,
+	SQRTSD,
 	CVTSI2SD,
 	CVTSI2SS,
 	CVTTSD2SI,
@@ -273,6 +274,7 @@ static opform OP_FORMS[] = {
 	{ "ANDNPD", 0x660F55 },
 	{ "ORPD", 0x660F56 },
 	{ "XORPD", 0x660F57 },
+	{ "SQRTSD", 0xF20F51 },
 	{ "CVTSI2SD", 0xF20F2A },
 	{ "CVTSI2SS", 0xF30F2A },
 	{ "CVTTSD2SI", 0xF20F2C },
@@ -1019,6 +1021,16 @@ static void emit_anyop( code_ctx *ctx, hl_op op, ereg out, ereg a, ereg b, emit_
 			EMIT(XOR,a,MK_CONST(1),M_I32);
 		} else {
 			BREAK();
+		}
+		return;
+	case OJitSqrt:
+		{
+			// Square root of a double, emitted in place of a call to the runtime's Math.sqrt. The destination is
+			// cleared first (unless it is the source) so the instruction does not wait on its previous value.
+			ereg d = IS_REG(out) ? out : get_tmp(mode);
+			if( d != a ) EMIT(XORPD,d,d,mode);
+			EMIT(SQRTSD,d,a,mode);
+			if( d != out ) emit_mov(ctx,out,d,mode);
 		}
 		return;
 	case ONeg:

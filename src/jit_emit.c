@@ -721,6 +721,17 @@ static ereg emit_call_fid( emit_ctx *ctx, int findex, ereg *args, int nargs, emi
 	return mode == M_VOID ? UNUSED : new_value(ctx);
 }
 
+#if defined(__x86_64__) || defined(_M_X64)
+// The runtime's Math.sqrt: the one native call worth replacing by an instruction.
+static bool is_sqrt_native( hl_module *m, int fid ) {
+	int native_index = fid - m->code->nfunctions;
+	if( native_index < 0 || native_index >= m->code->nnatives )
+		return false;
+	hl_native *native = m->code->natives + native_index;
+	return strcmp(native->name,"__math_sqrt") == 0 && native->lib != NULL && strstr(native->lib,"runtime") != NULL;
+}
+#endif
+
 static void emit_call_fun( emit_ctx *ctx, vreg *dst, int findex, int count, int *args_regs ) {
 	hl_module *m = ctx->mod;
 	int fid = m->functions_indexes[findex];
@@ -738,6 +749,12 @@ static void emit_call_fun( emit_ctx *ctx, vreg *dst, int findex, int count, int 
 				hl_fatal1("HashLink: unresolved native findex %d", findex);
 			}
 		}
+#		if defined(__x86_64__) || defined(_M_X64)
+		if( count == 1 && dst->t->kind == HF64 && is_sqrt_native(m, fid) ) {
+			STORE(dst, emit_gen_ext(ctx, UNOP, args[0], UNUSED, M_F64, OJitSqrt));
+			return;
+		}
+#		endif
 		STORE(dst, emit_native_call(ctx, m->functions_ptrs[findex], args, count, dst->t));
 	} else {
 		ereg out = emit_call_fid(ctx,findex,args,count,hl_type_mode(dst->t));

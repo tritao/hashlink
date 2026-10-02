@@ -31,6 +31,9 @@
 #	define SETJMP_FUN	setjmp
 #endif
 
+// A unary double operation the JIT emits itself (x86-64 only), numbered above every hl_op.
+#define OJitSqrt	0x7E00
+
 typedef enum {
 	LOAD_ADDR,
 	LOAD_CONST,
