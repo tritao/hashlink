@@ -893,6 +893,10 @@ typedef struct {
 } gc_mthread;
 
 static float gc_mark_threshold = 0.2f;
+
+// A major collection also waits for at least this much allocation, so a small live heap is not re-marked after every
+// few megabytes of garbage. Large heaps are unaffected: 20% of them is already above it.
+static int64 gc_min_trigger_bytes = 16 << 20;
 static int mark_size = 0;
 static unsigned char *mark_data = NULL;
 static gc_mstack global_mark_stack = {0};
@@ -1271,7 +1275,12 @@ static bool gc_is_active = true;
 static void gc_check_mark() {
 	int64 m = gc_stats.total_allocated - gc_stats.last_mark;
 	int64 b = gc_stats.allocation_count - gc_stats.last_mark_allocs;
-	if( (m > gc_stats.pages_total_memory * gc_mark_threshold || b > gc_stats.pages_blocks * gc_mark_threshold || (gc_flags & GC_FORCE_MAJOR)) && gc_is_active )
+	int64 bytes_limit = (int64)(gc_stats.pages_total_memory * gc_mark_threshold);
+	int64 blocks_limit = (int64)(gc_stats.pages_blocks * gc_mark_threshold);
+	if( bytes_limit < gc_min_trigger_bytes ) bytes_limit = gc_min_trigger_bytes;
+	// the same floor for the block count, assuming the smallest blocks are 16 bytes
+	if( blocks_limit < gc_min_trigger_bytes / 16 ) blocks_limit = gc_min_trigger_bytes / 16;
+	if( (m > bytes_limit || b > blocks_limit || (gc_flags & GC_FORCE_MAJOR)) && gc_is_active )
 		gc_major();
 }
 
@@ -1309,6 +1318,18 @@ static void hl_gc_init() {
 		gc_flags |= GC_PROFILE_MEM;
 	if( getenv("HL_DUMP_MEMORY") )
 		gc_flags |= GC_DUMP_MEM;
+	// HL_GC_MIN_TRIGGER=<bytes>: the least allocation between two major collections (default 16 MB).
+	const char *min_trigger = getenv("HL_GC_MIN_TRIGGER");
+	if( min_trigger && atoll(min_trigger) >= 0 )
+		gc_min_trigger_bytes = atoll(min_trigger);
+	// HL_GC_MARK_THRESHOLD=<fraction>: a major collection runs once the bytes allocated since the last one exceed
+	// this fraction of the heap (see gc_check_mark). The heap settles near live / (1 - fraction).
+	const char *mark_threshold = getenv("HL_GC_MARK_THRESHOLD");
+	if( mark_threshold ) {
+		double fraction = atof(mark_threshold);
+		if( fraction > 0.0 && fraction < 0.95 )
+			gc_mark_threshold = (float)fraction;
+	}
 #	endif
 	gc_stats.mark_bytes = 4; // prevent reading out of bmp
 	memset(&gc_threads,0,sizeof(gc_threads));
