@@ -290,9 +290,16 @@ static void gc_global_lock( bool lock ) {
 	if( lock ) {
 		if( !t )
 			hl_fatal("Can't lock GC in unregistered thread");
-		if( mt ) gc_save_context(t,&lock);
+		// Another thread can only be collecting while it holds this lock, and it then needs our registers and stack
+		// to scan before we block. When the lock is free nobody is: skip the context save, which is a setjmp and a
+		// stack copy on every allocation. A thread that goes on to collect saves its own context in gc_stop_world.
+		if( mt && !hl_mutex_try_acquire(gc_threads.global_lock) ) {
+			gc_save_context(t,&lock);
+			t->gc_blocking++;
+			hl_mutex_acquire(gc_threads.global_lock);
+			return;
+		}
 		t->gc_blocking++;
-		if( mt ) hl_mutex_acquire(gc_threads.global_lock);
 	} else {
 		t->gc_blocking--;
 		if( mt ) hl_mutex_release(gc_threads.global_lock);
@@ -420,6 +427,8 @@ static void gc_stop_world( bool b ) {
 #	ifdef HL_THREADS
 	if( b ) {
 		int i;
+		// the collecting thread publishes its own context here: gc_global_lock does not on the uncontended path
+		if( current_thread ) gc_save_context(current_thread,&b);
 		gc_threads.stopping_world = true;
 		for(i=0;i<gc_threads.count;i++) {
 			hl_thread_info *t = gc_threads.threads[i];
