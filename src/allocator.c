@@ -276,11 +276,13 @@ static void flush_free_list( gc_pheader *ph ) {
 	free_freelist(&old_fl);
 }
 
-static void *gc_alloc_fixed( int part, int kind ) {
+// Takes up to `want` consecutive free blocks of one size class, and says how many it took in `got`.
+static void *gc_alloc_fixed_run( int part, int kind, int want, int *got ) {
 	int pid = (part << PAGE_KIND_BITS) | kind;
 	gc_pheader *ph = gc_free_pages[pid];
 	gc_allocator_page_data *p = NULL;
 	int bid = -1;
+	int taken = 1;
 	while( ph ) {
 		p = &ph->alloc;
 		if( p->need_flush )
@@ -288,8 +290,10 @@ static void *gc_alloc_fixed( int part, int kind ) {
 		gc_freelist *fl = &p->free;
 		if( fl->current < fl->count ) {
 			gc_fl *c = GET_FL(fl,fl->current);
-			bid = c->pos++;
-			c->count--;
+			taken = c->count < want ? c->count : want;
+			bid = c->pos;
+			c->pos += taken;
+			c->count -= taken;
 #			ifdef GC_DEBUG
 			if( c->count < 0 ) hl_fatal("assert");
 #			endif
@@ -301,9 +305,12 @@ static void *gc_alloc_fixed( int part, int kind ) {
 	if( ph == NULL ) {
 		ph = gc_allocator_new_page(pid, GC_SIZES[part], GC_PAGE_SIZE, kind, false);
 		p = &ph->alloc;
-		bid = p->free.data->pos++;
-		p->free.data->count--;
+		bid = p->free.data->pos;
+		taken = p->free.data->count < want ? p->free.data->count : want;
+		p->free.data->pos += taken;
+		p->free.data->count -= taken;
 	}
+	*got = taken;
 	unsigned char *ptr = ph->base + bid * p->block_size;
 #	ifdef GC_DEBUG
 	{
@@ -319,6 +326,11 @@ static void *gc_alloc_fixed( int part, int kind ) {
 #	endif
 	gc_free_pages[pid] = ph;
 	return ptr;
+}
+
+static void *gc_alloc_fixed( int part, int kind ) {
+	int got;
+	return gc_alloc_fixed_run(part,kind,1,&got);
 }
 
 static void *gc_alloc_var( int part, int size, int kind ) {

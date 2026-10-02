@@ -196,6 +196,27 @@ static void gc_free_page( gc_pheader *page, int block_count );
 #include "allocator.c"
 #endif
 
+#if defined(HL_THREADS) && !defined(GC_EXTERN_API) && !defined(GC_DEBUG) && !defined(GC_MEMCHK)
+#	define GC_TLAB
+// Allocation buffers. Each thread reserves a run of consecutive free blocks of one size class and then hands them
+// out without taking the global lock or touching shared counters. A slot is only written by its own thread while it
+// runs, and by the collector once the thread is blocked, so no atomic is needed.
+#	define GC_TLAB_SLOTS	(GC_FIXED_PARTS << PAGE_KIND_BITS)
+#	define GC_TLAB_RUN		2048
+typedef struct {
+	unsigned char *cur;
+	unsigned char *end;
+} gc_tlab_slot;
+#endif
+
+// Publishes this thread's earlier writes before the collector can see it blocked (the collector then clears the
+// thread's allocation buffers).
+#if defined(__GNUC__)
+#	define gc_release_fence() __atomic_thread_fence(__ATOMIC_RELEASE)
+#else
+#	define gc_release_fence()
+#endif
+
 static void gc_sweep_owned_allocs() {
 	gc_owned_alloc **cursor = &gc_owned_allocs;
 	while( *cursor ) {
@@ -295,6 +316,7 @@ static void gc_global_lock( bool lock ) {
 		// stack copy on every allocation. A thread that goes on to collect saves its own context in gc_stop_world.
 		if( mt && !hl_mutex_try_acquire(gc_threads.global_lock) ) {
 			gc_save_context(t,&lock);
+			gc_release_fence();
 			t->gc_blocking++;
 			hl_mutex_acquire(gc_threads.global_lock);
 			return;
@@ -378,6 +400,10 @@ HL_API void hl_register_thread( void *stack_top ) {
 
 	hl_thread_info *t = (hl_thread_info*)malloc(sizeof(hl_thread_info));
 	memset(t, 0, sizeof(hl_thread_info));
+#	ifdef GC_TLAB
+	t->gc_tlab = calloc(GC_TLAB_SLOTS,sizeof(gc_tlab_slot));
+	if( t->gc_tlab == NULL ) out_of_memory("thread allocation buffers");
+#	endif
 	t->thread_id = hl_thread_id();
 	#ifdef HL_MAC
 	t->mach_thread_id = mach_thread_self();
@@ -413,6 +439,9 @@ HL_API void hl_unregister_thread() {
 			gc_threads.count--;
 			break;
 		}
+#	ifdef GC_TLAB
+	free(t->gc_tlab);
+#	endif
 	free(t);
 	current_thread = NULL;
 	// don't use gc_global_lock(false)
@@ -434,6 +463,14 @@ static void gc_stop_world( bool b ) {
 			hl_thread_info *t = gc_threads.threads[i];
 			while( t->gc_blocking == 0 ) {}; // spinwait
 		}
+#		ifdef GC_TLAB
+		// The blocks reserved in allocation buffers and not handed out are unmarked, so the sweep frees them. The
+		// buffers must be empty before that, or they would hand out blocks the free lists have again.
+		for(i=0;i<gc_threads.count;i++) {
+			hl_thread_info *t = gc_threads.threads[i];
+			if( t->gc_tlab ) memset(t->gc_tlab,0,GC_TLAB_SLOTS*sizeof(gc_tlab_slot));
+		}
+#		endif
 	} else {
 		// releasing global lock will release all threads
 		gc_threads.stopping_world = false;
@@ -773,6 +810,38 @@ HL_API void hl_gc_set_profile_allocation_callback( void (*callback)(hl_type*,int
 	gc_profile_allocation_callback = callback;
 }
 
+#ifdef GC_TLAB
+// A small allocation out of the thread's buffer; an empty buffer is refilled under the global lock, which is also
+// where the collection trigger is checked and where the reserved bytes are counted.
+static void *gc_tlab_alloc( hl_thread_info *th, int size, int flags ) {
+	int kind = flags & PAGE_KIND_MASK;
+	int rounded = size + ((-size) & (GC_ALIGN - 1));
+	int part = (rounded >> GC_ALIGN_BITS) - 1;
+	int block = GC_SIZES[part];
+	gc_tlab_slot *slot = (gc_tlab_slot*)th->gc_tlab + ((part << PAGE_KIND_BITS) | kind);
+	if( slot->cur == slot->end ) {
+		int got;
+		unsigned char *run;
+		gc_global_lock(true);
+		gc_check_mark();
+		run = (unsigned char*)gc_alloc_fixed_run(part,kind,GC_TLAB_RUN / block,&got);
+		gc_stats.allocation_count += got;
+		gc_stats.total_requested += (int64)got * block;
+		gc_stats.total_allocated += (int64)got * block;
+		slot->cur = run;
+		slot->end = run + got * block;
+		gc_global_lock(false);
+	}
+	unsigned char *ptr = slot->cur;
+	slot->cur += block;
+	if( flags & MEM_ZERO )
+		MZERO(ptr,block);
+	else if( MEM_HAS_PTR(flags) && block != size )
+		MZERO(ptr+size,block-size); // erase possible pointers after data
+	return ptr;
+}
+#endif
+
 void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 	void *ptr;
 	int time = 0;
@@ -782,6 +851,17 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 		return NULL;
 	if( size < 0 )
 		hl_error("Invalid allocation size");
+#	ifdef GC_TLAB
+	if( owner == NULL && size <= GC_SIZES[GC_FIXED_PARTS-1] && (flags & PAGE_KIND_MASK) != MEM_KIND_FINALIZER ) {
+		hl_thread_info *th = current_thread;
+		if( th && th->gc_tlab && !(gc_flags & (GC_PROFILE|GC_FORCE_MAJOR)) && !gc_census_on && gc_profile_allocation_callback == NULL
+#			ifdef HL_TRACK_ENABLE
+			&& !(hl_track.flags & HL_TRACK_ALLOC)
+#			endif
+		)
+			return gc_tlab_alloc(th,size,flags);
+	}
+#	endif
 	gc_global_lock(true);
 	gc_check_mark();
 #	ifdef GC_MEMCHK
@@ -1396,6 +1476,7 @@ HL_API void hl_blocking( bool b ) {
 		if( t->gc_blocking == 0 )
 			gc_save_context(t,&b);
 #		endif
+		gc_release_fence();
 		t->gc_blocking++;
 	} else if( t->gc_blocking == 0 )
 		hl_error("Unblocked thread");
