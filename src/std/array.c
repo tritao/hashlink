@@ -71,6 +71,12 @@ HL_PRIM void hl_array_check( varray *a, int index ) {
 		hl_error("Array index out of bounds");
 }
 
+// Called only once an index is known to be out of range (an inlined bounds test failed), so it never returns.
+// The JIT relies on that to keep values in registers across the call.
+HL_PRIM void hl_array_out_of_bounds( varray *a, int index ) {
+	hl_error("Array index out of bounds");
+}
+
 HL_PRIM void hl_array_ensure( varray *a, int index ) {
 	if( index < 0 ) hl_error("Array index out of bounds");
 	if( index < a->size ) return;
@@ -94,6 +100,7 @@ HL_PRIM vbyte *hl_array_bytes( varray *a ) {
 DEFINE_PRIM(_ARR,alloc_array,_TYPE _I32);
 DEFINE_PRIM(_VOID,array_check,_ARR _I32);
 DEFINE_PRIM(_VOID,array_ensure,_ARR _I32);
+DEFINE_PRIM(_VOID,array_out_of_bounds,_ARR _I32);
 DEFINE_PRIM(_VOID,array_blit,_ARR _I32 _ARR _I32 _I32);
 DEFINE_PRIM(_TYPE,array_type,_ARR);
 DEFINE_PRIM(_BYTES,array_bytes,_ARR);
