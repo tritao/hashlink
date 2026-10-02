@@ -179,6 +179,12 @@ HL_PRIM int64 hl_dyn_casti64( void *data, hl_type *t ) {
 }
 
 HL_PRIM void *hl_dyn_castp( void *data, hl_type *t, hl_type *to ) {
+	if( t->kind == HDYN && to->kind == HOBJ ) {
+		// Common case (typed map values, array elements): the dynamic already holds an object of exactly the target type.
+		vdynamic *v = *(vdynamic**)data;
+		if( v && v->t == to )
+			return v;
+	}
 	hl_track_call(HL_TRACK_CAST, on_cast(t,to));
 	if( to->kind == HDYN && hl_is_dynamic(t) )
 		return *(vdynamic**)data;
