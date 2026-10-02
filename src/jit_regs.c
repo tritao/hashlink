@@ -1078,7 +1078,7 @@ void hl_regs_function( jit_ctx *jit ) {
 	}
 	for(int i=0;i<jit->track_count;i++) {
 		int v = jit->values_track[(i<<1)|1];
-		VAL(v)->tracked = jit->values_track[i<<1] + 1;
+		VAL_REG(v)->tracked = jit->values_track[i<<1] + 1;
 	}
 	for(int b=0;b<jit->block_count;b++) {
 		eblock *bl = jit->blocks + b;
