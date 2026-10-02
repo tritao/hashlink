@@ -560,7 +560,11 @@ static gc_pheader *gc_alloc_page( int size, int kind, int block_count ) {
 	p->page_id = PAGE_ID++;
 #	else
 	// prevent false positive to access invalid type
+#	if !defined(HL_WIN) && !defined(HL_CONSOLE) && !defined(HL_EMSCRIPTEN)
+	// Pages come straight from a fresh mapping, which the OS already zeroed.
+#	else
 	if( kind == MEM_KIND_DYNAMIC ) memset(base, 0, size);
+#	endif
 #	endif
 	if( ((int_val)base) & ((1<<GC_MASK_BITS) - 1) )
 		hl_fatal("Page memory is not correctly aligned");
