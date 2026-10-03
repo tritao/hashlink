@@ -213,6 +213,7 @@ typedef enum {
 } native_stack_layout_kind;
 
 #define JIT_REGOPT_CALL_SAVE 1
+#define JIT_REGOPT_LOOP_PHI 4
 
 typedef struct {
 	reg_config regs;

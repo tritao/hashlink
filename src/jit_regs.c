@@ -89,6 +89,7 @@ struct _regs_ctx {
 	bool counting_phis;
 	int_arr *call_saved;
 	bool has_try;
+	bool register_phis[2];
 	long long *call_weights;
 	int *loop_weights;
 	int *hot_calls;
@@ -384,12 +385,15 @@ static void regs_assign( regs_ctx *ctx, value_info *v ) {
 	// Debugger-visible loop phis need one stable location on every incoming edge.
 	// Keeping them in a stack slot avoids exposing an edge-specific native
 	// register as the merged source variable's location.
-	if( v->id < 0 && v->tracked && v->debug_loop ) {
+	bool across = live_across_call(ctx, v, ctx->cur_op);
+	// Keep the established pressure policy across mandatory loop calls.
+	bool register_phi = ctx->register_phis[REG_MODE(v->mode)] &&
+		(!across || (ctx->hot_calls && ctx->hot_calls[v->last_read] == ctx->hot_calls[ctx->cur_op + 1]));
+	if( v->id < 0 && v->tracked && v->debug_loop && !register_phi ) {
 		if( v->stack_pos == INVALID ) v->stack_pos = regs_alloc_stack(ctx, hl_emit_mode_sizes[v->mode]);
 		v->reg = MK_STACK_REG(v->stack_pos);
 		return;
 	}
-	bool across = live_across_call(ctx, v, ctx->cur_op);
 	regs_alloc_reg(ctx, v, across);
 	if( across && ctx->call_weights && ctx->hot_calls[v->last_read] == ctx->hot_calls[ctx->cur_op + 1] && (ctx->jit->cfg.regopt & JIT_REGOPT_CALL_SAVE) && !ctx->jit->mod->debug && !ctx->has_try &&
 		IS_REG(v->reg) && !reg_is_persist(REG_CFG(REG_MODE(v->mode)),v->reg) ) {
@@ -420,6 +424,11 @@ static void regs_loop_liveness( regs_ctx *ctx, eblock *block, value_info *v, int
 	eblock *b = (block->loop_end > 0) ? block : block->loop_parent;
 	while( b ) {
 		if( write >= b->start_pos ) break;
+		// A loop phi needs its own back edge, not the extent of an enclosing loop.
+		if( v->id < 0 && ctx->register_phis[REG_MODE(v->mode)] && v->start >= b->start_pos ) {
+			if( v->start == b->start_pos && pos < b->loop_end ) pos = b->loop_end;
+			break;
+		}
 		if( pos < b->loop_end ) pos = b->loop_end;
 		b = b->loop_parent;
 	}
@@ -557,6 +566,55 @@ static void regs_extend_debug_liveness( regs_ctx *ctx ) {
 			value_info *a = VAL_REG(jit->live_ends[k<<1]);
 			if( a->tracked != v->tracked ) continue;
 			if( v->last_read < a->last_read ) v->last_read = a->last_read;
+		}
+	}
+}
+
+// Register phis won only with substantial register-file headroom. Baseline
+// live intervals conservatively include values already forced to memory; that
+// can reject opportunities but prevents the measured crowded-loop regressions.
+// Recompute liveness only after selecting a bank, keeping rejected banks exact.
+static void regs_relax_loop_phis( regs_ctx *ctx, int nvalues ) {
+	jit_ctx *jit = ctx->jit;
+	if( !(jit->cfg.regopt & JIT_REGOPT_LOOP_PHI) || jit->mod->debug || ctx->has_try ) return;
+	bool candidates[2] = {false,false};
+	for(int i=jit->value_count;i<nvalues;i++) {
+		value_info *v = VAL(i);
+		if( v->tracked && v->debug_loop ) candidates[REG_MODE(v->mode)] = true;
+	}
+	if( candidates[0] || candidates[1] ) {
+		int count = jit->instr_count + 1;
+		int *pressure = (int*)hl_zalloc(&jit->falloc,sizeof(int) * count * 2);
+		for(int i=1;i<nvalues;i++) {
+			value_info *v = VAL(i);
+			int mode = REG_MODE(v->mode);
+			if( !candidates[mode] || v->last_read <= v->start ) continue;
+			int end = v->last_read < count ? v->last_read : count - 1;
+			pressure[mode * count + v->start]++;
+			pressure[mode * count + end]--;
+		}
+		for(int mode=0;mode<2;mode++) {
+			int live = 0, peak = 0;
+			for(int i=0;i<count;i++) {
+				live += pressure[mode * count + i];
+				if( live > peak ) peak = live;
+			}
+			reg_config *config = REG_CFG(mode);
+			ctx->register_phis[mode] = candidates[mode] && peak * 2 <= config->nscratchs + config->npersists;
+		}
+		if( ctx->register_phis[0] || ctx->register_phis[1] ) {
+			for(int i=1;i<nvalues;i++) {
+				value_info *v = VAL(i);
+				v->last_read = -1;
+				v->tot_reads = 0;
+				v->pref_reg = UNUSED;
+				int_arr_free(&v->reads);
+			}
+			for(int i=0;i<jit->block_count;i++) int_arr_free(&ctx->blocks_phis[i]);
+			ctx->cur_block = NULL;
+			ctx->has_direct_call = false;
+			regs_compute_liveness(ctx);
+			regs_extend_debug_liveness(ctx);
 		}
 	}
 }
@@ -1146,7 +1204,7 @@ void hl_regs_function( jit_ctx *jit ) {
 	ctx->loop_weights = NULL;
 	ctx->hot_calls = NULL;
 	ctx->has_try = false;
-	if( (jit->cfg.regopt & JIT_REGOPT_CALL_SAVE) && !jit->mod->debug && ctx->ncalls[jit->instr_count] ) {
+	if( (jit->cfg.regopt & (JIT_REGOPT_CALL_SAVE | JIT_REGOPT_LOOP_PHI)) && !jit->mod->debug ) {
 		for(int i=0;i<jit->fun->nops;i++) if( jit->fun->ops[i].op == OTrap ) ctx->has_try = true;
 	}
 	if( (jit->cfg.regopt & JIT_REGOPT_CALL_SAVE) && !jit->mod->debug && !ctx->has_try && ctx->ncalls[jit->instr_count] ) {
@@ -1213,8 +1271,10 @@ void hl_regs_function( jit_ctx *jit ) {
 			}
 		}
 	}
+	ctx->register_phis[0] = ctx->register_phis[1] = false;
 	regs_compute_liveness(ctx);
 	regs_extend_debug_liveness(ctx);
+	regs_relax_loop_phis(ctx,nvalues);
 	regs_assign_regs(ctx);
 	jit->regstats_stack_values = 0;
 	jit->regstats_loop_stack_phis = 0;

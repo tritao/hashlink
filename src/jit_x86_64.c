@@ -463,7 +463,7 @@ static void detect_cpu_features() {
 void hl_jit_init_regs( regs_config *cfg ) {
 #if defined(HL_64) && !defined(HL_WIN_CALL)
 	const char *option = getenv("HL_JIT_REGOPT");
-	cfg->regopt = option ? (int)strtol(option,NULL,0) & JIT_REGOPT_CALL_SAVE : 0;
+	cfg->regopt = option ? (int)strtol(option,NULL,0) & (JIT_REGOPT_CALL_SAVE | JIT_REGOPT_LOOP_PHI) : (JIT_REGOPT_CALL_SAVE | JIT_REGOPT_LOOP_PHI);
 #endif
 	detect_cpu_features();
 	// exclude R11 at it's use as temporary for various ops
