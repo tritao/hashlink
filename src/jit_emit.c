@@ -721,16 +721,7 @@ static ereg emit_call_fid( emit_ctx *ctx, int findex, ereg *args, int nargs, emi
 	return mode == M_VOID ? UNUSED : new_value(ctx);
 }
 
-#if defined(__x86_64__) || defined(_M_X64)
-// The runtime's Math.sqrt: the one native call worth replacing by an instruction.
-static bool is_sqrt_native( hl_module *m, int fid ) {
-	int native_index = fid - m->code->nfunctions;
-	if( native_index < 0 || native_index >= m->code->nnatives )
-		return false;
-	hl_native *native = m->code->natives + native_index;
-	return strcmp(native->name,"__math_sqrt") == 0 && native->lib != NULL && strstr(native->lib,"runtime") != NULL;
-}
-#endif
+#include "jit_intrinsics.h"
 
 static void emit_call_fun( emit_ctx *ctx, vreg *dst, int findex, int count, int *args_regs ) {
 	hl_module *m = ctx->mod;
@@ -755,8 +746,23 @@ static void emit_call_fun( emit_ctx *ctx, vreg *dst, int findex, int count, int 
 			}
 		}
 #		if defined(__x86_64__) || defined(_M_X64)
-		if( count == 1 && dst->t->kind == HF64 && is_sqrt_native(m, fid) ) {
-			STORE(dst, emit_gen_ext(ctx, UNOP, args[0], UNUSED, M_F64, OJitSqrt));
+		const jit_intrinsic_entry *intrinsic = jit_intrinsic_lookup(m->code->natives + fid - m->code->nfunctions);
+		if( intrinsic && count == intrinsic->nargs && hl_type_mode(dst->t) == intrinsic->result ) {
+			ereg value;
+			switch( intrinsic->intrinsic ) {
+			case INTR_SQRT:
+				value = emit_gen_ext(ctx, UNOP, args[0], UNUSED, M_F64, OJitSqrt);
+				break;
+			case INTR_ABS:
+				value = emit_gen_ext(ctx, UNOP, args[0], UNUSED, M_F64, OJitAbs);
+				break;
+			case INTR_FLOOR: case INTR_CEIL:
+				value = emit_gen_ext(ctx, UNOP, args[0], UNUSED, M_F64, intrinsic->intrinsic == INTR_FLOOR ? OJitFloor : OJitCeil);
+				value = emit_gen_ext(ctx, CONV, value, UNUSED, M_I32, M_F64);
+				break;
+			default: jit_assert(); value = UNUSED; break;
+			}
+			STORE(dst,value);
 			return;
 		}
 #		endif

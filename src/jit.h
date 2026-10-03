@@ -33,6 +33,9 @@
 
 // A unary double operation the JIT emits itself (x86-64 only), numbered above every hl_op.
 #define OJitSqrt	0x7E00
+#define OJitAbs	0x7E01
+#define OJitFloor	0x7E02
+#define OJitCeil	0x7E03
 
 typedef enum {
 	LOAD_ADDR,

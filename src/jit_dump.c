@@ -339,7 +339,13 @@ static void dump_instr( jit_ctx *ctx, einstr *e, int cur_pos ) {
 		break;
 	case BINOP:
 	case UNOP:
-		printf("-%s", hl_op_name(e->size_offs)+1);
+		switch( e->size_offs ) {
+		case OJitSqrt: printf("-Sqrt"); break;
+		case OJitAbs: printf("-Abs"); break;
+		case OJitFloor: printf("-Floor"); break;
+		case OJitCeil: printf("-Ceil"); break;
+		default: printf("-%s", hl_op_name(e->size_offs)+1); break;
+		}
 		show_size = false;
 		break;
 	default:
