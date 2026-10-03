@@ -167,6 +167,7 @@ int main(int argc, char *argv[]) {
 	cl.t = &clt;
 	cl.fun = hl_entry_point;
 	ret = hl_dyn_call_safe(&cl, NULL, 0, &isExc);
+	fflush(stdout);
 	if( isExc ) {
 		hl_print_uncaught_exception(ret);
 	}

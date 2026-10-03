@@ -42,6 +42,7 @@ HL_PRIM void *hl_fatal_error( const char *msg, const char *file, int line ) {
 	}
 #	endif
 	printf("%s(%d) : FATAL ERROR : %s\n",file,line,msg);
+	fflush(stdout);
 	hl_blocking(false);
 	hl_debug_break();
 	exit(1);
@@ -206,6 +207,7 @@ static bool maybe_print_custom_stack( vdynamic *exc ) {
 }
 
 HL_PRIM void hl_print_uncaught_exception(vdynamic *exc) {
+	fflush(stdout);
 	print_exception_line("Uncaught exception: ",hl_to_string(exc));
 	if (!maybe_print_custom_stack(exc)) {
 		varray *a = hl_exception_stack();

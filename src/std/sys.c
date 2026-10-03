@@ -136,13 +136,31 @@ HL_PRIM vbyte *hl_sys_locale() {
 
 #define PR_WIN_UTF8 1
 #define PR_AUTO_FLUSH 2
-static int print_flags = PR_AUTO_FLUSH;
+static int print_flags = -1;
+
+static void init_print_flags() {
+	if( print_flags >= 0 ) return;
+#if defined(HL_CONSOLE)
+	print_flags = PR_AUTO_FLUSH;
+#else
+#ifdef HL_WIN
+	const pchar *override = getenv(L"HL_STDOUT_FLUSH");
+	int terminal = _isatty(_fileno(stdout));
+#else
+	const pchar *override = getenv("HL_STDOUT_FLUSH");
+	int terminal = isatty(fileno(stdout));
+#endif
+	// Leave stdio's terminal line buffering and redirected full buffering intact.
+	print_flags = terminal || (override && override[0] == '1' && override[1] == 0) ? PR_AUTO_FLUSH : 0;
+#endif
+}
 
 HL_PRIM int hl_sys_set_flags( int flags ) {
 	return print_flags = flags;
 }
 
 HL_PRIM void hl_sys_print( vbyte *msg ) {
+	init_print_flags();
 	hl_blocking(true);
 #	ifdef HL_WIN_DESKTOP
 	if( print_flags & PR_WIN_UTF8 ) _setmode(_fileno(stdout),_O_U8TEXT);
@@ -167,6 +185,7 @@ HL_PRIM void hl_sys_profile_span( int code, uchar *name ) {
 }
 
 HL_PRIM void hl_sys_exit( int code ) {
+	fflush(stdout);
 	if( hl_setup.before_exit ) hl_setup.before_exit();
 	exit(code);
 }
@@ -307,6 +326,7 @@ HL_PRIM varray *hl_sys_env() {
 
 
 HL_PRIM void hl_sys_sleep( double f ) {
+	fflush(stdout);
 	hl_blocking(true);
 #if defined(HL_WIN)
 	#if !defined(HL_CONSOLE)
@@ -370,6 +390,7 @@ HL_PRIM bool hl_sys_is64() {
 }
 
 HL_PRIM int hl_sys_command( vbyte *cmd ) {
+	fflush(stdout);
 #if defined(HL_WIN)
 	int ret;
 	hl_blocking(true);
@@ -657,6 +678,7 @@ HL_PRIM double hl_sys_process_memory() {
 }
 
 HL_PRIM int hl_sys_get_char( bool b ) {
+	fflush(stdout);
 #	if defined(HL_WIN_DESKTOP)
 	return b?getche():getch();
 #	elif defined(HL_CONSOLE)
@@ -687,6 +709,7 @@ HL_PRIM varray *hl_sys_args() {
 }
 
 HL_PRIM void hl_sys_init() {
+	init_print_flags();
 #ifdef HL_WIN
 	QueryPerformanceFrequency(&qpcFrequency);
 #endif

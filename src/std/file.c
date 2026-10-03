@@ -128,6 +128,7 @@ HL_PRIM int hl_file_read( hl_fdesc *f, vbyte *buf, int pos, int len ) {
 	int ret;
 	if( !f ) return -1;
 	hl_blocking(true);
+	if( f->f == stdin ) fflush(stdout);
 	ret = (int)fread((char*)buf+pos,1,len,f->f);
 	hl_blocking(false);
 	return ret;
@@ -146,6 +147,7 @@ HL_PRIM bool hl_file_write_char( hl_fdesc *f, int c ) {
 HL_PRIM int hl_file_read_char( hl_fdesc *f ) {
 	unsigned char cc;
 	hl_blocking(true);
+	if( f && f->f == stdin ) fflush(stdout);
 	if( !f || fread(&cc,1,1,f->f) != 1 ) {
 		hl_blocking(false);
 		return -2;

@@ -75,6 +75,7 @@ static void process_finalize( vprocess *p ) {
 }
 
 HL_PRIM vprocess *hl_process_run( vbyte *cmd, varray *vargs, bool detached ) {
+	fflush(stdout);
 	vprocess *p;
 #	ifdef HL_WIN
 	SECURITY_ATTRIBUTES sattr;

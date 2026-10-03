@@ -251,6 +251,12 @@ static void handle_signal( int signum, siginfo_t *info, void *context ) {
 		return;
 	}
 	handling_signal = 1;
+	// Best effort: stdio is not async-signal-safe. Avoid waiting on another
+	// thread's stdout lock when the process is already fatally damaged.
+	if( ftrylockfile(stdout) == 0 ) {
+		fflush(stdout);
+		funlockfile(stdout);
+	}
 	out = append_text(out,prefix,sizeof(prefix) - 1);
 	{
 		const char *name = signal_name(signum);
@@ -476,6 +482,7 @@ int main(int argc, pchar *argv[]) {
 	if( diagnostics_wait )
 		hl_profile_wait_for_start();
 	ctx.ret = hl_dyn_call_safe(&cl,NULL,0,&isExc);
+	fflush(stdout);
 	hl_diagnostics_stop();
 	hl_profile_end();
 	if( isExc ) {
