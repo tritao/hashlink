@@ -340,6 +340,7 @@ static void dump_instr( jit_ctx *ctx, einstr *e, int cur_pos ) {
 	case BINOP:
 	case UNOP:
 		switch( e->size_offs ) {
+		case OJitArrayGet: printf("-ArrayGet"); break;
 		case OJitSqrt: printf("-Sqrt"); break;
 		case OJitAbs: printf("-Abs"); break;
 		case OJitFloor: printf("-Floor"); break;

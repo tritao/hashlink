@@ -32,6 +32,7 @@
 #endif
 
 // A unary double operation the JIT emits itself (x86-64 only), numbered above every hl_op.
+#define OJitArrayGet 0x7E10
 #define OJitSqrt	0x7E00
 #define OJitAbs	0x7E01
 #define OJitFloor	0x7E02

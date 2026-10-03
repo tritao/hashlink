@@ -550,7 +550,7 @@ static void regs_assign_regs( regs_ctx *ctx ) {
 		if( write_index < jit->value_count && jit->values_writes[write_index] == cur_op ) {
 			write = VAL(write_index++);
 			// try to preserve ops in the from  A = A op B
-			if( (e.op == UNOP || e.op == BINOP) && write->pref_reg == UNUSED ) {
+			if( (e.op == UNOP || e.op == BINOP) && e.size_offs != OJitArrayGet && write->pref_reg == UNUSED ) {
 				value_info *v = VAL_REG(e.a);
 				if( IS_REG(v->reg) ) write->pref_reg = v->reg;
 			}

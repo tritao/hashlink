@@ -2173,6 +2173,12 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 				STORE(dst, val);
 			} else {
 				ereg check_args[2] = { LOAD(ra), LOAD(rb) };
+#if defined(__x86_64__) || defined(_M_X64)
+				if( dst->t->kind == HI32 || dst->t->kind == HF64 || hl_is_ptr(dst->t) ) {
+					STORE(dst,emit_gen_ext(ctx,BINOP,check_args[0],check_args[1],hl_type_mode(dst->t),OJitArrayGet));
+					break;
+				}
+#endif
 				emit_native_call(ctx, hl_array_check, check_args, 2, &hlt_void);
 				ereg data = OFFSET(LOAD_MEM_PTR(LOAD(ra), offsetof(varray,data)), UNUSED, 0, HL_WSIZE);
 				ereg pos = OFFSET(data, LOAD(rb), hl_type_size(dst->t), 0);

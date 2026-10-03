@@ -361,6 +361,7 @@ struct _code_ctx {
 	int const_table_pos;
 	int null_access_pos;
 	int null_field_pos;
+	int_arr array_fail_refs;
 };
 
 static int _incr( int*v, int n ) {
@@ -1086,6 +1087,32 @@ static void emit_anyop( code_ctx *ctx, hl_op op, ereg out, ereg a, ereg b, emit_
 			BREAK();
 		}
 		return;
+	case OJitArrayGet:
+		{
+			// Unsigned comparison rejects negative indices too; one shared cold stub per function.
+			ereg array = a, index = b;
+			bool save_index = !IS_REG(index);
+			ereg index_tmp = out == R(RAX) ? R(RCX) : R(RAX);
+			if( !IS_REG(array) || save_index ) { emit_mov(ctx,RTMP,array,M_PTR); array = RTMP; }
+			if( save_index ) {
+				EMIT(_PUSH,index_tmp,UNUSED,M_PTR);
+				emit_mov(ctx,index_tmp,index,M_I32); index = index_tmp;
+			}
+			EMIT(_CMP,index,MK_ADDR(REG_REG(array),offsetof(varray,size)),M_I32);
+			B(0x0F); B(0x83);
+			int_arr_add_impl(&ctx->jit->galloc,&ctx->array_fail_refs,byte_count(ctx->code)); W(0);
+			emit_mov(ctx,RTMP,MK_ADDR(REG_REG(array),offsetof(varray,data)),M_PTR);
+			ereg d = IS_REG(out) ? out : get_tmp(mode);
+			int reg = REG_REG(d) - (mode == M_F64 ? 64 : 0);
+			int idx = REG_REG(index);
+			if( mode == M_F64 ) B(0xF2);
+			B((mode == M_PTR ? 0x49 : 0x41) | ((reg & 8) ? 4 : 0) | ((idx & 8) ? 2 : 0));
+			if( mode == M_F64 ) { B(0x0F); B(0x10); } else B(0x8B);
+			MOD_RM(1,reg,4); SIB(mode == M_I32 ? 4 : 8,idx,R11); B(HL_WSIZE);
+			if( save_index ) EMIT(_POP,index_tmp,UNUSED,M_PTR);
+			if( d != out ) emit_mov(ctx,out,d,mode);
+		}
+		return;
 	case OJitAbs:
 		{
 			// Packed SSE masks need 16-byte alignment, including when AVX is disabled.
@@ -1402,6 +1429,7 @@ void hl_codegen_function( jit_ctx *jit ) {
 	byte_free(&ctx->code);
 	int_arr_free(&ctx->near_jumps);
 	int_arr_free(&ctx->short_jumps);
+	int_arr_reset(&ctx->array_fail_refs);
 	free(ctx->pos_map);
 	ctx->pos_map = (int*)malloc((jit->reg_instr_count + 1) * sizeof(int));
 	ctx->pos_map[0] = 0;
@@ -1874,6 +1902,22 @@ void hl_codegen_function( jit_ctx *jit ) {
 			break;
 		}
 		if( ctx->code.cur > ctx->code.max ) jit_assert();
+	}
+	if( int_arr_count(ctx->array_fail_refs) ) {
+		int stub = byte_count(ctx->code);
+		for(int i = 0; i < int_arr_count(ctx->array_fail_refs); i++) {
+			int pos = int_arr_get(ctx->array_fail_refs,i);
+			*(int*)byte_addr(ctx->code,pos) = stub - pos - 4;
+		}
+		// This callee ignores its arguments and always raises. Align the cold call for either ABI.
+		EMIT(AND,R(RSP),MK_CONST(-16),M_PTR);
+#ifdef HL_WIN_CALL
+		EMIT(SUB,R(RSP),MK_CONST(32),M_PTR);
+#endif
+		emit_mov(ctx,jit->cfg.regs.arg[0],MK_CONST(0),M_PTR);
+		emit_mov(ctx,jit->cfg.regs.arg[1],MK_CONST(0),M_I32);
+		emit_ext(ctx,_MOV,RTMP,VAL_CONST,M_PTR,(int_val)hl_array_out_of_bounds);
+		EMIT(_CALL,RTMP,UNUSED,M_PTR); BREAK();
 	}
 	align_function(ctx);
 	hl_codegen_flush(jit);
