@@ -994,6 +994,8 @@ void hl_emit_flush( jit_ctx *jit ) {
 		emit_write_block(ctx,b);
 	{
 		eblock *cur_loop = NULL;
+		int *mark = (int*)hl_zalloc(&jit->falloc,sizeof(int) * jit->block_count);
+		int *stack = (int*)hl_malloc(&jit->falloc,sizeof(int) * jit->block_count);
 		for(int b=0;b<jit->block_count;b++) {
 			eblock *bl = jit->blocks + b;
 			while( cur_loop != NULL && bl->start_pos > cur_loop->loop_end )
@@ -1001,8 +1003,25 @@ void hl_emit_flush( jit_ctx *jit ) {
 			int new_loop_end = -1;
 			for(int k=0;k<bl->pred_count;k++) {
 				eblock *pred = jit->blocks + bl->preds[k];
-				if( pred->start_pos > bl->start_pos && pred->end_pos - 1 > new_loop_end )
-					new_loop_end = pred->end_pos - 1;
+				if( pred->start_pos <= bl->start_pos )
+					continue;
+				// A back edge. The loop is every block that reaches its source without passing the header, and blocks
+				// can be laid out past the source (the body of an inner loop, say), so take the furthest end of them all.
+				int stamp = b * jit->block_count + k + 1, top = 0;
+				mark[bl->preds[k]] = stamp;
+				stack[top++] = bl->preds[k];
+				while( top > 0 ) {
+					eblock *member = jit->blocks + stack[--top];
+					if( member->end_pos - 1 > new_loop_end )
+						new_loop_end = member->end_pos - 1;
+					for(int j=0;j<member->pred_count;j++) {
+						int from = member->preds[j];
+						if( from == b || mark[from] == stamp )
+							continue;
+						mark[from] = stamp;
+						stack[top++] = from;
+					}
+				}
 			}
 			if( new_loop_end > 0 ) {
 				bl->loop_end = new_loop_end;
