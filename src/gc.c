@@ -828,7 +828,11 @@ static void *gc_tlab_alloc( hl_thread_info *th, int size, int flags ) {
 	int part = (rounded >> GC_ALIGN_BITS) - 1;
 	int block = GC_SIZES[part];
 	gc_tlab_slot *slot = (gc_tlab_slot*)th->gc_tlab + ((part << PAGE_KIND_BITS) | kind);
-	if( slot->cur == slot->end ) {
+	if( slot->cur >= slot->end ) {
+		// A buffer is refilled only once it is exactly used up (or emptied by a collection); a cursor past its end
+		// means blocks were handed out that the free lists never reserved.
+		if( slot->cur != slot->end )
+			hl_fatal("GC allocation buffer overran its run");
 		int got;
 		unsigned char *run;
 		gc_global_lock(true);

@@ -277,6 +277,9 @@ static void flush_free_list( gc_pheader *ph ) {
 }
 
 // Takes up to `want` consecutive free blocks of one size class, and says how many it took in `got`.
+// Every block position and run length of a page, including the end of a run that reaches the page's last block.
+typedef char gc_fl_cursor_holds_page_blocks[GC_PAGE_SIZE <= (fl_cursor)~0 ? 1 : -1];
+
 static void *gc_alloc_fixed_run( int part, int kind, int want, int *got ) {
 	int pid = (part << PAGE_KIND_BITS) | kind;
 	gc_pheader *ph = gc_free_pages[pid];
@@ -310,6 +313,8 @@ static void *gc_alloc_fixed_run( int part, int kind, int want, int *got ) {
 		p->free.data->pos += taken;
 		p->free.data->count -= taken;
 	}
+	if( taken <= 0 || taken > want )
+		hl_fatal("GC took an empty or oversized run from a free list");
 	*got = taken;
 	unsigned char *ptr = ph->base + bid * p->block_size;
 #	ifdef GC_DEBUG
