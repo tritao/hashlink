@@ -395,7 +395,7 @@ static void regs_assign( regs_ctx *ctx, value_info *v ) {
 		return;
 	}
 	regs_alloc_reg(ctx, v, across);
-	if( across && ctx->call_weights && ctx->hot_calls[v->last_read] == ctx->hot_calls[ctx->cur_op + 1] && (ctx->jit->cfg.regopt & JIT_REGOPT_CALL_SAVE) && !ctx->jit->mod->debug && !ctx->has_try &&
+	if( across && v->id < 0 && v->tracked && v->debug_loop && ctx->call_weights && ctx->hot_calls[v->last_read] == ctx->hot_calls[ctx->cur_op + 1] && (ctx->jit->cfg.regopt & JIT_REGOPT_CALL_SAVE) && !ctx->jit->mod->debug && !ctx->has_try &&
 		IS_REG(v->reg) && !reg_is_persist(REG_CFG(REG_MODE(v->mode)),v->reg) ) {
 		long long calls = ctx->call_weights[v->last_read] - ctx->call_weights[ctx->cur_op + 1];
 		long long memory = (long long)v->tot_reads + ctx->loop_weights[v->start];
@@ -577,6 +577,10 @@ static void regs_extend_debug_liveness( regs_ctx *ctx ) {
 static void regs_relax_loop_phis( regs_ctx *ctx, int nvalues ) {
 	jit_ctx *jit = ctx->jit;
 	if( !(jit->cfg.regopt & JIT_REGOPT_LOOP_PHI) || jit->mod->debug || ctx->has_try ) return;
+	// Register phis across returning calls require the paired save-around-call
+	// policy. In loop-phi-only mode, leave every function containing one on the
+	// established allocator path.
+	if( ctx->ncalls[jit->instr_count] && !(jit->cfg.regopt & JIT_REGOPT_CALL_SAVE) ) return;
 	bool candidates[2] = {false,false};
 	for(int i=jit->value_count;i<nvalues;i++) {
 		value_info *v = VAL(i);
