@@ -584,7 +584,10 @@ static void regs_relax_loop_phis( regs_ctx *ctx, int nvalues ) {
 	bool candidates[2] = {false,false};
 	for(int i=jit->value_count;i<nvalues;i++) {
 		value_info *v = VAL(i);
-		if( v->tracked && v->debug_loop ) candidates[REG_MODE(v->mode)] = true;
+		if( !v->tracked || !v->debug_loop ) continue;
+		bool across = ctx->ncalls[v->last_read] != ctx->ncalls[v->start + 1];
+		if( across && (!ctx->hot_calls || ctx->hot_calls[v->last_read] != ctx->hot_calls[v->start + 1]) ) continue;
+		candidates[REG_MODE(v->mode)] = true;
 	}
 	if( candidates[0] || candidates[1] ) {
 		int count = jit->instr_count + 1;
@@ -1211,34 +1214,6 @@ void hl_regs_function( jit_ctx *jit ) {
 	if( (jit->cfg.regopt & (JIT_REGOPT_CALL_SAVE | JIT_REGOPT_LOOP_PHI)) && !jit->mod->debug ) {
 		for(int i=0;i<jit->fun->nops;i++) if( jit->fun->ops[i].op == OTrap ) ctx->has_try = true;
 	}
-	if( (jit->cfg.regopt & JIT_REGOPT_CALL_SAVE) && !jit->mod->debug && !ctx->has_try && ctx->ncalls[jit->instr_count] ) {
-		ctx->call_policy = (int*)hl_zalloc(&jit->falloc,sizeof(int) * jit->block_count);
-		ctx->call_seen = (int*)hl_zalloc(&jit->falloc,sizeof(int) * jit->block_count);
-		ctx->call_work = (int*)hl_malloc(&jit->falloc,sizeof(int) * jit->block_count);
-		ctx->hot_calls = (int*)hl_zalloc(&jit->falloc,sizeof(int) * (jit->instr_count + 1));
-		eblock *call_block = jit->blocks;
-		int eligible = 0;
-		for(int i=0;i<jit->instr_count;i++) {
-			einstr *e = jit->instrs + i;
-			if( e->op == BLOCK ) call_block = jit->blocks + e->size_offs;
-			bool hot = IS_CALL(e->op) && e->mode != M_NORET && mandatory_loop_call(ctx,call_block);
-			ctx->hot_calls[i+1] = ctx->hot_calls[i] + (hot ? 1 : 0);
-			if( IS_CALL(e->op) && e->mode != M_NORET && !hot ) eligible++;
-		}
-		if( eligible ) {
-			ctx->call_saved = (int_arr*)hl_zalloc(&jit->falloc,sizeof(int_arr) * jit->instr_count);
-			ctx->call_weights = (long long*)hl_zalloc(&jit->falloc,sizeof(long long) * (jit->instr_count + 1));
-			ctx->loop_weights = (int*)hl_zalloc(&jit->falloc,sizeof(int) * jit->instr_count);
-			eblock *block = jit->blocks;
-			for(int i=0;i<jit->instr_count;i++) {
-				einstr *e = jit->instrs + i;
-				if( e->op == BLOCK ) block = jit->blocks + e->size_offs;
-				int weight = 1 << (block_loop_depth(block) * 3);
-				ctx->loop_weights[i] = weight;
-				ctx->call_weights[i+1] = ctx->call_weights[i] + (IS_CALL(e->op) && e->mode != M_NORET ? weight : 0);
-			}
-		}
-	}
 	ctx->blocks_phis = (int_arr*)hl_zalloc(&jit->falloc,sizeof(int_arr) * jit->block_count);
 	ctx->values = (value_info*)hl_zalloc(&jit->falloc,sizeof(value_info) * nvalues);
 	for(int i=1;i<nvalues;i++) {
@@ -1278,6 +1253,50 @@ void hl_regs_function( jit_ctx *jit ) {
 	ctx->register_phis[0] = ctx->register_phis[1] = false;
 	regs_compute_liveness(ctx);
 	regs_extend_debug_liveness(ctx);
+	if( (jit->cfg.regopt & JIT_REGOPT_CALL_SAVE) && !jit->mod->debug && !ctx->has_try && ctx->ncalls[jit->instr_count] ) {
+		// Build call metadata only for returning calls crossed by loop phis. The
+		// allocator never saves another value, so classifying unrelated calls is
+		// pure compile-time overhead.
+		int *relevant_calls = (int*)hl_zalloc(&jit->falloc,sizeof(int) * (jit->instr_count + 1));
+		bool potential = false;
+		for(int i=jit->value_count;i<nvalues;i++) {
+			value_info *v = VAL(i);
+			if( !v->tracked || !v->debug_loop || v->last_read <= v->start ) continue;
+			if( ctx->ncalls[v->last_read] == ctx->ncalls[v->start + 1] ) continue;
+			potential = true;
+			relevant_calls[v->start + 1]++;
+			relevant_calls[v->last_read]--;
+		}
+		if( potential ) {
+			ctx->call_policy = (int*)hl_zalloc(&jit->falloc,sizeof(int) * jit->block_count);
+			ctx->call_seen = (int*)hl_zalloc(&jit->falloc,sizeof(int) * jit->block_count);
+			ctx->call_work = (int*)hl_malloc(&jit->falloc,sizeof(int) * jit->block_count);
+			ctx->hot_calls = (int*)hl_zalloc(&jit->falloc,sizeof(int) * (jit->instr_count + 1));
+			eblock *call_block = jit->blocks;
+			int eligible = 0, relevant = 0;
+			for(int i=0;i<jit->instr_count;i++) {
+				einstr *e = jit->instrs + i;
+				if( e->op == BLOCK ) call_block = jit->blocks + e->size_offs;
+				relevant += relevant_calls[i];
+				bool hot = relevant && IS_CALL(e->op) && e->mode != M_NORET && mandatory_loop_call(ctx,call_block);
+				ctx->hot_calls[i+1] = ctx->hot_calls[i] + (hot ? 1 : 0);
+				if( relevant && IS_CALL(e->op) && e->mode != M_NORET && !hot ) eligible++;
+			}
+			if( eligible ) {
+				ctx->call_saved = (int_arr*)hl_zalloc(&jit->falloc,sizeof(int_arr) * jit->instr_count);
+				ctx->call_weights = (long long*)hl_zalloc(&jit->falloc,sizeof(long long) * (jit->instr_count + 1));
+				ctx->loop_weights = (int*)hl_zalloc(&jit->falloc,sizeof(int) * jit->instr_count);
+				eblock *block = jit->blocks;
+				for(int i=0;i<jit->instr_count;i++) {
+					einstr *e = jit->instrs + i;
+					if( e->op == BLOCK ) block = jit->blocks + e->size_offs;
+					int weight = 1 << (block_loop_depth(block) * 3);
+					ctx->loop_weights[i] = weight;
+					ctx->call_weights[i+1] = ctx->call_weights[i] + (IS_CALL(e->op) && e->mode != M_NORET ? weight : 0);
+				}
+			}
+		}
+	}
 	regs_relax_loop_phis(ctx,nvalues);
 	regs_assign_regs(ctx);
 	jit->regstats_stack_values = 0;
