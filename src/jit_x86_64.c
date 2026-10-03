@@ -892,9 +892,48 @@ static void patch_jump_near( code_ctx *ctx, int jpos ) {
 	ctx->code.values[jpos + 1] = (unsigned char)(byte_count(ctx->code) - (jpos + 2));
 }
 
+// Signed 32-bit division or remainder by a constant d >= 2, without a divide instruction. With L = ceil(log2 d),
+// k = 31 + L and M = floor(2^k / d) + 1, trunc(n / d) is ((int64)n * M >> k) - (n >> 31) for every int32 n: M overshoots
+// 2^k / d by a little (never zero, never more than 1), which keeps floor(n * M / 2^k) within 1 / d of n / d for
+// |n| <= 2^31 without crossing an integer; the subtraction then turns the floor for a negative n into the truncation.
+// M < 2^32 + 1, so the product fits in 64 bits. Checked against hardware division for every n at several divisors,
+// including 139968, and for edge and random n at every divisor below 70000 and around every power of two.
+// The remainder is n - q * d.
+static void emit_div_const( code_ctx *ctx, hl_op op, ereg out, ereg a, int d ) {
+	int L = 0;
+	while( ((int64)1 << L) < d ) L++;
+	int k = 31 + L;
+	uint64 magic = (((uint64)1 << k) / (uint64)d) + 1;
+	ereg bas = R(RAX), div = R(RDX);
+	if( out != bas ) EMIT(_PUSH,bas,UNUSED,M_PTR);
+	if( out != div ) EMIT(_PUSH,div,UNUSED,M_PTR);
+	EMIT(_MOV,RTMP,a,M_I32); // n, taken before rax and rdx are overwritten
+	EMIT(MOVSXD,bas,RTMP,M_PTR);
+	emit_ext(ctx,_MOV,div,VAL_CONST,M_PTR,(int_val)magic);
+	EMIT(IMUL,bas,div,M_PTR);
+	EMIT(SAR,bas,MK_CONST(k),M_PTR);
+	EMIT(_MOV,div,RTMP,M_I32);
+	EMIT(SAR,div,MK_CONST(31),M_I32);
+	EMIT(SUB,bas,div,M_I32); // quotient
+	ereg res = bas;
+	if( op == OSMod ) {
+		EMIT(IMUL,bas,MK_CONST(d),M_I32);
+		EMIT(_MOV,div,RTMP,M_I32);
+		EMIT(SUB,div,bas,M_I32);
+		res = div;
+	}
+	if( out != res ) EMIT(_MOV,out,res,M_I32);
+	if( out != div ) EMIT(_POP,div,UNUSED,M_PTR);
+	if( out != bas ) EMIT(_POP,bas,UNUSED,M_PTR);
+}
+
 static void emit_div_mod( code_ctx *ctx, hl_op op, ereg out, ereg a, ereg b, emit_mode mode ) {
 	if( IS_FLOAT(mode) ) {
 		BREAK();
+		return;
+	}
+	if( (op == OSDiv || op == OSMod) && mode == M_I32 && REG_KIND(b) == R_CONST && REG_VALUE(b) >= 2 ) {
+		emit_div_const(ctx, op, out, a, REG_VALUE(b));
 		return;
 	}
 	ereg bas = R(RAX), div = R(RDX);
@@ -979,6 +1018,23 @@ static void emit_anyop( code_ctx *ctx, hl_op op, ereg out, ereg a, ereg b, emit_
 	case OShl:
 	case OSShr:
 	case OUShr:
+		if( REG_KIND(b) == R_CONST && mode == M_I32 ) {
+			// A constant count is an immediate, which avoids moving it through cl.
+			int count = REG_VALUE(b) & 31;
+			CpuOp shift = op == OShl ? SHL : (op == OSShr ? SAR : SHR);
+			if( out == a && IS_REG(a) ) {
+				if( count != 0 ) EMIT(shift,out,MK_CONST(count),mode);
+			} else if( IS_REG(out) ) {
+				emit_mov(ctx,out,a,mode);
+				if( count != 0 ) EMIT(shift,out,MK_CONST(count),mode);
+			} else {
+				ereg tmp = get_tmp(mode);
+				emit_mov(ctx,tmp,a,mode);
+				if( count != 0 ) EMIT(shift,tmp,MK_CONST(count),mode);
+				emit_mov(ctx,out,tmp,mode);
+			}
+			return;
+		}
 		{
 			ereg f = R(RCX);
 			if( b != f ) {

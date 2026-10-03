@@ -442,7 +442,7 @@ static void regs_compute_liveness( regs_ctx *ctx ) {
 			case OSShr:
 			case OUShr:
 			case OShl:
-				if( jit->cfg.req_bit_shifts ) VAL_REG(e->b)->pref_reg = jit->cfg.req_bit_shifts;
+				if( jit->cfg.req_bit_shifts && REG_IS_VAL(e->b) ) VAL_REG(e->b)->pref_reg = jit->cfg.req_bit_shifts;
 				break;
 			case OSDiv:
 			case OUDiv:
@@ -450,7 +450,7 @@ static void regs_compute_liveness( regs_ctx *ctx ) {
 			case OUMod:
 				if( !IS_FLOAT(e->mode) ) {
 					if( jit->cfg.req_div_a ) VAL_REG(e->a)->pref_reg = jit->cfg.req_div_a;
-					if( jit->cfg.req_div_b ) VAL_REG(e->b)->pref_reg = jit->cfg.req_div_b;
+					if( jit->cfg.req_div_b && REG_IS_VAL(e->b) ) VAL_REG(e->b)->pref_reg = jit->cfg.req_div_b;
 				}
 				break;
 			}
@@ -873,6 +873,11 @@ static void regs_emit_instrs( regs_ctx *ctx ) {
 			break;
 		case BLOCK:
 			cur_block = jit->blocks + e.size_offs;
+			break;
+		case LOAD_CONST:
+			// A constant nobody reads (its uses were folded into immediates) needs no register.
+			if( vout && vout->last_read < 0 ) break;
+			regs_write_instr(ctx, &e, out);
 			break;
 		case LOAD_ARG:
 			{

@@ -971,12 +971,50 @@ void hl_emit_remap_jumps( emit_ctx *ctx, void *_jumps, einstr *instrs, int *pos_
 	int_arr_reset((int_arr*)_jumps);
 }
 
+#if defined(__x86_64__) || defined(_M_X64)
+// A 32-bit operation whose right operand is a small non-negative constant takes it as an immediate, which saves the
+// register and the load; a division or remainder by one becomes a multiply (see emit_div_const in the backend). Done once
+// the function is complete so that a value whose address is taken can be left alone: it lives in memory, and a callee may
+// change it through the address, so its original constant no longer describes what a later read sees. Negative constants
+// stay in registers because an immediate with the top bit set would look like a phi at this stage.
+static void fold_immediates( emit_ctx *ctx ) {
+	int count = ctx->emit_pos;
+	unsigned char *address_taken = (unsigned char*)calloc(count, 1);
+	if( address_taken == NULL ) return;
+	for(int i=0;i<count;i++) {
+		einstr *e = ctx->instrs + i;
+		if( e->op == ADDRESS && !IS_NULL(e->a) && e->a > 0 && REG_KIND(e->a) == R_VALUE )
+			address_taken[int_arr_get(ctx->values,e->a)] = 1;
+	}
+	for(int i=0;i<count;i++) {
+		einstr *e = ctx->instrs + i;
+		if( e->op != BINOP || e->mode != M_I32 || IS_NULL(e->b) || e->b <= 0 || REG_KIND(e->b) != R_VALUE )
+			continue;
+		switch( e->size_offs ) {
+		case OAdd: case OSub: case OMul: case OSDiv: case OSMod: case OShl: case OSShr: case OUShr: case OAnd: case OOr: case OXor:
+			{
+				int def = int_arr_get(ctx->values,e->b);
+				einstr *c = ctx->instrs + def;
+				if( c->op == LOAD_CONST && !address_taken[def] && (int)c->value >= 0 && (int)c->value < (1<<20) )
+					e->b = MK_CONST((int)c->value);
+			}
+			break;
+		default:
+			break;
+		}
+	}
+	free(address_taken);
+}
+#endif
 void hl_emit_flush( jit_ctx *jit ) {
 	emit_ctx *ctx = jit->emit;
 	if( ctx->flushed ) return;
 	ctx->flushed = true;
 	ctx->pos_map[ctx->fun->nops] = ctx->emit_pos;
 	ctx->current_block->end_pos = ctx->emit_pos;
+#	if defined(__x86_64__) || defined(_M_X64)
+	fold_immediates(ctx);
+#	endif
 	hl_emit_remap_jumps(ctx,&ctx->jump_regs, ctx->instrs, ctx->pos_map);
 	jit->instrs = ctx->instrs;
 	jit->instr_count = ctx->emit_pos;
