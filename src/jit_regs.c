@@ -85,6 +85,7 @@ struct _regs_ctx {
 	int *pos_map;
 	bool flushed;
 	bool has_direct_call;
+	bool counting_phis;
 	int persists_uses[2];
 	int epilog_pos;
 };
@@ -682,6 +683,7 @@ static void flush_movs( regs_ctx *ctx, bool cond ) {
 				ereg from = int_arr_get(movs,k+1);
 				int mode = int_arr_get(movs,k+2);
 				bool cmov = cond && IS_REG(to);
+				if( ctx->counting_phis && ctx->jit->regstats_enabled ) ctx->jit->regstats_phi_moves++;
 				regs_emit(ctx,to,cmov?CMOV:MOV,from,UNUSED,mode,0);
 				int_arr_remove_range(&movs,k,3);
 				cycle = false;
@@ -693,6 +695,7 @@ static void flush_movs( regs_ctx *ctx, bool cond ) {
 			ereg from = int_arr_get(movs,1);
 			int mode = int_arr_get(movs,2);
 			bool cmov = cond && (IS_REG(to) || IS_REG(from));
+			if( ctx->counting_phis && ctx->jit->regstats_enabled ) ctx->jit->regstats_phi_moves++;
 			regs_emit(ctx,UNUSED,cmov?CXCHG:XCHG,to,from,IS_FLOAT(mode)?M_F64:M_PTR,0);
 			int_arr_remove_range(&movs,0,3);
 			size -= 3;
@@ -749,7 +752,9 @@ static void flush_phis( regs_ctx *ctx, eblock *b, phi_edges edges ) {
 	bool cond = edges == PHI_COND;
 	if( !cond )
 		int_arr_free(&ctx->blocks_phis[bid]);
+	ctx->counting_phis = true;
 	flush_movs(ctx, cond);
+	ctx->counting_phis = false;
 }
 
 static void regs_emit_instrs( regs_ctx *ctx ) {
@@ -1102,6 +1107,16 @@ void hl_regs_function( jit_ctx *jit ) {
 	regs_compute_liveness(ctx);
 	regs_extend_debug_liveness(ctx);
 	regs_assign_regs(ctx);
+	jit->regstats_stack_values = 0;
+	jit->regstats_loop_stack_phis = 0;
+	jit->regstats_phi_moves = 0;
+	for(int i=1;jit->regstats_enabled && i<nvalues;i++) {
+		value_info *v = VAL(i);
+		if( REG_KIND(v->reg) == R_REG_PTR && REG_REG(v->reg) == STACK_REG ) {
+			jit->regstats_stack_values++;
+			if( v->id < 0 && v->debug_loop ) jit->regstats_loop_stack_phis++;
+		}
+	}
 	regs_emit_instrs(ctx);
 	hl_regs_flush(ctx->jit);
 }

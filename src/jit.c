@@ -85,6 +85,8 @@ jit_ctx *hl_jit_alloc() {
 	jit_ctx *ctx = (jit_ctx*)malloc(sizeof(jit_ctx));
 	memset(ctx,0,sizeof(jit_ctx));
 	hl_jit_init_regs(&ctx->cfg);
+	const char *stats = getenv("HL_JIT_REGSTATS");
+	ctx->regstats_enabled = stats && (atoi(stats) == 1 || atoi(stats) == 2);
 	hl_alloc_init(&ctx->falloc);
 	hl_emit_alloc(ctx);
 	hl_regs_alloc(ctx);
@@ -167,6 +169,33 @@ void hl_jit_free( jit_ctx *ctx, h_bool can_reset ) {
 void hl_jit_reset( jit_ctx *ctx, hl_module *m ) {
 }
 
+// Diagnostic process totals include every compilation, including hot patches.
+// No allocation decisions depend on these counters. Output goes to stderr.
+static unsigned long long regstats_totals[6];
+static int regstats_mode = -1;
+static void regstats_exit(void) {
+	fprintf(stderr,"HL_JIT_REGSTATS total functions=%llu instructions=%llu stack_values=%llu loop_stack_phis=%llu phi_moves=%llu code_bytes=%llu\n",
+		regstats_totals[0],regstats_totals[1],regstats_totals[2],regstats_totals[3],regstats_totals[4],regstats_totals[5]);
+}
+static void regstats_record(jit_ctx *ctx) {
+	if( !ctx->regstats_enabled ) return;
+	if( regstats_mode < 0 ) {
+		const char *option = getenv("HL_JIT_REGSTATS");
+		regstats_mode = option ? atoi(option) : 0;
+		if( regstats_mode ) atexit(regstats_exit);
+	}
+	if( !regstats_mode ) return;
+	regstats_totals[0]++;
+	regstats_totals[1] += ctx->instr_count;
+	regstats_totals[2] += ctx->regstats_stack_values;
+	regstats_totals[3] += ctx->regstats_loop_stack_phis;
+	regstats_totals[4] += ctx->regstats_phi_moves;
+	regstats_totals[5] += ctx->code_size;
+	if( regstats_mode == 2 )
+		fprintf(stderr,"HL_JIT_REGSTATS function=%d name=%s instructions=%d stack_values=%d loop_stack_phis=%d phi_moves=%d code_bytes=%d\n",
+			ctx->fun->findex,hl_code_function_name(ctx->mod->code,ctx->fun) ? hl_code_function_name(ctx->mod->code,ctx->fun) : "?",ctx->instr_count,ctx->regstats_stack_values,ctx->regstats_loop_stack_phis,ctx->regstats_phi_moves,ctx->code_size);
+}
+
 int hl_jit_function( jit_ctx *ctx, hl_module *m, hl_function *f ) {
 	hl_free(&ctx->falloc);
 	ctx->mod = m;
@@ -177,6 +206,7 @@ int hl_jit_function( jit_ctx *ctx, hl_module *m, hl_function *f ) {
 	hl_emit_function(ctx);
 	hl_regs_function(ctx);
 	hl_codegen_function(ctx);
+	regstats_record(ctx);
 	int pos = ctx->out_pos;
 	hl_jit_define_function(ctx, pos, ctx->code_size);
 	if( m->jit_debug && ctx->code_pos_map ) {

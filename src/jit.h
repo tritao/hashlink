@@ -269,6 +269,10 @@ struct _jit_ctx {
 	// regs output
 	int reg_instr_count;
 	int regs_track_count;
+	bool regstats_enabled;
+	int regstats_stack_values;
+	int regstats_loop_stack_phis;
+	int regstats_phi_moves;
 	einstr *reg_instrs;
 	ereg *reg_writes;
 	int *reg_pos_map;
