@@ -740,7 +740,7 @@ static void emit_call_fun( emit_ctx *ctx, vreg *dst, int findex, int count, int 
 	for(int i=0;i<count;i++)
 		args[i] = LOAD(R(args_regs[i]));
 	if( isNative ) {
-		if( count == 2 && m->functions_ptrs[findex] == (void*)hl_array_out_of_bounds ) {
+		if( m->native_noreturn[fid - m->code->nfunctions] ) {
 			// Never returns: leaving it a plain call would force every float live across it into memory.
 			emit_native_call(ctx, m->functions_ptrs[findex], args, count, NULL);
 			return;

@@ -24,6 +24,7 @@
 
 #define TK2(a,b)		((a) | ((b)<<5))
 
+static HL_NO_RETURN( void invalid_cast( hl_type *from, hl_type *to ) );
 static void invalid_cast( hl_type *from, hl_type *to ) {
 	hl_error("Can't cast %s to %s",hl_type_str(from),hl_type_str(to));
 }

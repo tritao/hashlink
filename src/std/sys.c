@@ -740,7 +740,7 @@ DEFINE_PRIM(_BOOL, sys_utf8_path, _NO_ARG);
 DEFINE_PRIM(_BYTES, sys_string, _NO_ARG);
 DEFINE_PRIM(_BYTES, sys_locale, _NO_ARG);
 DEFINE_PRIM(_VOID, sys_print, _BYTES);
-DEFINE_PRIM(_VOID, sys_exit, _I32);
+DEFINE_PRIM_NORETURN(_VOID, sys_exit, _I32);
 DEFINE_PRIM(_F64, sys_time, _NO_ARG);
 DEFINE_PRIM(_I64, sys_timestamp_ms, _NO_ARG);
 DEFINE_PRIM(_BYTES, sys_get_env, _BYTES);

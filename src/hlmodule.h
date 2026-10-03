@@ -242,6 +242,8 @@ typedef struct {
 	int *globals_indexes;
 	unsigned char *globals_data;
 	void **functions_ptrs;
+	/* Indexed by code->natives, resolved independently for every module generation. */
+	unsigned char *native_noreturn;
 	int *functions_indexes;
 	void *jit_code;
 	hl_code_hash *hash;

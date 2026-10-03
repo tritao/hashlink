@@ -941,11 +941,14 @@ HL_API void hl_throw_buffer( hl_buffer *b );
 #		define	HL_PRIM				HL_EXTERN_C HL_EXPORT
 #	endif
 #   define DEFINE_PRIM_WITH_NAME(t,name,args,realName)	HL_EXTERN_C HL_EXPORT void *hlp_##realName( const char **sign ) { *sign = _FUN(t,args); return (void*)(&HL_NAME(name)); }
+/* A callee declaration, also exported by external HDLLs. Absence means an ordinary call. */
+#   define DEFINE_PRIM_NORETURN(t,name,args) DEFINE_PRIM(t,name,args) HL_EXTERN_C HL_EXPORT const unsigned char hlnr_##name = 1
 #else
 #	ifndef HL_PRIM
 #		define	HL_PRIM				HL_EXTERN_C
 #	endif
 #	define DEFINE_PRIM_WITH_NAME(t,name,args,realName)
+#   define DEFINE_PRIM_NORETURN(t,name,args) DEFINE_PRIM(t,name,args)
 #endif
 
 #ifndef HL_NAME

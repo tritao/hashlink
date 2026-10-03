@@ -651,11 +651,12 @@ hl_module *hl_module_alloc( hl_code *c ) {
 		return NULL;
 	}
 	memset(m->globals_data,0,gsize);
+	m->native_noreturn = (unsigned char*)calloc(c->nnatives ? c->nnatives : 1,1);
 	m->functions_ptrs = (void**)malloc(sizeof(void*)*(c->nfunctions + c->nnatives));
 	m->patch_owners = (hl_patch_code**)calloc(c->nfunctions + c->nnatives,sizeof(hl_patch_code*));
 	m->functions_indexes = (int*)malloc(sizeof(int)*(c->nfunctions + c->nnatives));
 	m->ctx.functions_types = (hl_type**)malloc(sizeof(void*)*(c->nfunctions + c->nnatives));
-	if( m->functions_ptrs == NULL || m->functions_indexes == NULL || m->ctx.functions_types == NULL || m->patch_owners == NULL ) {
+	if( m->native_noreturn == NULL || m->functions_ptrs == NULL || m->functions_indexes == NULL || m->ctx.functions_types == NULL || m->patch_owners == NULL ) {
 		hl_module_free_shutdown(m);
 		return NULL;
 	}
@@ -1005,6 +1006,9 @@ static void hl_module_init_natives( hl_module *m ) {
 			hl_fatal2("Failed to load function %s@%s",n->lib,n->name);
 		}
 		m->functions_ptrs[n->findex] = ((void *(*)( const char **p ))f)(&sign);
+		strcpy(tmp,"hlnr_");
+		strcpy(tmp + 5,n->name);
+		m->native_noreturn[i] = dlsym(libHandler,tmp) != NULL;
 		p = tmp;
 		append_type(&p,n->t);
 		*p++ = 0;
@@ -1554,6 +1558,7 @@ void hl_module_free_shutdown( hl_module *m ) {
 	if( m->hash ) hl_code_hash_free(m->hash);
 	free(m->functions_indexes);
 	free(m->functions_ptrs);
+	free(m->native_noreturn);
 	free(m->patch_owners);
 	free(m->patch_ints);
 	free(m->patch_floats);
