@@ -880,6 +880,24 @@ static void emit_dyn_cast( emit_ctx *ctx, ereg v, hl_type *t, vreg *dst ) {
 		patch_jump(ctx, jend);
 		return;
 	}
+	bool fast = (dt->kind == HI32 || dt->kind == HF64) && (t->kind == HDYN || t->kind == HNULL);
+	int jnull = 0, jslow = 0, jend1 = 0, jend2 = 0;
+	if( fast ) {
+		// The common cases need no call: a null (the cast gives 0) and a box of the wanted kind (its value is at a fixed
+		// offset). Any other dynamic value takes the runtime cast below.
+		emit_test(ctx, v, OJNull);
+		jnull = emit_jump(ctx, true);
+		ereg type = LOAD_MEM_PTR(v, 0);
+		ereg kind = LOAD_MEM(type, 0, &hlt_i32);
+		emit_cmp(ctx, kind, LOAD_CONST(dt->kind,&hlt_i32), OJNotEq);
+		jslow = emit_jump(ctx, true);
+		STORE(dst, LOAD_MEM(v,HDYN_VALUE,dt));
+		jend1 = emit_jump(ctx, false);
+		patch_jump(ctx, jnull);
+		STORE(dst, LOAD_CONST(0,dt));
+		jend2 = emit_jump(ctx, false);
+		patch_jump(ctx, jslow);
+	}
 	bool need_dyn = dyn_need_type(dt);
 	ereg st = emit_gen_size(ctx, ALLOC_STACK, HL_WSIZE);
 	STORE_MEM(st, 0, v);
@@ -889,6 +907,10 @@ static void emit_dyn_cast( emit_ctx *ctx, ereg v, hl_type *t, vreg *dst ) {
 	if( need_dyn ) args[2] = LOAD_CONST_PTR(dt);
 	ereg r = emit_native_call(ctx, get_dyncast(dt), args, need_dyn ? 3 : 2, dt);
 	STORE(dst, r);
+	if( fast ) {
+		patch_jump(ctx, jend1);
+		patch_jump(ctx, jend2);
+	}
 }
 
 static void emit_opcode( emit_ctx *ctx, hl_opcode *o );
