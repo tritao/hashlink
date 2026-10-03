@@ -212,6 +212,8 @@ typedef enum {
 	NATIVE_STACK_LAYOUT_APPLE_ARM64,
 } native_stack_layout_kind;
 
+#define JIT_REGOPT_CALL_SAVE 1
+
 typedef struct {
 	reg_config regs;
 	reg_config floats;
@@ -230,6 +232,7 @@ typedef struct {
 	// their local frame is scrubbed before the epilogue restores the caller.
 	int clear_stack_on_return;
 	int debug_prefix_size;
+	int regopt; // Backend-supported HL_JIT_REGOPT bits; zero retains baseline.
 	ereg req_bit_shifts;
 	ereg req_div_a;
 	ereg req_div_b;

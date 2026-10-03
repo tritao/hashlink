@@ -51,6 +51,7 @@ typedef struct {
 	int tot_reads;
 	int tracked;
 	bool debug_loop;
+	bool save_calls;
 	int overwrite;
 	emit_mode mode;
 	ereg pref_reg;
@@ -86,6 +87,14 @@ struct _regs_ctx {
 	bool flushed;
 	bool has_direct_call;
 	bool counting_phis;
+	int_arr *call_saved;
+	bool has_try;
+	long long *call_weights;
+	int *loop_weights;
+	int *hot_calls;
+	int *call_policy;
+	int *call_seen;
+	int *call_work;
 	int persists_uses[2];
 	int epilog_pos;
 };
@@ -338,6 +347,38 @@ static void regs_alloc_reg( regs_ctx *ctx, value_info *v, bool across_call ) {
 	values_add(ctx->scratch, v);
 }
 
+// Phase 0 found no gain for unconditional returning calls in hot loops.
+// A call block is conditional if a loop back edge can be reached from the
+// header without passing it. Cache this function-local CFG fact per block.
+static bool mandatory_loop_call( regs_ctx *ctx, eblock *block ) {
+	eblock *header = block->loop_end > 0 ? block : block->loop_parent;
+	if( !header ) return false;
+	int bid = (int)(block - ctx->jit->blocks);
+	if( ctx->call_policy[bid] ) return ctx->call_policy[bid] == 1;
+	if( block == header ) { ctx->call_policy[bid] = 1; return true; }
+	int stamp = bid + 1, top = 0;
+	int hid = (int)(header - ctx->jit->blocks);
+	for(int k=0;k<header->pred_count;k++) {
+		int pred = header->preds[k];
+		if( pred == bid || ctx->jit->blocks[pred].start_pos <= header->start_pos || ctx->call_seen[pred] == stamp ) continue;
+		ctx->call_seen[pred] = stamp;
+		ctx->call_work[top++] = pred;
+	}
+	while( top > 0 ) {
+		int current = ctx->call_work[--top];
+		if( current == hid ) { ctx->call_policy[bid] = 2; return false; }
+		eblock *b = ctx->jit->blocks + current;
+		for(int k=0;k<b->pred_count;k++) {
+			int pred = b->preds[k];
+			if( pred == bid || ctx->call_seen[pred] == stamp ) continue;
+			ctx->call_seen[pred] = stamp;
+			ctx->call_work[top++] = pred;
+		}
+	}
+	ctx->call_policy[bid] = 1;
+	return true;
+}
+
 static void regs_assign( regs_ctx *ctx, value_info *v ) {
 	if( v->reg != UNUSED ) jit_assert();
 	// Debugger-visible loop phis need one stable location on every incoming edge.
@@ -348,7 +389,19 @@ static void regs_assign( regs_ctx *ctx, value_info *v ) {
 		v->reg = MK_STACK_REG(v->stack_pos);
 		return;
 	}
-	regs_alloc_reg(ctx, v, live_across_call(ctx, v, ctx->cur_op));
+	bool across = live_across_call(ctx, v, ctx->cur_op);
+	regs_alloc_reg(ctx, v, across);
+	if( across && ctx->call_weights && ctx->hot_calls[v->last_read] == ctx->hot_calls[ctx->cur_op + 1] && (ctx->jit->cfg.regopt & JIT_REGOPT_CALL_SAVE) && !ctx->jit->mod->debug && !ctx->has_try &&
+		IS_REG(v->reg) && !reg_is_persist(REG_CFG(REG_MODE(v->mode)),v->reg) ) {
+		long long calls = ctx->call_weights[v->last_read] - ctx->call_weights[ctx->cur_op + 1];
+		long long memory = (long long)v->tot_reads + ctx->loop_weights[v->start];
+		// One store and one reload per returning call versus loads at uses and
+		// a store at the definition. Equal cost keeps the established policy.
+		if( memory > calls * 2 + 1 ) {
+			v->save_calls = true;
+			if( v->stack_pos == INVALID ) v->stack_pos = regs_alloc_stack(ctx, hl_emit_mode_sizes[v->mode]);
+		}
+	}
 	regs_debug("REG ASSIGN %s @%X-@%X\n",value_str(v),ctx->cur_op,v->last_read);
 }
 
@@ -573,8 +626,10 @@ static void regs_assign_regs( regs_ctx *ctx ) {
 			value_info *vcall = e.op == CALL_REG ? VAL_REG(e.a) : NULL;
 			if( will_scratch ) {
 				for_iter_back(values,v2,ctx->scratch) {
-					if( v2->last_read > cur_op )
-						spill(ctx,v2);
+					if( v2->last_read > cur_op ) {
+						if( v2->save_calls ) int_arr_add(ctx->call_saved[cur_op],v2->id);
+						else spill(ctx,v2);
+					}
 				}
 			}
 			for(int k=0;k<e.nargs;k++) {
@@ -583,13 +638,16 @@ static void regs_assign_regs( regs_ctx *ctx ) {
 				ereg r = get_call_reg(ctx,regs,v->mode);
 				if( !IS_NULL(r) ) {
 					value_info *cur = regs_current(ctx,r);
-					if( cur && cur != v )
+					if( cur && cur != v && !cur->save_calls )
 						spill(ctx,cur);
 					if( vcall && vcall->reg == r )
 						spill(ctx,vcall);
 				}
 			}
-			if( will_scratch ) values_reset(&ctx->scratch);
+			if( will_scratch ) {
+				for_iter_back(values,v,ctx->scratch)
+					if( !v->save_calls ) values_remove(&ctx->scratch,v);
+			}
 		}
 		switch( e.op ) {
 		case BLOCK:
@@ -795,6 +853,12 @@ static void regs_emit_instrs( regs_ctx *ctx ) {
 		}
 
 		if( IS_CALL(e.op) ) {
+			int_arr saved = {0};
+			if( ctx->call_saved ) saved = ctx->call_saved[cur_op];
+			for(int k=0;k<int_arr_count(saved);k++) {
+				value_info *v = VAL_REG(int_arr_get(saved,k));
+				if( IS_REG(v->reg) ) regs_emit_mov(ctx,shift_local(ctx,MK_STACK_REG(v->stack_pos)),v->reg,v->mode);
+			}
 			ereg *args = hl_emit_get_args(ctx->jit->emit,&e);
 			call_regs regs = {0};
 			int stack_args = 0;
@@ -990,8 +1054,17 @@ static void regs_emit_instrs( regs_ctx *ctx ) {
 		}
 		if( instr_stack_offset )
 			regs_emit(ctx,UNUSED,STACK_OFFS,UNUSED,UNUSED,M_PTR,instr_stack_offset);
+		if( IS_CALL(e.op) && e.mode != M_NORET ) {
+			int_arr saved = {0};
+			if( ctx->call_saved ) saved = ctx->call_saved[cur_op];
+			for(int k=0;k<int_arr_count(saved);k++) {
+				value_info *v = VAL_REG(int_arr_get(saved,k));
+				if( IS_REG(v->reg) ) regs_emit_mov(ctx,v->reg,shift_local(ctx,MK_STACK_REG(v->stack_pos)),v->mode);
+			}
+		}
 		if( cur_block && cur_block->end_pos == cur_op+1 )
 			flush_phis(ctx,cur_block,PHI_NEXT);
+		if( ctx->call_saved ) int_arr_free(&ctx->call_saved[cur_op]);
 		ctx->pos_map[cur_op+1] = ctx->emit_pos;
 	}
 }
@@ -1067,6 +1140,42 @@ void hl_regs_function( jit_ctx *jit ) {
 	for(int i=0;i<jit->instr_count;i++) {
 		einstr *e = jit->instrs + i;
 		ctx->ncalls[i+1] = ctx->ncalls[i] + (IS_CALL(e->op) && e->mode != M_NORET ? 1 : 0);
+	}
+	ctx->call_saved = NULL;
+	ctx->call_weights = NULL;
+	ctx->loop_weights = NULL;
+	ctx->hot_calls = NULL;
+	ctx->has_try = false;
+	if( (jit->cfg.regopt & JIT_REGOPT_CALL_SAVE) && !jit->mod->debug && ctx->ncalls[jit->instr_count] ) {
+		for(int i=0;i<jit->fun->nops;i++) if( jit->fun->ops[i].op == OTrap ) ctx->has_try = true;
+	}
+	if( (jit->cfg.regopt & JIT_REGOPT_CALL_SAVE) && !jit->mod->debug && !ctx->has_try && ctx->ncalls[jit->instr_count] ) {
+		ctx->call_policy = (int*)hl_zalloc(&jit->falloc,sizeof(int) * jit->block_count);
+		ctx->call_seen = (int*)hl_zalloc(&jit->falloc,sizeof(int) * jit->block_count);
+		ctx->call_work = (int*)hl_malloc(&jit->falloc,sizeof(int) * jit->block_count);
+		ctx->hot_calls = (int*)hl_zalloc(&jit->falloc,sizeof(int) * (jit->instr_count + 1));
+		eblock *call_block = jit->blocks;
+		int eligible = 0;
+		for(int i=0;i<jit->instr_count;i++) {
+			einstr *e = jit->instrs + i;
+			if( e->op == BLOCK ) call_block = jit->blocks + e->size_offs;
+			bool hot = IS_CALL(e->op) && e->mode != M_NORET && mandatory_loop_call(ctx,call_block);
+			ctx->hot_calls[i+1] = ctx->hot_calls[i] + (hot ? 1 : 0);
+			if( IS_CALL(e->op) && e->mode != M_NORET && !hot ) eligible++;
+		}
+		if( eligible ) {
+			ctx->call_saved = (int_arr*)hl_zalloc(&jit->falloc,sizeof(int_arr) * jit->instr_count);
+			ctx->call_weights = (long long*)hl_zalloc(&jit->falloc,sizeof(long long) * (jit->instr_count + 1));
+			ctx->loop_weights = (int*)hl_zalloc(&jit->falloc,sizeof(int) * jit->instr_count);
+			eblock *block = jit->blocks;
+			for(int i=0;i<jit->instr_count;i++) {
+				einstr *e = jit->instrs + i;
+				if( e->op == BLOCK ) block = jit->blocks + e->size_offs;
+				int weight = 1 << (block_loop_depth(block) * 3);
+				ctx->loop_weights[i] = weight;
+				ctx->call_weights[i+1] = ctx->call_weights[i] + (IS_CALL(e->op) && e->mode != M_NORET ? weight : 0);
+			}
+		}
 	}
 	ctx->blocks_phis = (int_arr*)hl_zalloc(&jit->falloc,sizeof(int_arr) * jit->block_count);
 	ctx->values = (value_info*)hl_zalloc(&jit->falloc,sizeof(value_info) * nvalues);
