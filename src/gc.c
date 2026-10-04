@@ -203,6 +203,10 @@ static void gc_free_page( gc_pheader *page, int block_count );
 // runs, and by the collector once the thread is blocked, so no atomic is needed.
 #	define GC_TLAB_SLOTS	(GC_FIXED_PARTS << PAGE_KIND_BITS)
 #	define GC_TLAB_RUN		2048
+#if defined(__x86_64__) || defined(_M_X64)
+# define GC_ALLOC_FAST_SUPPORTED
+static bool gc_alloc_fast = true;
+#endif
 typedef struct {
 	unsigned char *cur;
 	unsigned char *end;
@@ -820,6 +824,40 @@ HL_API void hl_gc_set_profile_allocation_callback( void (*callback)(hl_type*,int
 }
 
 #ifdef GC_TLAB
+// Shared policy for the ordinary allocator and its thin, ready-slot entry.
+static HL_INLINE hl_thread_info *gc_tlab_thread( int size, int flags, void *owner ) {
+	if( owner == NULL && size <= GC_SIZES[GC_FIXED_PARTS-1] && (flags & PAGE_KIND_MASK) != MEM_KIND_FINALIZER ) {
+		hl_thread_info *th = current_thread;
+		if( th && th->gc_tlab && !(gc_flags & (GC_PROFILE|GC_FORCE_MAJOR)) && !gc_census_on && gc_profile_allocation_callback == NULL
+#  ifdef HL_TRACK_ENABLE
+			&& !(hl_track.flags & HL_TRACK_ALLOC)
+#  endif
+		) return th;
+	}
+	return NULL;
+}
+
+static HL_INLINE void gc_tlab_clear( unsigned char *ptr, int size, int flags, int block ) {
+	if( flags & MEM_ZERO ) {
+#ifdef GC_ALLOC_FAST_SUPPORTED
+		if( gc_alloc_fast && block <= 5 * (int)sizeof(uintptr_t) ) {
+			// The fixed classes contain at most five words. Explicit stores keep the compiler from turning a tiny loop into a memset call.
+			uintptr_t *words = (uintptr_t*)ptr;
+			words[0] = 0;
+			if( block > (int)sizeof(uintptr_t) ) words[1] = 0;
+			if( block > 2 * (int)sizeof(uintptr_t) ) words[2] = 0;
+			if( block > 3 * (int)sizeof(uintptr_t) ) words[3] = 0;
+			if( block > 4 * (int)sizeof(uintptr_t) ) words[4] = 0;
+		} else
+#endif
+		{
+			for(int i=0;i<block;i+=(int)sizeof(uintptr_t)) *(uintptr_t*)(ptr+i) = 0;
+		}
+	} else if( MEM_HAS_PTR(flags) && block != size ) {
+		MZERO(ptr+size,block-size); // erase possible pointers after data
+	}
+}
+
 // A small allocation out of the thread's buffer; an empty buffer is refilled under the global lock, which is also
 // where the collection trigger is checked and where the reserved bytes are counted.
 static void *gc_tlab_alloc( hl_thread_info *th, int size, int flags ) {
@@ -847,17 +885,25 @@ static void *gc_tlab_alloc( hl_thread_info *th, int size, int flags ) {
 	}
 	unsigned char *ptr = slot->cur;
 	slot->cur += block;
-	if( flags & MEM_ZERO ) {
-		// Blocks are at most five words, so zero them with plain stores rather than a memset call.
-		for(int i=0;i<block;i+=(int)sizeof(uintptr_t)) *(uintptr_t*)(ptr+i) = 0;
-	}
-	else if( MEM_HAS_PTR(flags) && block != size )
-		MZERO(ptr+size,block-size); // erase possible pointers after data
+	gc_tlab_clear(ptr,size,flags,block);
 	return ptr;
 }
 #endif
 
+#ifdef GC_ALLOC_FAST_SUPPORTED
+#if defined(HL_VCC)
+# define GC_ALLOC_NOINLINE __declspec(noinline)
+#elif defined(HL_GCC) || defined(HL_CLANG)
+# define GC_ALLOC_NOINLINE __attribute__((noinline))
+#else
+# define GC_ALLOC_NOINLINE
+#endif
+
+// Keep special allocation modes and refill bookkeeping out of the small-allocation entry's stack frame.
+static GC_ALLOC_NOINLINE void *gc_alloc_gen_owner_full( hl_type *t, int size, int flags, void *owner ) {
+#else
 void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
+#endif
 	void *ptr;
 	int time = 0;
 	int allocated = 0;
@@ -867,15 +913,8 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 	if( size < 0 )
 		hl_error("Invalid allocation size");
 #	ifdef GC_TLAB
-	if( owner == NULL && size <= GC_SIZES[GC_FIXED_PARTS-1] && (flags & PAGE_KIND_MASK) != MEM_KIND_FINALIZER ) {
-		hl_thread_info *th = current_thread;
-		if( th && th->gc_tlab && !(gc_flags & (GC_PROFILE|GC_FORCE_MAJOR)) && !gc_census_on && gc_profile_allocation_callback == NULL
-#			ifdef HL_TRACK_ENABLE
-			&& !(hl_track.flags & HL_TRACK_ALLOC)
-#			endif
-		)
-			return gc_tlab_alloc(th,size,flags);
-	}
+	hl_thread_info *th = gc_tlab_thread(size,flags,owner);
+	if( th ) return gc_tlab_alloc(th,size,flags);
 #	endif
 	gc_global_lock(true);
 	gc_check_mark();
@@ -976,6 +1015,30 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 	hl_track_call(HL_TRACK_ALLOC, on_alloc(t,size,flags,ptr));
 	return ptr;
 }
+
+#ifdef GC_ALLOC_FAST_SUPPORTED
+void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
+	if( gc_alloc_fast && size > 0 ) {
+		hl_thread_info *th = gc_tlab_thread(size,flags,owner);
+		if( th ) {
+			int kind = flags & PAGE_KIND_MASK;
+			int rounded = size + ((-size) & (GC_ALIGN - 1));
+			int part = (rounded >> GC_ALIGN_BITS) - 1;
+			int block = GC_SIZES[part];
+			gc_tlab_slot *slot = (gc_tlab_slot*)th->gc_tlab + ((part << PAGE_KIND_BITS) | kind);
+			unsigned char *ptr = slot->cur;
+			if( ptr < slot->end ) {
+				slot->cur = ptr + block;
+				gc_tlab_clear(ptr,size,flags,block);
+				return ptr;
+			}
+		}
+	}
+	// Empty runs, profiling/census/tracking, ownership, finalizers and invalid sizes use the full path.
+	return gc_alloc_gen_owner_full(t,size,flags,owner);
+}
+
+#endif
 
 void *hl_gc_alloc_gen( hl_type *t, int size, int flags ) {
 	return hl_gc_alloc_gen_owner(t,size,flags,t == NULL ? NULL : t->gc_owner);
@@ -1411,6 +1474,10 @@ HL_API int hl_gc_get_mark_threads( hl_thread **tids ) {
 }
 
 static void hl_gc_init() {
+#ifdef GC_ALLOC_FAST_SUPPORTED
+	const char *alloc_fast = getenv("HL_GC_ALLOC_FAST");
+	gc_alloc_fast = alloc_fast == NULL || strcmp(alloc_fast,"0") != 0;
+#endif
 	int i;
 	for(i=0;i<1<<GC_LEVEL0_BITS;i++)
 		hl_gc_page_map[i] = gc_level1_null;
