@@ -828,18 +828,57 @@ HL_API void hl_gc_set_profile_allocation_callback( void (*callback)(hl_type*,int
 	gc_profile_allocation_callback = callback;
 }
 
+#ifndef GC_TLAB
+HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data) { (void)type; (void)data; return false; }
+#endif
 #ifdef GC_TLAB
+#ifdef HL_TRACK_ENABLE
+#define GC_TLAB_TRACK_POLICY(X) X(hl_track.flags, HL_TRACK_ALLOC, 4)
+#else
+#define GC_TLAB_TRACK_POLICY(X)
+#endif
+#define GC_TLAB_POLICY(X) \
+	X(gc_flags, GC_PROFILE|GC_FORCE_MAJOR, 4) \
+	X(gc_census_on, 1, 1) \
+	X(gc_profile_allocation_callback, ~(uint64)0, sizeof(void*)) \
+	GC_TLAB_TRACK_POLICY(X)
+#define GC_TLAB_ALLOWED(value, mask, bytes) && (((uint64)(value) & (mask)) == 0)
 // Shared policy for the ordinary allocator and its thin, ready-slot entry.
 static HL_INLINE hl_thread_info *gc_tlab_thread( int size, int flags, void *owner ) {
 	if( owner == NULL && size <= GC_SIZES[GC_FIXED_PARTS-1] && (flags & PAGE_KIND_MASK) != MEM_KIND_FINALIZER ) {
 		hl_thread_info *th = current_thread;
-		if( th && th->gc_tlab && !(gc_flags & (GC_PROFILE|GC_FORCE_MAJOR)) && !gc_census_on && gc_profile_allocation_callback == NULL
-#  ifdef HL_TRACK_ENABLE
-			&& !(hl_track.flags & HL_TRACK_ALLOC)
-#  endif
+		if( th && th->gc_tlab GC_TLAB_POLICY(GC_TLAB_ALLOWED)
 		) return th;
 	}
 	return NULL;
+}
+
+HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data) {
+#if defined(__linux__) && defined(__x86_64__) && defined(__GNUC__) && defined(GC_TLAB)
+	if(type->kind != HOBJ) return false;
+	hl_runtime_obj *rt = hl_get_obj_rt(type); // Layout only: methods remain lazy.
+	if(rt->nbindings || rt->size <= 0 || rt->size > GC_SIZES[GC_FIXED_PARTS-1]) return false;
+	int rounded = rt->size + ((-rt->size) & (GC_ALIGN-1));
+	int part = (rounded >> GC_ALIGN_BITS)-1;
+	memset(data,0,sizeof(*data));
+	data->type = type; data->runtime = rt; data->block = GC_SIZES[part];
+	intptr_t tls = (intptr_t)((uintptr_t)&current_thread - (uintptr_t)__builtin_thread_pointer());
+	if(tls < (-2147483647-1) || tls > 2147483647) return false;
+	data->tls_offset = (int)tls;
+	data->slot_offset = ((part << PAGE_KIND_BITS) | (rt->hasPtr ? MEM_KIND_DYNAMIC : MEM_KIND_NOPTR)) * sizeof(gc_tlab_slot);
+#define GC_TLAB_GUARD(value, bits, width) \
+	data->guards[data->nguards].address = (void*)&(value); \
+	data->guards[data->nguards].mask = (bits); \
+	data->guards[data->nguards++].bytes = (width);
+	GC_TLAB_POLICY(GC_TLAB_GUARD)
+	// A pending collection must force a safepoint through the existing slow path.
+	GC_TLAB_GUARD(gc_threads.stopping_world,1,1)
+#undef GC_TLAB_GUARD
+	return true;
+#else
+	(void)type; (void)data;
+	return false;
+#endif
 }
 
 static HL_INLINE void gc_tlab_clear( unsigned char *ptr, int size, int flags, int block ) {
@@ -1860,6 +1899,11 @@ vdynamic *hl_alloc_dynbool( bool b ) {
 	return (vdynamic*)(b ? &vdyn_true : &vdyn_false);
 }
 
+
+HL_API vdynamic *hl_jit_alloc_slow(hl_type *type) {
+	hl_gc_safepoint();
+	return hl_alloc_obj(type);
+}
 
 vdynamic *hl_alloc_obj( hl_type *t ) {
 	vobj *o;

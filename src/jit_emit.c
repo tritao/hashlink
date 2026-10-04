@@ -1093,6 +1093,7 @@ void hl_emit_reg_iter( jit_ctx *jit, einstr *e, void *ctx, void (*iter_reg)( voi
 		}
 		break;
 	case LOAD_CONST:
+	case ALLOC_OBJECT:
 	case PUSH_CONST:
 	case PUSH_ADDR:
 		// skip
@@ -1117,6 +1118,7 @@ ereg **hl_emit_get_regs( einstr *e, int *count ) {
 		jit_assert();
 		break;
 	case LOAD_CONST:
+	case ALLOC_OBJECT:
 	case PUSH_CONST:
 	case PUSH_ADDR:
 		// skip
@@ -1784,6 +1786,17 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 		STORE(dst, emit_gen_ext(ctx,UNOP,LOAD(dst),UNUSED,hl_type_mode(dst->t),o->op));
 		break;
 	case ONew:
+		if(ctx->jit->cfg.alloc_inline && !m->debug) {
+			hl_jit_alloc_data data;
+			if(hl_jit_alloc_prepare(dst->t,&data)) {
+				hl_jit_alloc_data *saved = (hl_jit_alloc_data*)hl_malloc(&ctx->jit->galloc,sizeof(data));
+				*saved = data;
+				einstr *e = emit_instr(ctx,ALLOC_OBJECT);
+				e->mode = M_PTR; e->value = (uint64)(int_val)saved;
+				STORE(dst,new_value(ctx));
+				break;
+			}
+		}
 		{
 			ereg arg = UNUSED;
 			void *allocFun = NULL;

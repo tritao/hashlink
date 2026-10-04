@@ -187,6 +187,7 @@ HL_PRIM hl_runtime_obj *hl_get_obj_rt( hl_type *ot ) {
 
 	t = (hl_runtime_obj*)hl_malloc(alloc,sizeof(hl_runtime_obj));
 	t->t = ot;
+	t->allocation_ready = false;
 	t->nfields = o->nfields + (p ? p->nfields : 0);
 	t->nproto = p ? p->nproto : 0;
 	t->nlookup = o->nfields;
@@ -453,6 +454,14 @@ HL_API hl_runtime_obj *hl_get_obj_proto( hl_type *ot ) {
 	t->castFun = castField ? t->methods[-(castField->field_index+1)] : NULL;
 	t->getFieldFun = getField ? t->methods[-(getField->field_index+1)] : NULL;
 	if( p && !t->getFieldFun ) t->getFieldFun = p->getFieldFun;
+
+	// x86-64 JIT loads this after checking dynamic allocation policy.
+	// The flag is last: all prototype fields are initialized before publication.
+#if defined(__GNUC__)
+	__atomic_store_n(&t->allocation_ready,true,__ATOMIC_RELEASE);
+#else
+	t->allocation_ready = true;
+#endif
 
 	hl_global_lock(false);
 

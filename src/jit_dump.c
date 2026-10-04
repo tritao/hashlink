@@ -24,6 +24,7 @@
 static const char *op_names[] = {
 	"load-addr",
 	"load-const",
+	"alloc-object",
 	"load-arg",
 	"load-fun",
 	"store",
@@ -332,6 +333,9 @@ static void dump_instr( jit_ctx *ctx, einstr *e, int cur_pos ) {
 	printf("%s", op_names[e->op]);
 	bool show_size = true;
 	switch( e->op ) {
+	case ALLOC_OBJECT:
+		printf(" %p",(void*)(int_val)e->value);
+		return;
 	case TEST:
 	case CMP:
 		printf("-%s", hl_op_name(e->size_offs)+2);

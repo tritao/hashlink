@@ -465,6 +465,10 @@ void hl_jit_init_regs( regs_config *cfg ) {
 	const char *option = getenv("HL_JIT_REGOPT");
 	cfg->regopt = option ? (int)strtol(option,NULL,0) & (JIT_REGOPT_CALL_SAVE | JIT_REGOPT_LOOP_PHI) : (JIT_REGOPT_CALL_SAVE | JIT_REGOPT_LOOP_PHI);
 #endif
+#if defined(__linux__) && defined(__x86_64__) && !defined(HL_WIN_CALL)
+	const char *alloc = getenv("HL_JIT_ALLOC_INLINE");
+	cfg->alloc_inline = alloc && strcmp(alloc,"1") == 0;
+#endif
 	detect_cpu_features();
 	// exclude R11 at it's use as temporary for various ops
 #	ifdef HL_WIN_CALL
@@ -783,6 +787,9 @@ static void emit_vex( code_ctx *ctx, CpuOp op, ereg out, ereg a, ereg b ) {
 static int max_op_size( einstr *e ) {
 	int size;
 	switch( e->op ) {
+	case ALLOC_OBJECT:
+		size = 1024;
+		break;
 	case LOAD_ARG:
 		size = OP_SIZE_NONE;
 		break;
@@ -1409,6 +1416,76 @@ static int get_cond_jump( code_ctx *ctx ) {
 	return op;
 }
 
+// One internal operation owns both result paths. R11 is reserved by this backend;
+// all allocatable caller-saved GPRs and scalar float registers survive the slow call.
+static int alloc_branch(code_ctx *ctx, int condition) {
+	if(condition != JAlways) B(0x0F);
+	B(condition);
+	int pos = byte_count(ctx->code); W(0); return pos;
+}
+static void alloc_patch(code_ctx *ctx, int pos) {
+	int delta = byte_count(ctx->code) - (pos + 4);
+	memcpy(byte_addr(ctx->code,pos),&delta,4);
+}
+static void emit_object_alloc(code_ctx *ctx, ereg out, hl_jit_alloc_data *data) {
+	ereg dst = IS_REG(out) ? out : R(RAX);
+	bool save_rax = !IS_REG(out);
+	int refs[16], nrefs = 0;
+	if(save_rax) EMIT(_PUSH,R(RAX),UNUSED,M_PTR);
+	for(int i=0;i<data->nguards;i++) {
+		hl_jit_alloc_guard *guard = data->guards+i;
+		emit_ext(ctx,_MOV,RTMP,VAL_CONST,M_PTR,(int_val)guard->address);
+		emit_mov(ctx,RTMP,MK_ADDR(R11,0),guard->bytes == 1 ? M_UI8 : guard->bytes == 4 ? M_I32 : M_PTR);
+		if(guard->mask != ~(uint64)0) EMIT(AND,RTMP,MK_CONST((int)guard->mask),M_PTR);
+		EMIT(_CMP,RTMP,MK_CONST(0),M_PTR);
+		refs[nrefs++] = alloc_branch(ctx,JNeq);
+	}
+	// Only layout was prepared at JIT time. First allocation initializes methods normally.
+	emit_ext(ctx,_MOV,RTMP,VAL_CONST,M_PTR,(int_val)&data->runtime->allocation_ready);
+	emit_mov(ctx,RTMP,MK_ADDR(R11,0),M_UI8);
+	EMIT(_CMP,RTMP,MK_CONST(0),M_PTR); refs[nrefs++] = alloc_branch(ctx,JEq);
+	emit_ext(ctx,_MOV,RTMP,VAL_CONST,M_PTR,data->tls_offset);
+	B(0x64); emit_mov(ctx,RTMP,MK_ADDR(R11,0),M_PTR);
+	EMIT(_CMP,RTMP,MK_CONST(0),M_PTR); refs[nrefs++] = alloc_branch(ctx,JEq);
+	emit_mov(ctx,RTMP,MK_ADDR(R11,offsetof(hl_thread_info,gc_tlab)),M_PTR);
+	EMIT(_CMP,RTMP,MK_CONST(0),M_PTR); refs[nrefs++] = alloc_branch(ctx,JEq);
+	emit_mov(ctx,dst,MK_ADDR(R11,data->slot_offset),M_PTR);
+	EMIT(_CMP,dst,MK_CONST(0),M_PTR); refs[nrefs++] = alloc_branch(ctx,JEq);
+	EMIT(ADD,dst,MK_CONST(data->block),M_PTR);
+	EMIT(_CMP,dst,MK_ADDR(R11,data->slot_offset+HL_WSIZE),M_PTR);
+	refs[nrefs++] = alloc_branch(ctx,JUGt);
+	emit_mov(ctx,MK_ADDR(R11,data->slot_offset),dst,M_PTR);
+	EMIT(SUB,dst,MK_CONST(data->block),M_PTR);
+	// Preserve all default values, including primitive fields and scan padding.
+	for(int offset=HL_WSIZE;offset<data->block;offset+=HL_WSIZE)
+		emit_mov(ctx,MK_ADDR(REG_REG(dst),offset),MK_CONST(0),M_PTR);
+	emit_ext(ctx,_MOV,RTMP,VAL_CONST,M_PTR,(int_val)data->type);
+	emit_mov(ctx,MK_ADDR(REG_REG(dst),0),RTMP,M_PTR);
+	int done = alloc_branch(ctx,JAlways);
+	for(int i=0;i<nrefs;i++) alloc_patch(ctx,refs[i]);
+	// The failed bump can leave an address in a free block; it is not a GC root.
+	emit_mov(ctx,dst,MK_CONST(0),M_PTR);
+	static const int callers[] = {RAX,RCX,RDX,RSI,RDI,R8,R9,R10};
+	int saved = 0;
+	for(int i=0;i<8;i++) if(R(callers[i]) != dst) { EMIT(_PUSH,R(callers[i]),UNUSED,M_PTR); saved++; }
+	// The normal JIT frame has an aligned SP. Account for the optional hot RAX save.
+	int frame = 16*HL_WSIZE + ((saved + (save_rax ? 1 : 0)) & 1)*HL_WSIZE;
+	EMIT(SUB,R(RSP),MK_CONST(frame),M_PTR);
+	for(int i=0;i<16;i++) emit_mov(ctx,MK_ADDR(RSP,i*HL_WSIZE),MMX(i),M_F64);
+	emit_ext(ctx,_MOV,R(RDI),VAL_CONST,M_PTR,(int_val)data->type);
+	B(0xFF); B(0x15); W(0); alloc_const(ctx,(uint64)(int_val)hl_jit_alloc_slow);
+	if(dst != R(RAX)) emit_mov(ctx,dst,R(RAX),M_PTR);
+	for(int i=0;i<16;i++) emit_mov(ctx,MMX(i),MK_ADDR(RSP,i*HL_WSIZE),M_F64);
+	EMIT(ADD,R(RSP),MK_CONST(frame),M_PTR);
+	for(int i=7;i>=0;i--) if(R(callers[i]) != dst) EMIT(_POP,R(callers[i]),UNUSED,M_PTR);
+	alloc_patch(ctx,done);
+	if(save_rax) {
+		emit_mov(ctx,RTMP,dst,M_PTR);
+		EMIT(_POP,R(RAX),UNUSED,M_PTR);
+		if(out) emit_mov(ctx,out,RTMP,M_PTR);
+	}
+}
+
 static void emit_cmov( code_ctx *ctx, ereg out, ereg r, int cond, emit_mode m ) {
 	if( IS_FLOAT(m) ) jit_assert();
 	if( hl_emit_mode_sizes[m] == 8 )
@@ -1447,8 +1524,8 @@ void hl_codegen_function( jit_ctx *jit ) {
 	for(int cur_pos=0;cur_pos<jit->reg_instr_count;cur_pos++) {
 		einstr *e = jit->reg_instrs + cur_pos;
 		ereg out = jit->reg_writes[cur_pos];
-		byte_reserve(ctx->code,64);
-		ctx->code.cur -= 64;
+		byte_reserve(ctx->code,e->op == ALLOC_OBJECT ? 1024 : 64);
+		ctx->code.cur -= e->op == ALLOC_OBJECT ? 1024 : 64;
 		ctx->cur_op = cur_pos;
 		if( cur_pos > 0 ) ctx->pos_map[cur_pos] = ctx->code.cur;
 #		ifdef GEN_DEBUG
@@ -1598,6 +1675,9 @@ void hl_codegen_function( jit_ctx *jit ) {
 				if( w != out )
 					emit_mov(ctx, out, w, M_PTR);
 			}
+			break;
+		case ALLOC_OBJECT:
+			emit_object_alloc(ctx,out,(hl_jit_alloc_data*)(int_val)e->value);
 			break;
 		case CALL_FUN:
 			B(0xE8);

@@ -572,6 +572,7 @@ struct hl_runtime_obj {
 	int *interfaces;
 	// __string returns a String object rather than UTF-16 bytes
 	bool toStringObject;
+	volatile bool allocation_ready; // Published after lazy prototype initialization completes.
 };
 
 typedef struct {
@@ -668,6 +669,21 @@ HL_API HL_NO_RETURN( void hl_array_out_of_bounds( varray *a, int index ) );
 HL_API vdynamic *hl_alloc_dynamic( hl_type *t );
 HL_API vdynamic *hl_alloc_dynbool( bool b );
 HL_API vdynamic *hl_alloc_obj( hl_type *t );
+// Private JIT/runtime contract. The descriptor belongs to one compiled function.
+typedef struct {
+	void *address;
+	uint64 mask;
+	int bytes;
+} hl_jit_alloc_guard;
+typedef struct {
+	hl_type *type;
+	hl_runtime_obj *runtime;
+	int tls_offset, slot_offset, block;
+	hl_jit_alloc_guard guards[5];
+	int nguards;
+} hl_jit_alloc_data;
+HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data);
+HL_API vdynamic *hl_jit_alloc_slow(hl_type *type);
 HL_API venum *hl_alloc_enum( hl_type *t, int index );
 HL_API vvirtual *hl_alloc_virtual( hl_type *t );
 HL_API vdynobj *hl_alloc_dynobj( void );

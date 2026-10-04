@@ -41,6 +41,7 @@
 typedef enum {
 	LOAD_ADDR,
 	LOAD_CONST,
+	ALLOC_OBJECT, // x86-64 atomic allocation expansion; no hot-path call clobber.
 	LOAD_ARG,
 	LOAD_FUN,
 	STORE,
@@ -233,6 +234,7 @@ typedef struct {
 	// their local frame is scrubbed before the epilogue restores the caller.
 	int clear_stack_on_return;
 	int debug_prefix_size;
+	bool alloc_inline; // Opt-in backend support; false on all other targets.
 	int regopt; // Backend-supported HL_JIT_REGOPT bits; zero retains baseline.
 	ereg req_bit_shifts;
 	ereg req_div_a;
