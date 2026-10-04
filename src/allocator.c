@@ -444,7 +444,45 @@ static bool is_zero( void *ptr, int size ) {
 	return memcmp(p,ZEROMEM,size) == 0;
 }
 
+// Cached pages stay in the ordinary free lists. The collector holds the global
+// lock here and has invalidated TLABs, so the budget needs no atomic bookkeeping.
+static bool gc_page_is_empty( gc_pheader *ph ) {
+	gc_allocator_page_data *p = &ph->alloc;
+	return ph->bmp && is_zero(ph->bmp+(p->first_block>>3),((p->max_blocks+7)>>3) - (p->first_block>>3));
+}
+
 static void gc_flush_empty_pages() {
+	static int keep = -1;
+	static int64 cap;
+	if( keep < 0 ) {
+		const char *option = getenv("HL_GC_KEEP_EMPTY");
+#if defined(__linux__) && defined(__x86_64__)
+		keep = option == NULL || strcmp(option,"0") != 0;
+#else
+		keep = option != NULL && strcmp(option,"0") != 0;
+#endif
+		cap = 64LL << 20;
+		const char *budget = getenv("HL_GC_EMPTY_BUDGET");
+		if( budget ) {
+			char *end;
+			long long value = strtoll(budget,&end,10);
+			if( budget[0] && *end == 0 && value >= 0 && value <= (1LL << 30) ) cap = value;
+		}
+	}
+	static int64 recent[4];
+	static unsigned int collection;
+	int64 budget = 0;
+	if( keep ) {
+		for(int pid = 0; pid < GC_ALL_PAGES; pid++)
+			for(gc_pheader *ph = gc_pages[pid]; ph; ph = ph->next_page)
+				if( !gc_page_is_empty(ph) ) budget += ph->page_size;
+		// Four recent collections smooth a burst without anchoring the budget to
+		// cached pages themselves. Four quiet collections shed the old working set.
+		recent[collection++ & 3] = budget;
+		for(int index = 0; index < 4; index++) if( recent[index] > budget ) budget = recent[index];
+		budget = budget > cap / 4 ? cap : budget * 4;
+	}
+	int64 retained = 0;
 	int i;
 	for(i=0;i<GC_ALL_PAGES;i++) {
 		gc_pheader *ph = gc_pages[i];
@@ -452,7 +490,14 @@ static void gc_flush_empty_pages() {
 		while( ph ) {
 			gc_allocator_page_data *p = &ph->alloc;
 			gc_pheader *next = ph->next_page;
-			if( ph->bmp && is_zero(ph->bmp+(p->first_block>>3),((p->max_blocks+7)>>3) - (p->first_block>>3)) ) {
+			if( gc_page_is_empty(ph) ) {
+				// Large allocations always create dedicated pages and cannot reuse this cache.
+				if( (i >> PAGE_KIND_BITS) != GC_LARGE_PART && ph->page_size <= budget - retained ) {
+					retained += ph->page_size;
+					prev = ph;
+					ph = next;
+					continue;
+				}
 				if( prev )
 					prev->next_page = next;
 				else
