@@ -468,6 +468,8 @@ void hl_jit_init_regs( regs_config *cfg ) {
 #if defined(__linux__) && defined(__x86_64__) && !defined(HL_WIN_CALL)
 	const char *alloc = getenv("HL_JIT_ALLOC_INLINE");
 	cfg->alloc_inline = alloc && strcmp(alloc,"1") == 0;
+	const char *box = getenv("HL_JIT_ALLOC_BOX");
+	cfg->alloc_box = box && strcmp(box,"1") == 0;
 #endif
 	detect_cpu_features();
 	// exclude R11 at it's use as temporary for various ops
@@ -788,6 +790,7 @@ static int max_op_size( einstr *e ) {
 	int size;
 	switch( e->op ) {
 	case ALLOC_OBJECT:
+	case ALLOC_BOXED:
 		size = 1024;
 		break;
 	case LOAD_ARG:
@@ -1427,7 +1430,7 @@ static void alloc_patch(code_ctx *ctx, int pos) {
 	int delta = byte_count(ctx->code) - (pos + 4);
 	memcpy(byte_addr(ctx->code,pos),&delta,4);
 }
-static void emit_object_alloc(code_ctx *ctx, ereg out, hl_jit_alloc_data *data) {
+static void emit_small_alloc(code_ctx *ctx, ereg out, hl_jit_alloc_data *data) {
 	ereg dst = IS_REG(out) ? out : R(RAX);
 	bool save_rax = !IS_REG(out);
 	int refs[16], nrefs = 0;
@@ -1440,10 +1443,12 @@ static void emit_object_alloc(code_ctx *ctx, ereg out, hl_jit_alloc_data *data) 
 		EMIT(_CMP,RTMP,MK_CONST(0),M_PTR);
 		refs[nrefs++] = alloc_branch(ctx,JNeq);
 	}
-	// Only layout was prepared at JIT time. First allocation initializes methods normally.
-	emit_ext(ctx,_MOV,RTMP,VAL_CONST,M_PTR,(int_val)&data->runtime->allocation_ready);
-	emit_mov(ctx,RTMP,MK_ADDR(R11,0),M_UI8);
-	EMIT(_CMP,RTMP,MK_CONST(0),M_PTR); refs[nrefs++] = alloc_branch(ctx,JEq);
+	// Object layouts keep lazy prototype initialization; primitive boxes need no prototype.
+	if(data->runtime) {
+		emit_ext(ctx,_MOV,RTMP,VAL_CONST,M_PTR,(int_val)&data->runtime->allocation_ready);
+		emit_mov(ctx,RTMP,MK_ADDR(R11,0),M_UI8);
+		EMIT(_CMP,RTMP,MK_CONST(0),M_PTR); refs[nrefs++] = alloc_branch(ctx,JEq);
+	}
 	emit_ext(ctx,_MOV,RTMP,VAL_CONST,M_PTR,data->tls_offset);
 	B(0x64); emit_mov(ctx,RTMP,MK_ADDR(R11,0),M_PTR);
 	EMIT(_CMP,RTMP,MK_CONST(0),M_PTR); refs[nrefs++] = alloc_branch(ctx,JEq);
@@ -1473,7 +1478,7 @@ static void emit_object_alloc(code_ctx *ctx, ereg out, hl_jit_alloc_data *data) 
 	EMIT(SUB,R(RSP),MK_CONST(frame),M_PTR);
 	for(int i=0;i<16;i++) emit_mov(ctx,MK_ADDR(RSP,i*HL_WSIZE),MMX(i),M_F64);
 	emit_ext(ctx,_MOV,R(RDI),VAL_CONST,M_PTR,(int_val)data->type);
-	B(0xFF); B(0x15); W(0); alloc_const(ctx,(uint64)(int_val)hl_jit_alloc_slow);
+	B(0xFF); B(0x15); W(0); alloc_const(ctx,(uint64)(int_val)(data->runtime ? hl_jit_alloc_slow : hl_jit_box_slow));
 	if(dst != R(RAX)) emit_mov(ctx,dst,R(RAX),M_PTR);
 	for(int i=0;i<16;i++) emit_mov(ctx,MMX(i),MK_ADDR(RSP,i*HL_WSIZE),M_F64);
 	EMIT(ADD,R(RSP),MK_CONST(frame),M_PTR);
@@ -1524,8 +1529,8 @@ void hl_codegen_function( jit_ctx *jit ) {
 	for(int cur_pos=0;cur_pos<jit->reg_instr_count;cur_pos++) {
 		einstr *e = jit->reg_instrs + cur_pos;
 		ereg out = jit->reg_writes[cur_pos];
-		byte_reserve(ctx->code,e->op == ALLOC_OBJECT ? 1024 : 64);
-		ctx->code.cur -= e->op == ALLOC_OBJECT ? 1024 : 64;
+		byte_reserve(ctx->code,(e->op == ALLOC_OBJECT || e->op == ALLOC_BOXED) ? 1024 : 64);
+		ctx->code.cur -= (e->op == ALLOC_OBJECT || e->op == ALLOC_BOXED) ? 1024 : 64;
 		ctx->cur_op = cur_pos;
 		if( cur_pos > 0 ) ctx->pos_map[cur_pos] = ctx->code.cur;
 #		ifdef GEN_DEBUG
@@ -1677,7 +1682,8 @@ void hl_codegen_function( jit_ctx *jit ) {
 			}
 			break;
 		case ALLOC_OBJECT:
-			emit_object_alloc(ctx,out,(hl_jit_alloc_data*)(int_val)e->value);
+		case ALLOC_BOXED:
+			emit_small_alloc(ctx,out,(hl_jit_alloc_data*)(int_val)e->value);
 			break;
 		case CALL_FUN:
 			B(0xE8);

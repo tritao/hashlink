@@ -677,12 +677,14 @@ typedef struct {
 } hl_jit_alloc_guard;
 typedef struct {
 	hl_type *type;
-	hl_runtime_obj *runtime;
+	hl_runtime_obj *runtime; // NULL for a fixed primitive box.
 	int tls_offset, slot_offset, block;
 	hl_jit_alloc_guard guards[5];
 	int nguards;
 } hl_jit_alloc_data;
 HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data);
+HL_API bool hl_jit_box_prepare(hl_type *type, hl_jit_alloc_data *data);
+HL_API vdynamic *hl_jit_box_slow(hl_type *type);
 HL_API vdynamic *hl_jit_alloc_slow(hl_type *type);
 HL_API venum *hl_alloc_enum( hl_type *t, int index );
 HL_API vvirtual *hl_alloc_virtual( hl_type *t );

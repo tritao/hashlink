@@ -1094,6 +1094,7 @@ void hl_emit_reg_iter( jit_ctx *jit, einstr *e, void *ctx, void (*iter_reg)( voi
 		break;
 	case LOAD_CONST:
 	case ALLOC_OBJECT:
+	case ALLOC_BOXED:
 	case PUSH_CONST:
 	case PUSH_ADDR:
 		// skip
@@ -1119,6 +1120,7 @@ ereg **hl_emit_get_regs( einstr *e, int *count ) {
 		break;
 	case LOAD_CONST:
 	case ALLOC_OBJECT:
+	case ALLOC_BOXED:
 	case PUSH_CONST:
 	case PUSH_ADDR:
 		// skip
@@ -1754,6 +1756,17 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 				STORE(dst, LOAD_MEM_PTR(addr, 0));
 			}
 		} else {
+			hl_jit_alloc_data data;
+			if(ctx->jit->cfg.alloc_box && !m->debug && hl_jit_box_prepare(ra->t,&data)) {
+				hl_jit_alloc_data *saved = (hl_jit_alloc_data*)hl_malloc(&ctx->jit->galloc,sizeof(data));
+				*saved = data;
+				einstr *e = emit_instr(ctx,ALLOC_BOXED);
+				e->mode = M_PTR; e->value = (uint64)(int_val)saved;
+				ereg ret = new_value(ctx);
+				STORE_MEM(ret,HDYN_VALUE,LOAD(ra));
+				STORE(dst,ret);
+				break;
+			}
 			/* Preserve null pointer-like values as null dynamics instead of typed null payloads. */
 			int jnull = -1;
 			if( hl_is_ptr(ra->t) ) {

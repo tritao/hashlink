@@ -2222,3 +2222,41 @@ DEFINE_PRIM(_DYN, debug_call, _I32 _DYN);
 DEFINE_PRIM(_VOID, blocking, _BOOL);
 DEFINE_PRIM(_VOID, gc_safepoint, _NO_ARG);
 DEFINE_PRIM(_VOID, set_thread_flags, _I32 _I32);
+
+// Keep JIT-only descriptor preparation and rare refill out of ordinary runtime
+// text to avoid displacing hot map/cast code on ELF targets.
+#if defined(__linux__) && defined(__x86_64__) && defined(__GNUC__)
+#define GC_JIT_COLD __attribute__((cold,section(".hl_jit_cold")))
+#else
+#define GC_JIT_COLD
+#endif
+
+// They share GC_TLAB_POLICY so runtime policy and generated guards stay in sync.
+HL_API GC_JIT_COLD bool hl_jit_box_prepare(hl_type *type, hl_jit_alloc_data *data) {
+#if defined(GC_TLAB) && defined(__linux__) && defined(__x86_64__) && defined(__GNUC__)
+	if(type->kind != HI32 || type->gc_owner != NULL || sizeof(vdynamic) != 16) return false;
+	memset(data,0,sizeof(*data));
+	data->type = type; data->block = sizeof(vdynamic);
+	intptr_t tls = (intptr_t)((uintptr_t)&current_thread - (uintptr_t)__builtin_thread_pointer());
+	if(tls < (-2147483647-1) || tls > 2147483647) return false;
+	data->tls_offset = (int)tls;
+	data->slot_offset = (((sizeof(vdynamic) >> GC_ALIGN_BITS)-1) << PAGE_KIND_BITS | MEM_KIND_NOPTR) * sizeof(gc_tlab_slot);
+#define GC_BOX_GUARD(value, bits, width) \
+	data->guards[data->nguards].address = (void*)&(value); \
+	data->guards[data->nguards].mask = (bits); \
+	data->guards[data->nguards++].bytes = (width);
+	GC_TLAB_POLICY(GC_BOX_GUARD)
+	GC_BOX_GUARD(gc_threads.stopping_world,1,1)
+#undef GC_BOX_GUARD
+	return true;
+#else
+	(void)type; (void)data; return false;
+#endif
+}
+
+HL_API GC_JIT_COLD vdynamic *hl_jit_box_slow(hl_type *type) {
+	hl_gc_safepoint();
+	return hl_alloc_dynamic(type);
+}
+
+#undef GC_JIT_COLD
