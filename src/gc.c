@@ -191,6 +191,7 @@ static gc_owned_alloc *gc_owned_allocs = NULL;
 
 static gc_pheader *gc_alloc_page( int size, int kind, int block_count );
 static void gc_free_page( gc_pheader *page, int block_count );
+static int64 gc_total_allocated_bytes( void );
 
 #ifndef GC_EXTERN_API
 #include "allocator.c"
@@ -264,6 +265,10 @@ static struct {
 	int mark_count;
 	int alloc_time; // only measured if gc_profile active
 } gc_stats = {0};
+
+static int64 gc_total_allocated_bytes( void ) {
+	return gc_stats.total_allocated;
+}
 
 static struct {
 	int64 total_allocated;

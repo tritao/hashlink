@@ -470,17 +470,19 @@ static void gc_flush_empty_pages() {
 		}
 	}
 	static int64 recent[4];
+	static int64 last_total;
 	static unsigned int collection;
 	int64 budget = 0;
 	if( keep ) {
-		for(int pid = 0; pid < GC_ALL_PAGES; pid++)
-			for(gc_pheader *ph = gc_pages[pid]; ph; ph = ph->next_page)
-				if( !gc_page_is_empty(ph) ) budget += ph->page_size;
-		// Four recent collections smooth a burst without anchoring the budget to
-		// cached pages themselves. Four quiet collections shed the old working set.
-		recent[collection++ & 3] = budget;
+		// The next cycle is expected to allocate about as much as recent ones, so keep that many
+		// bytes of empty pages. Measuring allocation rather than empty pages avoids anchoring the
+		// budget to the cache itself: a quiet program allocates nothing, so four collections later
+		// the budget is zero and the cache drains.
+		int64 demand = gc_total_allocated_bytes() - last_total;
+		last_total = gc_total_allocated_bytes();
+		recent[collection++ & 3] = demand;
 		for(int index = 0; index < 4; index++) if( recent[index] > budget ) budget = recent[index];
-		budget = budget > cap / 4 ? cap : budget * 4;
+		if( budget > cap ) budget = cap;
 	}
 	int64 retained = 0;
 	int i;
