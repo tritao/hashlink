@@ -19,7 +19,6 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-#include <dlfcn.h>
 #include <hl.h>
 #include <hlmodule.h>
 
@@ -384,7 +383,7 @@ static bool module_reportable_address( hl_module **modules, int module_count, vo
 		hl_module *m = modules[i];
 		if( !module_contains_trace_address(m,lr) ) continue;
 		if( m->jit_debug && lr >= m->jit_code && lr < (void*)((char*)m->jit_code + m->codesize) ) {
-			unsigned char *code = m->jit_code + m->jit_debug[0].start;
+			unsigned char *code = (unsigned char *)m->jit_code + m->jit_debug[0].start;
 			int code_size = m->codesize - m->jit_debug[0].start;
 			if( lr < (void*)code || lr >= (void*)(code + code_size) ) continue;
 		}
