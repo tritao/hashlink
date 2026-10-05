@@ -254,6 +254,14 @@ static void stream_record( int kind, int flags, double time, int tid, int value,
 	stream_write_u32(header + 16,(unsigned int)tid);
 	stream_write_u32(header + 20,(unsigned int)value);
 	hl_mutex_acquire(stream.lock);
+	/* Idle launches expose profiler control without reserving the stream buffer. */
+	if( stream.bytes == NULL ) {
+		stream.bytes = malloc(PROFILE_STREAM_SIZE);
+		if( stream.bytes == NULL ) {
+			hl_mutex_release(stream.lock);
+			return;
+		}
+	}
 	if( record_size > PROFILE_STREAM_SIZE ) {
 		stream.dropped++;
 		hl_mutex_release(stream.lock);
@@ -666,7 +674,6 @@ void hl_profile_setup( int sample_count ) {
 	#	if defined(HL_THREADS) && (defined(HL_WIN_DESKTOP) || defined(HL_LINUX) || defined (HL_MAC))
 	if( stream.lock == NULL ) {
 		stream.lock = hl_mutex_alloc(false);
-		stream.bytes = malloc(PROFILE_STREAM_SIZE);
 		hl_add_root(&stream.lock);
 	}
 	if( data.waitCond == NULL ) {

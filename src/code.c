@@ -636,7 +636,9 @@ hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg ) {
 			s->size = UINDEX();
 			CHK_ERROR();
 			if( s->kind <= 0 || s->version <= 0 ) EXIT("Invalid debug section header");
-			s->data = hl_malloc(&c->alloc,s->size);
+			/* Inspection payloads are needed while loading, not after JIT publication.
+			   Decoded identities and runtime line tables live in c->alloc. */
+			s->data = hl_malloc(&c->falloc,s->size);
 			hl_read_bytes(r,s->data,s->size);
 			CHK_ERROR();
 			if( s->kind == 1 && s->version == 1 ) {
@@ -651,6 +653,8 @@ hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg ) {
 
 void hl_code_free_function_data( hl_code *c ) {
 	if( c == NULL ) return;
+	for(int i=0;i<c->ndebugsections;i++) c->debugsections[i].data = NULL;
+	c->ndebugsections = 0;
 	hl_free(&c->falloc);
 }
 

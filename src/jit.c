@@ -163,6 +163,8 @@ void hl_jit_free( jit_ctx *ctx, h_bool can_reset ) {
 	hl_regs_free(ctx);
 	hl_emit_free(ctx);
 	hl_free(&ctx->falloc);
+	/* Final code lives in executable memory; the assembly buffer is temporary. */
+	free(ctx->output);
 	free(ctx);
 }
 
