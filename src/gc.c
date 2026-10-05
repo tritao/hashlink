@@ -1169,8 +1169,17 @@ static bool atomic_bit_unset( unsigned char *addr, unsigned char bitmask ) {
 #	endif
 }
 
+// Stop-the-world marking with one worker has no competing bitmap writers.
+// Keep other configurations on their existing atomic path until validated there.
+#if defined(__linux__) && defined(__x86_64__) && defined(__GNUC__)
+static bool gc_mark_serial = false;
+#define GC_SERIAL_MARK (gc_mark_serial && gc_mark_threads == 1)
+#else
+#define GC_SERIAL_MARK false
+#endif
+
 static bool atomic_bit_set( unsigned char *addr, unsigned char bitmask ) {
-	if( GC_MAX_MARK_THREADS <= 1 ) {
+	if( GC_MAX_MARK_THREADS <= 1 || GC_SERIAL_MARK ) {
 		unsigned char v = *addr;
 		bool b = (v & bitmask) == 0;
 		if( b ) *addr = v | bitmask;
@@ -1518,6 +1527,11 @@ HL_API int hl_gc_get_mark_threads( hl_thread **tids ) {
 }
 
 static void hl_gc_init() {
+#if defined(__linux__) && defined(__x86_64__) && defined(__GNUC__)
+	const char *mark_serial = getenv("HL_GC_MARK_SERIAL");
+	gc_mark_serial = mark_serial && strcmp(mark_serial,"1") == 0;
+#endif
+
 #ifdef GC_ALLOC_FAST_SUPPORTED
 	const char *alloc_fast = getenv("HL_GC_ALLOC_FAST");
 	gc_alloc_fast = alloc_fast == NULL || strcmp(alloc_fast,"0") != 0;
