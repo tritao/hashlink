@@ -92,8 +92,7 @@ HL_PRIM vprocess *hl_process_run( vbyte *cmd, varray *vargs, bool detached ) {
 	sattr.lpSecurityDescriptor = NULL;
 	memset(&sinf,0,sizeof(sinf));
 	sinf.cb = sizeof(sinf);
-	sinf.dwFlags = detached ? 0 : STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-	sinf.wShowWindow = SW_HIDE;
+	sinf.dwFlags = detached ? 0 : STARTF_USESTDHANDLES;
 	if( !detached ) {
 		CreatePipe(&oread,&sinf.hStdOutput,&sattr,0);
 		CreatePipe(&eread,&sinf.hStdError,&sattr,0);
@@ -109,7 +108,8 @@ HL_PRIM vprocess *hl_process_run( vbyte *cmd, varray *vargs, bool detached ) {
 		p->eread = NULL;
 		p->iwrite = NULL;
 	}
-	if( !CreateProcess(NULL,(uchar*)cmd,NULL,NULL,detached?FALSE:TRUE,detached?CREATE_NEW_CONSOLE:0,NULL,NULL,&sinf,&p->pinf) ) {
+	// Hide console windows without overriding a GUI child's first ShowWindow call.
+	if( !CreateProcess(NULL,(uchar*)cmd,NULL,NULL,detached?FALSE:TRUE,detached?CREATE_NEW_CONSOLE:CREATE_NO_WINDOW,NULL,NULL,&sinf,&p->pinf) ) {
 		// handles will be finalized
 		return NULL;
 	}
