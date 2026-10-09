@@ -47,12 +47,12 @@ typedef struct {
 static void hl_freelist_resize( hl_free_list *f, int newsize ) {
 	hl_free_bucket *buckets = (hl_free_bucket*)hl_gc_alloc_noptr(sizeof(hl_free_bucket)*newsize);
 	memcpy(buckets,f->buckets,f->head * sizeof(hl_free_bucket));
-	f->buckets = buckets;
+	hl_gc_store_ref(&f->buckets,buckets,&hlt_bytes);
 	f->nbuckets = newsize;
 }
 
 static void hl_freelist_init( hl_free_list *f ) {
-	memset(f,0,sizeof(hl_free_list));
+	hl_gc_clear_values(f,sizeof(hl_free_list),&hlt_bytes);
 }
 
 static void hl_freelist_add_range( hl_free_list *f, int pos, int count ) {
@@ -202,8 +202,8 @@ typedef struct {
 #define _MNAME(n)	hl_hb##n
 #define _MMATCH(c)	m->entries[c].hash == hash && ucmp(m->values[c].key,key) == 0
 #define _MKEY(m,c)	m->values[c].key
-#define	_MSET(c)	m->entries[c].hash = hash; m->values[c].key = key
-#define _MERASE(c)  m->values[c].key = NULL
+#define	_MSET(c)	m->entries[c].hash = hash; hl_gc_store_ref(&m->values[c].key,key,&hlt_key)
+#define _MERASE(c)  hl_gc_store_ref(&m->values[c].key,NULL,&hlt_key)
 
 #include "maps.h"
 
@@ -242,8 +242,8 @@ static vdynamic *hl_hofilter( vdynamic *key ) {
 #define _MNAME(n)	hl_ho##n
 #define _MMATCH(c)	m->values[c].key == key
 #define _MKEY(m,c)	m->values[c].key
-#define	_MSET(c)	m->values[c].key = key
-#define _MERASE(c)  m->values[c].key = NULL
+#define	_MSET(c)	hl_gc_store_ref(&m->values[c].key,key,&hlt_key)
+#define _MERASE(c)  hl_gc_store_ref(&m->values[c].key,NULL,&hlt_key)
 
 #include "maps.h"
 

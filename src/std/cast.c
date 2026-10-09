@@ -96,7 +96,7 @@ HL_PRIM vdynamic *hl_make_dyn( void *data, hl_type *t ) {
 			void *p = *(void**)data;
 			if( p == NULL ) return NULL;
 			v = hl_alloc_dynamic(t);
-			v->v.ptr = p;
+			hl_gc_store_ref(&v->v.ptr,p,t);
 			return v;
 		}
 	default:
@@ -530,8 +530,9 @@ HL_PRIM void hl_write_dyn( void *data, hl_type *t, vdynamic *v, bool is_tmp ) {
 			if( is_tmp && ret == v ) {
 				ret = hl_alloc_dynamic(v->t);
 				((vdynamic*)ret)->v = v->v;
+				hl_gc_record_write(&((vdynamic*)ret)->v,sizeof(v->v));
 			}
-			*(void**)data = ret;
+			hl_gc_store_ref(data,ret,t);
 		}
 		break;
 	}

@@ -197,6 +197,7 @@ target_compile_features(libhl PUBLIC cxx_std_11 c_std_11)
 
 set(public_headers
     src/hl.h
+    src/gc_write.h
     src/hl_ffi.h
     src/hlc.h
 )

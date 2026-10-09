@@ -860,6 +860,26 @@ static void emit_store_size( emit_ctx *ctx, ereg dst, int dst_offset, ereg src, 
 }
 
 
+/* The guard avoids native calls outside incremental cycles. This hook does not
+ * allocate or introduce a GC safepoint; globals/stack destinations are ignored. */
+static void emit_managed_barrier(emit_ctx *ctx, ereg dst, int offset, int bytes) {
+	emit_test(ctx,LOAD_MEM(LOAD_CONST_PTR(&hl_gc_write_barrier_active),0,&hlt_i32),OJFalse);
+	int skip = emit_jump(ctx,true);
+	ereg args[2] = { OFFSET(dst,UNUSED,0,offset), LOAD_CONST(bytes,HL_WSIZE == 8 ? &hlt_i64 : &hlt_i32) };
+	emit_native_call(ctx,hl_gc_write_barrier,args,2,&hlt_void);
+	split_block(ctx); // Join both the skipped and called paths before reading variables.
+	patch_jump(ctx,skip);
+}
+static void emit_managed_store(emit_ctx *ctx, ereg dst, int offset, ereg value, hl_type *type) {
+	STORE_MEM(dst,offset,value);
+	if( hl_is_ptr(type) ) emit_managed_barrier(ctx,dst,offset,hl_type_size(type));
+}
+static void emit_managed_copy(emit_ctx *ctx, ereg dst, int dst_offset, ereg src, int src_offset, int bytes, hl_type *layout, bool packed) {
+	(void)layout; (void)packed;
+	emit_store_size(ctx,dst,dst_offset,src,src_offset,bytes);
+	emit_managed_barrier(ctx,dst,dst_offset,bytes);
+}
+
 static ereg emit_conv( emit_ctx *ctx, ereg v, emit_mode from, emit_mode to, bool _unsigned ) {
 	if( from == to && !_unsigned )
 		return emit_gen(ctx,MOV,v,UNUSED,to);
@@ -1653,7 +1673,7 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 	case OSetGlobal:
 		{
 			int offs = m->globals_indexes[o->p1];
-			STORE_MEM(LOAD_CONST_PTR(m->globals_data),offs,LOAD(ra));
+			emit_managed_store(ctx,LOAD_CONST_PTR(m->globals_data),offs,LOAD(ra),ra->t);
 		}
 		break;
 	case OCall0:
@@ -1979,11 +1999,11 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 					if( rb->t->kind == HSTRUCT ) {
 						hl_type *ft = hl_obj_field_fetch(dst->t,o->p2)->t;
 						if( ft->kind == HPACKED ) {
-							emit_store_size(ctx,obj,field_pos,val,0,hl_get_obj_rt(ft->tparam)->size);
+							emit_managed_copy(ctx,obj,field_pos,val,0,hl_get_obj_rt(ft->tparam)->size,ft->tparam,true);
 							break;
 						}
 					}
-					STORE_MEM(obj,field_pos, val);
+					emit_managed_store(ctx,obj,field_pos,val,hl_obj_field_fetch(dst->t,o->p2)->t);
 				}
 				break;
 			case HVIRTUAL:
@@ -1994,7 +2014,7 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 					ereg field = LOAD_MEM_PTR(obj,sizeof(vvirtual)+HL_WSIZE*o->p2);
 					emit_test(ctx, field, OJNull);
 					int jidx = emit_jump(ctx, true);
-					STORE_MEM(field, 0, val);
+					emit_managed_store(ctx,field,0,val,dst->t->virt->fields[o->p2].t);
 					int jend = emit_jump(ctx, false);
 					patch_jump(ctx, jidx);
 					bool need_type = dyn_need_type(rb->t);
@@ -2043,11 +2063,11 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 			if( ra->t->kind == HSTRUCT ) {
 				hl_type *ft = hl_obj_field_fetch(r->t,o->p1)->t;
 				if( ft->kind == HPACKED ) {
-					emit_store_size(ctx, obj, field_pos, val, 0, hl_get_obj_rt(ft->tparam)->size);
+					emit_managed_copy(ctx,obj,field_pos,val,0,hl_get_obj_rt(ft->tparam)->size,ft->tparam,true);
 					break;
 				}
 			}
-			STORE_MEM(obj,field_pos,val);
+			emit_managed_store(ctx,obj,field_pos,val,hl_obj_field_fetch(r->t,o->p1)->t);
 		}
 		break;
 	case OCallThis:
@@ -2224,13 +2244,13 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 					osize = rt->size;
 				}
 				ereg pos = (osize <= 8 && ((osize - 1) & osize) == 0) ? OFFSET(LOAD(dst), LOAD(ra), osize, 0) : OFFSET(LOAD(dst), emit_gen_ext(ctx,BINOP,LOAD(ra),MK_CONST(osize),M_I32,OMul),1,0);
-				emit_store_size(ctx, pos, 0, LOAD(rb), 0, osize);
+				emit_managed_copy(ctx,pos,0,LOAD(rb),0,osize,rb->t,!isPtr);
 			} else  {
 				ereg ensure_args[2] = { LOAD(dst), LOAD(ra) };
 				emit_native_call(ctx, hl_array_ensure, ensure_args, 2, &hlt_void);
 				ereg data = OFFSET(LOAD_MEM_PTR(LOAD(dst), offsetof(varray,data)), UNUSED, 0, HL_WSIZE);
 				ereg pos = OFFSET(data, LOAD(ra), hl_type_size(rb->t), 0);
-				STORE_MEM(pos, 0, LOAD(rb));
+				emit_managed_store(ctx,pos,0,LOAD(rb),rb->t);
 			}
 		}
 		break;
@@ -2244,7 +2264,7 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 		STORE(dst, LOAD_MEM(LOAD(ra),0,dst->t));
 		break;
 	case OSetref:
-		STORE_MEM(LOAD(dst),0,LOAD(ra));
+		emit_managed_store(ctx,LOAD(dst),0,LOAD(ra),dst->t->tparam);
 		break;
 	case ORefData:
 		switch( ra->t->kind ) {
@@ -2299,7 +2319,7 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 	case OSetEnumField:
 		{
 			hl_enum_construct *c = &dst->t->tenum->constructs[0];
-			STORE_MEM(LOAD(dst), c->offsets[o->p2], LOAD(rb));
+			emit_managed_store(ctx,LOAD(dst),c->offsets[o->p2],LOAD(rb),c->params[o->p2]);
 		}
 		break;
 	case ONullCheck:

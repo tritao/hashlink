@@ -155,6 +155,13 @@ struct _gc_pheader {
 	// const
 	unsigned char *base;
 	unsigned char *bmp;
+	unsigned char *incremental_bmp;
+	uint64 incremental_epoch;
+	unsigned char *validation_bmp;
+	unsigned int software_dirty;
+	unsigned int scan_dirty_sources;
+	void *scan_profile;
+	gc_pheader *software_dirty_next;
 	int page_size;
 	int page_kind;
 	gc_allocator_page_data alloc;
@@ -188,6 +195,21 @@ struct _gc_owned_alloc {
 	gc_owned_alloc *next;
 };
 static gc_owned_alloc *gc_owned_allocs = NULL;
+/* Opt-in diagnostics: no per-phase clocks when disabled. */
+static bool gc_latency_trace;
+static bool gc_scan_profile_enabled;
+static double gc_latency_finalizers;
+// The flag is also a generated allocation guard: incremental cycles cannot use TLABs.
+static uint64 gc_incremental_epoch;
+static bool gc_incremental_active = false;
+static bool gc_incremental_enabled = false;
+// Experimental pacing controls; pressure limits retain the ordinary threshold.
+static int gc_inc_start_percent = 100;
+static int64 gc_inc_step_bytes = 256 << 10;
+static bool gc_incremental_bitmaps = false;
+static void gc_incremental_allocated(void *ptr);
+static void gc_incremental_discard(void);
+
 
 static gc_pheader *gc_alloc_page( int size, int kind, int block_count );
 static void gc_free_page( gc_pheader *page, int block_count );
@@ -580,6 +602,12 @@ static gc_pheader *gc_alloc_page( int size, int kind, int block_count ) {
 	p->page_size = size;
 	p->page_kind = kind;
 	p->bmp = NULL;
+	if( gc_incremental_active ) {
+		p->incremental_bmp = (unsigned char*)calloc(((block_count + 7) >> 3) * 2,1);
+		if( !p->incremental_bmp ) out_of_memory("incremental bitmap");
+		p->bmp = p->incremental_bmp;
+		p->incremental_epoch = gc_incremental_epoch;
+	}
 
 	// update stats
 	gc_stats.pages_count++;
@@ -595,9 +623,17 @@ static gc_pheader *gc_alloc_page( int size, int kind, int block_count ) {
 		if( GC_GET_LEVEL1(ptr) == gc_level1_null ) {
 			gc_pheader **level = (gc_pheader**)malloc(sizeof(void*) * (1<<GC_LEVEL1_BITS));
 			MZERO(level,sizeof(void*) * (1<<GC_LEVEL1_BITS));
+			#if defined(__GNUC__)
+			__atomic_store_n(&GC_GET_LEVEL1(ptr),level,__ATOMIC_RELEASE);
+#else
 			GC_GET_LEVEL1(ptr) = level;
+#endif
 		}
+		#if defined(__GNUC__)
+		__atomic_store_n(&GC_GET_PAGE(ptr),p,__ATOMIC_RELEASE);
+#else
 		GC_GET_PAGE(ptr) = p;
+#endif
 	}
 
 	return p;
@@ -614,6 +650,10 @@ static void gc_free_page( gc_pheader *ph, int block_count ) {
 	gc_stats.pages_total_memory -= ph->page_size;
 	gc_stats.mark_bytes -= (block_count + 7) >> 3;
 	gc_free_page_memory(ph->base,ph->page_size);
+	free(ph->scan_profile);
+	ph->scan_profile = NULL;
+	free(ph->incremental_bmp);
+	ph->incremental_bmp = NULL;
 	ph->next_page = gc_free_pheaders;
 	gc_free_pheaders = ph;
 }
@@ -840,6 +880,7 @@ HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data) { (void
 #define GC_TLAB_POLICY(X) \
 	X(gc_flags, GC_PROFILE|GC_FORCE_MAJOR, 4) \
 	X(gc_census_on, 1, 1) \
+	X(gc_incremental_active, 1, 1) \
 	X(gc_profile_allocation_callback, ~(uint64)0, sizeof(void*)) \
 	GC_TLAB_TRACK_POLICY(X)
 #define GC_TLAB_ALLOWED(value, mask, bytes) && (((uint64)(value) & (mask)) == 0)
@@ -1038,6 +1079,7 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 		owned->next = gc_owned_allocs;
 		gc_owned_allocs = owned;
 	}
+	if( gc_incremental_active ) gc_incremental_allocated(ptr);
 	gc_global_lock(false);
 	if( census_sample && hl_get_thread() != NULL ) {
 		void *frames[CENSUS_FRAMES + 4];
@@ -1333,7 +1375,10 @@ static void gc_mark_stack( void *start, void *end ) {
 	GC_STACK_END();
 }
 
+#include "gc_incremental.c"
+
 static void gc_mark() {
+	gc_incremental_discard();
 	GC_STACK_BEGIN(&global_mark_stack);
 	int mark_bytes = gc_stats.mark_bytes;
 	int i;
@@ -1500,8 +1545,27 @@ static void gc_check_mark() {
 	if( bytes_limit < gc_min_trigger_bytes ) bytes_limit = gc_min_trigger_bytes;
 	// the same floor for the block count, assuming the smallest blocks are 16 bytes
 	if( blocks_limit < gc_min_trigger_bytes / 16 ) blocks_limit = gc_min_trigger_bytes / 16;
-	if( (m > bytes_limit || b > blocks_limit || (gc_flags & GC_FORCE_MAJOR)) && gc_is_active )
-		gc_major();
+	int64 start_bytes = bytes_limit, start_blocks = blocks_limit;
+	if( gc_incremental_enabled && gc_inc_start_percent != 100 && gc_write_tracking.supported() ) {
+		start_bytes = (int64)(bytes_limit * (gc_inc_start_percent / 100.0));
+		start_blocks = (int64)(blocks_limit * (gc_inc_start_percent / 100.0));
+	}
+	if( gc_is_active && (gc_incremental_active || gc_inc_reclaiming || m > start_bytes || b > start_blocks || (gc_flags & GC_FORCE_MAJOR)) ) {
+		// A mutator that outruns marking must eventually reclaim, even during continuous animation.
+		if( (gc_incremental_enabled || gc_incremental_active || gc_inc_reclaiming) && !(gc_flags & GC_FORCE_MAJOR) && m <= bytes_limit * 4 ) {
+			if( (!gc_incremental_active && !gc_inc_reclaiming) || gc_stats.total_allocated - gc_inc_last_step_bytes >= gc_inc_step_bytes )
+				gc_incremental_step_locked(1000.0,true);
+		}
+		else {
+			if( (gc_incremental_enabled || gc_incremental_active || gc_inc_reclaiming) && !(gc_flags & GC_FORCE_MAJOR) ) gc_inc_pressure_fallbacks++;
+			double started = gc_frame_recording ? gc_frame_clock() : 0;
+			gc_major();
+			if( gc_frame_recording ) {
+				gc_frame_charge(started);
+				gc_frame.full_collections++;
+			}
+		}
+	}
 }
 
 static void mark_thread_main( void *param ) {
@@ -1526,7 +1590,26 @@ HL_API int hl_gc_get_mark_threads( hl_thread **tids ) {
 	return gc_mark_threads;
 }
 
+// Invalid diagnostic settings leave defaults intact; avoid atoi overflow/trailing text.
+static int gc_inc_setting(const char *name, int fallback, int minimum, int maximum) {
+	const char *value = getenv(name);
+	if( !value || !*value ) return fallback;
+	char *end;
+	double parsed = strtod(value,&end);
+	if( *end || !(parsed >= minimum && parsed <= maximum) || parsed != (int)parsed ) return fallback;
+	return (int)parsed;
+}
+
 static void hl_gc_init() {
+	const char *latency_trace = getenv("HL_GC_LATENCY_TRACE");
+	gc_latency_trace = latency_trace && strcmp(latency_trace,"1") == 0;
+#ifdef GC_INCREMENTAL_SOFTWARE
+	gc_inc_tracking_configure();
+#endif
+	const char *incremental = getenv("HL_GC_INCREMENTAL");
+	gc_incremental_enabled = incremental && strcmp(incremental,"1") == 0;
+	gc_inc_start_percent = gc_inc_setting("HL_GC_INCREMENTAL_START_PERCENT",100,1,100);
+	gc_inc_step_bytes = gc_inc_setting("HL_GC_INCREMENTAL_STEP_BYTES",256<<10,64<<10,16<<20);
 #if defined(__linux__) && defined(__x86_64__) && defined(__GNUC__)
 	const char *mark_serial = getenv("HL_GC_MARK_SERIAL");
 	gc_mark_serial = mark_serial && strcmp(mark_serial,"1") == 0;
@@ -1589,6 +1672,7 @@ static void hl_gc_init() {
 }
 
 static void hl_gc_free() {
+	gc_incremental_shutdown();
 #	ifdef HL_THREADS
 	hl_remove_root(&gc_threads.global_lock);
 #	endif
@@ -1798,7 +1882,36 @@ static pextra *extra_pages = NULL;
 #define EXTRA_SIZE (GC_PAGE_SIZE + (4<<10))
 #endif
 
+#ifdef GC_INCREMENTAL_LINUX
+typedef struct _gc_inc_mapping {
+	void *address, *mapping;
+	size_t reserved;
+	struct _gc_inc_mapping *next;
+} gc_inc_mapping;
+static gc_inc_mapping *gc_inc_mappings;
+#endif
+
 static void *gc_alloc_page_memory( int size ) {
+#ifdef GC_INCREMENTAL_LINUX
+	if( gc_write_tracking.isolated_mappings() && (gc_incremental_enabled || gc_incremental_active || gc_inc_reclaiming) ) {
+		// A new adjacent mmap can set VM_SOFTDIRTY on a merged VMA, making an
+		// unchanged heap appear dirty. PROT_NONE guards prevent that merge.
+		size_t reserved = (size_t)size + 2 * GC_PAGE_SIZE;
+		void *mapping = mmap(base_addr,reserved,PROT_NONE,MAP_PRIVATE | MAP_ANONYMOUS,-1,0);
+		if( mapping == MAP_FAILED ) return NULL;
+		void *address = (void*)(((uintptr_t)mapping + GC_PAGE_SIZE) & ~(uintptr_t)(GC_PAGE_SIZE-1));
+		if( mprotect(address,size,PROT_READ | PROT_WRITE) != 0 ) {
+			munmap(mapping,reserved);
+			return NULL;
+		}
+		gc_inc_mapping *entry = (gc_inc_mapping*)malloc(sizeof(gc_inc_mapping));
+		if( !entry ) { munmap(mapping,reserved); return NULL; }
+		entry->address = address; entry->mapping = mapping; entry->reserved = reserved;
+		entry->next = gc_inc_mappings; gc_inc_mappings = entry;
+		base_addr = (char*)mapping + reserved;
+		return address;
+	}
+#endif
 #if defined(HL_WIN)
 #	if defined(GC_DEBUG) && defined(HL_64)
 #		define STATIC_ADDRESS
@@ -1870,6 +1983,19 @@ static void *gc_alloc_page_memory( int size ) {
 }
 
 static void gc_free_page_memory( void *ptr, int size ) {
+#ifdef GC_INCREMENTAL_LINUX
+	gc_inc_mapping **cursor = &gc_inc_mappings;
+	while( *cursor ) {
+		gc_inc_mapping *entry = *cursor;
+		if( entry->address == ptr ) {
+			*cursor = entry->next;
+			munmap(entry->mapping,entry->reserved);
+			free(entry);
+			return;
+		}
+		cursor = &entry->next;
+	}
+#endif
 #ifdef HL_WIN
 	VirtualFree(ptr, 0, MEM_RELEASE);
 #elif defined(HL_CONSOLE)
@@ -2211,6 +2337,14 @@ HL_API vdynamic *hl_debug_call( int mode, vdynamic *v ) {
 #endif
 
 DEFINE_PRIM(_VOID, gc_major, _NO_ARG);
+DEFINE_PRIM(_BOOL, gc_step, _F64);
+DEFINE_PRIM(_BOOL, gc_frame_begin, _F64);
+DEFINE_PRIM(_VOID, gc_frame_end, _NO_ARG);
+DEFINE_PRIM(_F64, gc_frame_remaining, _NO_ARG);
+DEFINE_PRIM(_F64, gc_trigger_bytes, _NO_ARG);
+DEFINE_PRIM(_BOOL, gc_incremental_supported, _NO_ARG);
+DEFINE_PRIM(_BOOL, gc_incremental_pending, _NO_ARG);
+DEFINE_PRIM(_BOOL, gc_incremental_reclaiming, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_enable, _BOOL);
 DEFINE_PRIM(_VOID, gc_profile, _BOOL);
 DEFINE_PRIM(_VOID, gc_stats, _REF(_F64) _REF(_F64) _REF(_F64));

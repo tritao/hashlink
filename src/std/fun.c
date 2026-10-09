@@ -60,7 +60,8 @@ HL_PRIM vclosure *hl_alloc_closure_ptr( hl_type *fullt, void *fvalue, void *v ) 
 	if( hl_setup.closure_stack_capture ) stack = hl_setup.capture_stack((void**)(c + 1), hl_setup.closure_stack_capture);
 	c->stackCount = stack;
 #	endif
-	c->value = v;
+	// Varargs wrappers capture a closure without a declared argument layout.
+	hl_gc_store_ref(&c->value,v,fullt->fun->nargs > 0 ? fullt->fun->args[0] : &hlt_dyn);
 	return c;
 }
 
@@ -196,7 +197,7 @@ HL_PRIM vdynamic* hl_call_method( vdynamic *c, varray *args ) {
 	if( ret == NULL || hl_is_dynamic(tret) )
 		return (vdynamic*)ret;
 	dret = hl_alloc_dynamic(tret);
-	dret->v.ptr = ret;
+	hl_gc_store_ref(&dret->v.ptr,ret,tret);
 	return dret;
 }
 
@@ -401,8 +402,8 @@ HL_PRIM vclosure *hl_make_fun_wrapper( vclosure *v, hl_type *to ) {
 #	ifdef HL_64
 	c->cl.stackCount = 0;
 #	endif
-	c->cl.value = c;
-	c->wrappedFun = v;
+	hl_gc_store_ref(&c->cl.value,c,&hlt_dyn);
+	hl_gc_store_ref(&c->wrappedFun,v,v->t);
 	return (vclosure*)c;
 }
 

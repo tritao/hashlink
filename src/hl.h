@@ -679,7 +679,7 @@ typedef struct {
 	hl_type *type;
 	hl_runtime_obj *runtime; // NULL for a fixed primitive box.
 	int tls_offset, slot_offset, block;
-	hl_jit_alloc_guard guards[5];
+	hl_jit_alloc_guard guards[6];
 	int nguards;
 } hl_jit_alloc_data;
 HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data);
@@ -847,6 +847,35 @@ HL_API void hl_add_root_owner( void *ptr, void *owner );
 HL_API void hl_remove_root( void *ptr );
 HL_API int hl_gc_owner_root_count( void *owner );
 HL_API void hl_gc_major( void );
+// Opt-in, best-effort microsecond budget. True means the cycle completed (including fallback).
+HL_API bool hl_gc_step( double budget_micros );
+// Shared soft allowance until the next host frame boundary; -1 records unlimited
+// work, 0 defers incremental work. Invalid values leave the current frame intact.
+HL_API bool hl_gc_frame_begin( double budget_micros );
+HL_API void hl_gc_frame_end( void );
+HL_API double hl_gc_frame_remaining( void );
+typedef struct {
+	double budget_micros, spent_micros;
+	unsigned long long automatic_slices, explicit_slices, deferred_checks, full_collections;
+} hl_gc_frame_metrics;
+HL_API void hl_gc_frame_stats( hl_gc_frame_metrics *out );
+HL_API double hl_gc_trigger_bytes( void );
+HL_API bool hl_gc_incremental_supported( void );
+HL_API bool hl_gc_incremental_pending( void );
+// Marks are committed; budgeted empty-page reclamation remains.
+HL_API bool hl_gc_incremental_reclaiming( void );
+// Native diagnostic: pending cycle is still preparing allocator pages.
+HL_API bool hl_gc_incremental_preparing( void );
+// Native diagnostic: a dirty page rescan is suspended between slices.
+HL_API bool hl_gc_incremental_rescanning( void );
+// Native diagnostics; queue counts exclude unharvested kernel dirty bits.
+typedef struct {
+	unsigned long long cycles_started, cycles_completed;
+	unsigned long long pressure_fallbacks, tracking_fallbacks;
+	unsigned int dirty_pages, mark_objects;
+	double cycle_age_micros, last_cycle_micros;
+} hl_gc_incremental_metrics;
+HL_API void hl_gc_incremental_stats( hl_gc_incremental_metrics *out );
 HL_API bool hl_is_gc_ptr( void *ptr );
 HL_API int hl_gc_get_memsize( void *ptr );
 
@@ -1105,6 +1134,8 @@ HL_API hl_track_info hl_track;
 #define hl_track_call(a,b)
 
 #endif
+
+#include "gc_write.h"
 
 C_FUNCTION_END
 

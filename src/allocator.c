@@ -154,9 +154,10 @@ static gc_pheader *gc_allocator_new_page( int pid, int block, int size, int kind
 
 	p->block_size = block;
 	p->size_bits = 0;
-	while( block < (1<<p->size_bits) )
+	// Power-of-two blocks use shifts for exact pointer lookup.
+	while( (unsigned)block > (1U << p->size_bits) )
 		p->size_bits++;
-	if( block != (1<<p->size_bits) )
+	if( (unsigned)block != (1U << p->size_bits) )
 		p->size_bits = 0;
 	p->max_blocks = max_blocks;
 	p->sizes = NULL;
@@ -451,7 +452,13 @@ static bool gc_page_is_empty( gc_pheader *ph ) {
 	return ph->bmp && is_zero(ph->bmp+(p->first_block>>3),((p->max_blocks+7)>>3) - (p->first_block>>3));
 }
 
-static void gc_flush_empty_pages() {
+// A cursor points to a live list link, not a remembered head: allocations can
+// prepend new pages between slices. Major collection cancels the cursor first.
+static int gc_empty_pid;
+static gc_pheader **gc_empty_link;
+static int64 gc_empty_budget, gc_empty_retained;
+static void gc_empty_sweep_cancel(void) { gc_empty_link = NULL; gc_empty_pid = GC_ALL_PAGES; }
+static void gc_empty_sweep_begin(void) {
 	static int keep = -1;
 	static int64 cap;
 	if( keep < 0 ) {
@@ -484,35 +491,39 @@ static void gc_flush_empty_pages() {
 		for(int index = 0; index < 4; index++) if( recent[index] > budget ) budget = recent[index];
 		if( budget > cap ) budget = cap;
 	}
-	int64 retained = 0;
-	int i;
-	for(i=0;i<GC_ALL_PAGES;i++) {
-		gc_pheader *ph = gc_pages[i];
-		gc_pheader *prev = NULL;
-		while( ph ) {
-			gc_allocator_page_data *p = &ph->alloc;
-			gc_pheader *next = ph->next_page;
-			if( gc_page_is_empty(ph) ) {
-				// Large allocations always create dedicated pages and cannot reuse this cache.
-				if( (i >> PAGE_KIND_BITS) != GC_LARGE_PART && ph->page_size <= budget - retained ) {
-					retained += ph->page_size;
-					prev = ph;
-					ph = next;
-					continue;
-				}
-				if( prev )
-					prev->next_page = next;
-				else
-					gc_pages[i] = next;
-				if( gc_free_pages[i] == ph )
-					gc_free_pages[i] = next;
+	gc_empty_budget = budget;
+	gc_empty_retained = 0;
+	gc_empty_pid = 0;
+	gc_empty_link = NULL;
+}
+static bool gc_empty_sweep_slice(double deadline, bool deferred) {
+	while( gc_empty_link || gc_empty_pid < GC_ALL_PAGES ) {
+		if( deferred && hl_sys_time() >= deadline ) return false;
+		if( !gc_empty_link ) gc_empty_link = &gc_pages[gc_empty_pid++];
+		gc_pheader *ph = *gc_empty_link;
+		if( !ph ) { gc_empty_link = NULL; continue; }
+		gc_allocator_page_data *p = &ph->alloc;
+		// Allocation flushes the old marks and makes need_flush false before
+		// reusing slots. Such a page can contain fresh, unmarked live objects.
+		if( (!deferred || p->need_flush) && gc_page_is_empty(ph) ) {
+			if( ((gc_empty_pid-1) >> PAGE_KIND_BITS) != GC_LARGE_PART && ph->page_size <= gc_empty_budget-gc_empty_retained ) {
+				gc_empty_retained += ph->page_size;
+			} else {
+				gc_pheader *next = ph->next_page;
+				*gc_empty_link = next;
+				if( gc_free_pages[gc_empty_pid-1] == ph ) gc_free_pages[gc_empty_pid-1] = next;
 				free_freelist(&p->free);
-				gc_free_page(ph, p->max_blocks);
-			} else
-				prev = ph;
-			ph = next;
+				gc_free_page(ph,p->max_blocks);
+				continue;
+			}
 		}
+		gc_empty_link = &ph->next_page;
 	}
+	return true;
+}
+static void gc_flush_empty_pages(void) {
+	gc_empty_sweep_begin();
+	gc_empty_sweep_slice(0,false);
 }
 
 static int64 gc_allocator_private_memory() {
@@ -662,7 +673,9 @@ static int gc_allocator_get_block_interior( gc_pheader *page, void **block ) {
 #endif
 
 static void gc_allocator_after_mark() {
+	double finalizer_started = gc_latency_trace ? hl_sys_time() : 0;
 	gc_call_finalizers();
+	if( gc_latency_trace ) gc_latency_finalizers = hl_sys_time() - finalizer_started;
 #	ifdef GC_DEBUG
 	gc_clear_unmarked_mem();
 #	endif

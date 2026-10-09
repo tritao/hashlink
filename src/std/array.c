@@ -43,7 +43,7 @@ HL_PRIM varray *hl_alloc_array( hl_type *at, int size ) {
 	a->at = at;
 	a->size = size;
 	a->capacity = capacity;
-	a->data = hl_array_alloc_storage(at, capacity);
+	hl_gc_store_ref(&a->data,hl_array_alloc_storage(at, capacity),&hlt_bytes);
 	return a;
 }
 
@@ -61,8 +61,8 @@ HL_PRIM void hl_array_reserve( varray *a, int capacity ) {
 	vbyte *data = hl_array_alloc_storage(a->at, next);
 	int stride = hl_type_size(a->at);
 	if( a->size > 0 )
-		memcpy(data + HL_WSIZE, a->data + HL_WSIZE, (size_t)a->size * stride);
-	a->data = data;
+		hl_gc_copy_values(data + HL_WSIZE, a->data + HL_WSIZE, (size_t)a->size * stride,a->at);
+	hl_gc_store_ref(&a->data,data,&hlt_bytes);
 	a->capacity = next;
 }
 
@@ -86,7 +86,7 @@ HL_PRIM void hl_array_ensure( varray *a, int index ) {
 
 HL_PRIM void hl_array_blit( varray *dst, int dpos, varray *src, int spos, int len ) {
 	int size = hl_type_size(dst->at);
-	memmove( hl_aptr(dst,vbyte) + dpos * size, hl_aptr(src,vbyte) + spos * size, len * size);
+	hl_gc_move_values( hl_aptr(dst,vbyte) + dpos * size, hl_aptr(src,vbyte) + spos * size, len * size,dst->at);
 }
 
 HL_PRIM hl_type *hl_array_type( varray *a ) {
@@ -122,7 +122,7 @@ HL_PRIM void *hl_alloc_carray( hl_type *at, int size ) {
 				((vobj*)o)->t = at;
 			for(i=0;i<rt->nbindings;i++) {
 				hl_runtime_binding *b = rt->bindings + i;
-				*(void**)(o + rt->fields_indexes[b->fid]) = b->closure ? hl_alloc_closure_ptr(b->closure,b->ptr,o) : b->ptr;
+				hl_gc_store_ref(o + rt->fields_indexes[b->fid],b->closure ? hl_alloc_closure_ptr(b->closure,b->ptr,o) : b->ptr,hl_obj_field_fetch(at,b->fid)->t);
 			}
 		}
 	}
@@ -137,7 +137,7 @@ HL_PRIM void hl_carray_blit( void *dst, hl_type *at, int dpos, void *src, int sp
 	hl_runtime_obj *rt = at->obj->rt;
 	if( rt == NULL || rt->methods == NULL ) rt = hl_get_obj_proto(at);
 	int size = rt->size;
-	memmove( (vbyte*)dst + dpos * size, (vbyte*)src + spos * size, len * size);
+	hl_gc_move_packed( (vbyte*)dst + dpos * size, (vbyte*)src + spos * size, len * size,at);
 }
 
 #define _CARRAY _ABSTRACT(hl_carray)
