@@ -421,7 +421,14 @@ HL_PRIM bool hl_sys_delete( vbyte *path ) {
 }
 
 HL_PRIM bool hl_sys_rename( vbyte *path, vbyte *newname ) {
+#if defined(HL_WIN)
+	// The MSVC _wrename implementation refuses to replace an existing file.
+	// Haxe's SettingsStore writes to a temporary file and renames it over the
+	// current settings file, so use the Win32 replacement semantics here.
+	return MoveFileExW((LPCWSTR)path, (LPCWSTR)newname, MOVEFILE_REPLACE_EXISTING) != 0;
+#else
 	return rename((pchar*)path,(pchar*)newname) == 0;
+#endif
 }
 
 HL_PRIM varray *hl_sys_stat( vbyte *path ) {
