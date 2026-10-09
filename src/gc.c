@@ -310,6 +310,8 @@ static void ***gc_roots = NULL;
 static void **gc_root_owners = NULL;
 static int gc_roots_count = 0;
 static int gc_roots_max = 0;
+// Root addresses are indexed so temporary FFI roots do not require a linear scan on release.
+static int *gc_root_buckets = NULL, *gc_root_next = NULL, *gc_root_previous = NULL;
 
 HL_API hl_thread_info *hl_get_thread() {
 	return current_thread;
@@ -372,23 +374,54 @@ HL_PRIM void hl_global_lock( bool lock ) {
 		hl_mutex_release(gc_threads.exclusive_lock);
 }
 
+static unsigned int gc_root_bucket( void *r ) {
+	size_t value = (size_t)r;
+	value ^= value >> 16;
+	value *= 2654435761u;
+	value ^= value >> 16;
+	return (unsigned int)value & (gc_roots_max * 2 - 1);
+}
+
+static void gc_root_link( int index ) {
+	unsigned int bucket = gc_root_bucket(gc_roots[index]);
+	int head = gc_root_buckets[bucket];
+	gc_root_previous[index] = -1;
+	gc_root_next[index] = head;
+	if( head >= 0 ) gc_root_previous[head] = index;
+	gc_root_buckets[bucket] = index;
+}
+
+static void gc_root_unlink( int index ) {
+	int previous = gc_root_previous[index], next = gc_root_next[index];
+	if( previous >= 0 ) gc_root_next[previous] = next;
+	else gc_root_buckets[gc_root_bucket(gc_roots[index])] = next;
+	if( next >= 0 ) gc_root_previous[next] = previous;
+}
+
 HL_API void hl_add_root_owner( void *r, void *owner ) {
 	gc_global_lock(true);
 	if( gc_roots_count == gc_roots_max ) {
 		int nroots = gc_roots_max ? (gc_roots_max << 1) : 16;
 		void ***roots = (void***)malloc(sizeof(void*)*nroots);
 		void **owners = (void**)malloc(sizeof(void*)*nroots);
-		if( roots == NULL || owners == NULL ) out_of_memory("roots");
+		int *buckets = (int*)malloc(sizeof(int)*nroots*2);
+		int *next = (int*)malloc(sizeof(int)*nroots);
+		int *previous = (int*)malloc(sizeof(int)*nroots);
+		if( roots == NULL || owners == NULL || buckets == NULL || next == NULL || previous == NULL )
+			out_of_memory("roots");
 		memcpy(roots,gc_roots,sizeof(void*)*gc_roots_count);
 		memcpy(owners,gc_root_owners,sizeof(void*)*gc_roots_count);
-		free(gc_roots);
-		free(gc_root_owners);
-		gc_roots = roots;
-		gc_root_owners = owners;
+		free(gc_roots); free(gc_root_owners);
+		free(gc_root_buckets); free(gc_root_next); free(gc_root_previous);
+		gc_roots = roots; gc_root_owners = owners;
+		gc_root_buckets = buckets; gc_root_next = next; gc_root_previous = previous;
 		gc_roots_max = nroots;
+		for(int i=0;i<nroots*2;i++) buckets[i] = -1;
+		for(int i=0;i<gc_roots_count;i++) gc_root_link(i);
 	}
 	gc_roots[gc_roots_count] = (void**)r;
-	gc_root_owners[gc_roots_count++] = owner;
+	gc_root_owners[gc_roots_count] = owner;
+	gc_root_link(gc_roots_count++);
 	gc_global_lock(false);
 }
 
@@ -397,15 +430,27 @@ HL_PRIM void hl_add_root( void *r ) {
 }
 
 HL_PRIM void hl_remove_root( void *v ) {
-	int i;
+	int found = -1;
 	gc_global_lock(true);
-	for(i=gc_roots_count-1;i>=0;i--)
-		if( gc_roots[i] == (void**)v ) {
-			gc_roots_count--;
-			gc_roots[i] = gc_roots[gc_roots_count];
-			gc_root_owners[i] = gc_root_owners[gc_roots_count];
-			break;
+	if( gc_roots_count > 0 ) {
+		for(int i=gc_root_buckets[gc_root_bucket(v)];i>=0;i=gc_root_next[i])
+			// Preserve the old reverse-array lookup for duplicate registrations.
+			if( gc_roots[i] == (void**)v && i > found ) found = i;
+	}
+	if( found >= 0 ) {
+		gc_root_unlink(found);
+		int last = --gc_roots_count;
+		if( found != last ) {
+			gc_roots[found] = gc_roots[last];
+			gc_root_owners[found] = gc_root_owners[last];
+			int previous = gc_root_previous[last], next = gc_root_next[last];
+			gc_root_previous[found] = previous;
+			gc_root_next[found] = next;
+			if( previous >= 0 ) gc_root_next[previous] = found;
+			else gc_root_buckets[gc_root_bucket(gc_roots[found])] = found;
+			if( next >= 0 ) gc_root_previous[next] = found;
 		}
+	}
 	gc_global_lock(false);
 }
 
