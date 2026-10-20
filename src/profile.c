@@ -722,6 +722,11 @@ static void read_thread_data( thread_handle *t ) {
 	}
 }
 
+/* True while samples and events are being recorded, so callers can skip building event payloads otherwise. */
+static bool hl_profile_recording( void ) {
+	return data.sample_count > 0 && data.profiling_pause == 0;
+}
+
 static void profile_pause() {
 	hl_condition_acquire(data.waitCond);
 	data.profiling_pause++;
@@ -901,6 +906,7 @@ void hl_profile_setup( int sample_count ) {
 		hl_add_root(&data.waitCond);
 	}
 	hl_setup.profile_event = profile_event;
+	hl_setup.profile_recording = hl_profile_recording;
 	if( !profile_main_tid && hl_get_thread() ) profile_main_tid = hl_get_thread()->thread_id;
 	hl_setup.before_exit = hl_profile_end;
 	hl_setup.stop_profiler = hl_profile_end;

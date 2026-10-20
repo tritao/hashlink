@@ -648,6 +648,8 @@ typedef struct {
 	bool is_debugger_attached;
 	void (*thread_registered)();
 	void (*thread_unregistered)();
+	/* True while a profiler records events, so callers can skip building event payloads otherwise. */
+	bool (*profile_recording)();
 } hl_setup_t;
 
 HL_API hl_setup_t hl_setup;

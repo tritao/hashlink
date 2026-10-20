@@ -177,8 +177,14 @@ HL_PRIM void hl_sys_profile_event( int code, vbyte *data, int dataLen ) {
 	if( hl_setup.profile_event ) hl_setup.profile_event(code, data, dataLen);
 }
 
+HL_PRIM bool hl_sys_profile_recording( void ) {
+	// An embedder that installs profile_event without profile_recording keeps receiving every event.
+	if( hl_setup.profile_recording == NULL ) return hl_setup.profile_event != NULL;
+	return hl_setup.profile_recording();
+}
+
 HL_PRIM void hl_sys_profile_span( int code, uchar *name ) {
-	if( hl_setup.profile_event && name ) {
+	if( hl_setup.profile_event && name && hl_sys_profile_recording() ) {
 		char *utf8 = hl_to_utf8(name);
 		hl_setup.profile_event(code, (vbyte*)utf8, (int)strlen(utf8));
 	}
