@@ -1088,6 +1088,7 @@ static void hl_module_add( hl_module *m ) {
 	modules_count++;
 	free(old_modules);
 	hl_mutex_release(modules_lock);
+	hl_profile_stream_notify_module(m->diagnostics_id);
 }
 
 int hl_module_init( hl_module *m, int flags ) {

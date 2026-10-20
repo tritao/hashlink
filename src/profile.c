@@ -1027,6 +1027,13 @@ bool hl_profile_stream_configure_allocations( int interval ) {
 	return true;
 }
 
+void hl_profile_stream_notify_module( unsigned long long module_id ) {
+	unsigned char payload[8];
+	if( stream.lock == NULL ) return;
+	stream_write_u64(payload,module_id);
+	stream_record(PROFILE_STREAM_EVENT,0,hl_sys_time(),hl_get_thread() ? hl_get_thread()->thread_id : 0,PROFILE_EVENT_MODULE_LOADED,payload,sizeof(payload));
+}
+
 void hl_profile_stream_notify_revision( unsigned long long module_id, int revision ) {
 	unsigned char payload[12];
 	if( revision <= 0 || stream.lock == NULL ) return;
