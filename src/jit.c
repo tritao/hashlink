@@ -251,9 +251,19 @@ static void *jit_support_code = NULL;
 static int jit_support_code_size = 0;
 static int arg_reg_count = 0;
 static int arg_fp_count = 0;
+#ifdef WIN64_UNWIND_TABLES
+static PRUNTIME_FUNCTION jit_support_unwind = NULL;
+#endif
 
 static void hl_jit_free_support() {
 	if( jit_support_code == NULL ) return;
+#	ifdef WIN64_UNWIND_TABLES
+	if( jit_support_unwind ) {
+		RtlDeleteFunctionTable(jit_support_unwind);
+		free(jit_support_unwind);
+		jit_support_unwind = NULL;
+	}
+#	endif
 	hl_free_executable_memory(jit_support_code,jit_support_code_size);
 	jit_support_code = NULL;
 	jit_support_code_size = 0;
@@ -419,6 +429,19 @@ static void *hl_jit_code_finalize( jit_ctx *ctx, hl_module *m, int *codesize, hl
 			hl_jit_write_begin();
 			memcpy(jit_support_code,ctx->final_code,ctx->special_code_size);
 			hl_jit_write_end(jit_support_code,jit_support_code_size);
+#			ifdef WIN64_UNWIND_TABLES
+			// The copied stubs keep their offsets, and the shared unwind info at offset 0 comes with them.
+			int stubs = 0;
+			while( stubs < ctx->fdef_index && (int)ctx->mod->unwind_table[stubs].EndAddress <= ctx->special_code_size ) stubs++;
+			jit_support_unwind = (PRUNTIME_FUNCTION)malloc(sizeof(RUNTIME_FUNCTION) * (stubs ? stubs : 1));
+			if( jit_support_unwind ) {
+				memcpy(jit_support_unwind,ctx->mod->unwind_table,sizeof(RUNTIME_FUNCTION) * stubs);
+				if( !stubs || !RtlAddFunctionTable(jit_support_unwind,stubs,(DWORD64)jit_support_code) ) {
+					free(jit_support_unwind);
+					jit_support_unwind = NULL;
+				}
+			}
+#			endif
 			arg_reg_count = ctx->cfg.regs.nargs;
 			arg_fp_count = ctx->cfg.floats.nargs;
 			call_jit_c2hl = (unsigned char*)jit_support_code + ctx->code_funs.c2hl;

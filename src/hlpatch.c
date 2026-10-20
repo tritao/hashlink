@@ -19,6 +19,11 @@ struct _hl_patch_code {
 	int source_snapshot_count;
 	hl_source_snapshot *source_snapshots;
 	void *gdb_jit_entry;
+#ifdef WIN64_UNWIND_TABLES
+	/* The patch code's own function table, registered at its base address so Windows can unwind through it. */
+	PRUNTIME_FUNCTION unwind_table;
+	bool unwind_registered;
+#endif
 	hl_patch_code *next_retired;
 };
 
@@ -67,6 +72,10 @@ static void patch_code_free( hl_patch_code *code ) {
 	free(code->debug_spans);
 	for(int i=0;i<code->source_snapshot_count;i++) free(code->source_snapshots[i].content);
 	free(code->source_snapshots);
+#ifdef WIN64_UNWIND_TABLES
+	if(code->unwind_registered) RtlDeleteFunctionTable(code->unwind_table);
+	free(code->unwind_table);
+#endif
 	if(code->code) hl_free_executable_memory(code->code,code->code_size);
 	free(code->functions);
 	free(code);
@@ -805,9 +814,17 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	}
 	memset(&code,0,sizeof(code));code.nints=patch->base_int_count+patch->int_count;code.ints=combined_ints;code.nfloats=patch->base_float_count+patch->float_count;code.floats=combined_floats;code.nstrings=patch->base_string_count+patch->string_count;code.strings=combined_strings;code.strings_lens=combined_string_lens;code.ustrings=combined_ustrings;code.ntypes=patch->base_type_count+patch->type_count;code.types_capacity=m->code->types_capacity;code.types=m->code->types;code.nfunctions=layout.count;code.functions_capacity=m->code->functions_capacity;code.nnatives=m->code->nnatives;code.natives=m->code->natives;code.functions=combined_functions;code.function_names=m->code->function_names;code.function_names_lens=m->code->function_names_lens;code.hasdebug=m->code->hasdebug;code.ndebugfiles=m->code->ndebugfiles;code.debugfiles=m->code->debugfiles;code.debugfiles_lens=m->code->debugfiles_lens;code.alloc=m->code->alloc;
 	temp=*m;temp.code=&code;temp.functions_indexes=layout.indexes;temp.jit_code=NULL;temp.jit_debug=NULL;temp.jit_ctx=NULL;temp.staging_patch=true;
+#ifdef WIN64_UNWIND_TABLES
+	// The JIT records each function it emits in the module's unwind table; the live module's table is registered for its own code.
+	temp.unwind_table_size=patch->function_count+10;temp.unwind_table=allocation->unwind_table=(PRUNTIME_FUNCTION)calloc(temp.unwind_table_size,sizeof(RUNTIME_FUNCTION));if(!temp.unwind_table){error="Out of memory applying patch unwind table";goto fail;}
+#endif
 	jit=hl_jit_alloc();if(!jit){error="Could not allocate patch JIT";goto fail;}hl_jit_init(jit,&temp);
 	for(int i=0;i<patch->function_count;i++){int function_index=layout.indexes[allocation->functions[i].findex];offsets[i]=hl_jit_function(jit,&temp,combined_functions+function_index);if(offsets[i]<0){error="Could not JIT patch function";goto fail;}}
 	allocation->code=hl_jit_patch_code(jit,&temp,&allocation->code_size,&temp.jit_debug);allocation->jit_debug=temp.jit_debug;allocation->jit_debug_count=code.nfunctions;temp.jit_debug=NULL;if(!allocation->code){error="Could not finalize patch JIT";goto fail;}hl_jit_free(jit,false);jit=NULL;
+#ifdef WIN64_UNWIND_TABLES
+	if(!RtlAddFunctionTable(allocation->unwind_table,temp.unwind_table_size,(DWORD64)allocation->code)){error="Could not register patch unwind table";goto fail;}
+	allocation->unwind_registered=true;
+#endif
 	if(inject_patch_failure(m,3,&error))goto fail;
 	temp.jit_code=allocation->code;temp.codesize=allocation->code_size;temp.jit_debug=allocation->jit_debug;temp.gdb_jit_entry=NULL;hl_gdb_jit_register_patch(&temp);allocation->gdb_jit_entry=temp.gdb_jit_entry;free(combined_functions);combined_functions=NULL;
 	if(type_allocation_count){int needed=m->patch_type_allocation_count+type_allocation_count;if(needed>m->patch_type_allocation_capacity){int capacity=needed<16?16:needed*2;void **owners=(void**)realloc(m->patch_type_allocations,sizeof(void*)*capacity);if(!owners){error="Out of memory publishing patch types";goto fail;}m->patch_type_allocations=owners;m->patch_type_allocation_capacity=capacity;}}
