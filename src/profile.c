@@ -146,6 +146,8 @@ enum { PROFILE_STREAM_SAMPLE = 1, PROFILE_STREAM_EVENT = 2 };
 static volatile int profile_allocation_interval = 0;
 
 static unsigned long long native_seen[4096];
+/* The sampler and allocating threads both name native frames; DbgHelp is not thread-safe and native_seen is shared. */
+static hl_mutex *native_lock;
 static void stream_write_u32( unsigned char *p, unsigned int value );
 static void stream_write_u64( unsigned char *p, unsigned long long value );
 static void stream_record( int kind, int flags, double time, int tid, int value, const void *payload, unsigned int payload_size );
@@ -187,7 +189,57 @@ static void stream_native_symbol_record( unsigned long long pc, unsigned long lo
 	free(payload);
 }
 
+static void stream_native_location_record( unsigned long long pc, unsigned long long module_base, unsigned long long module_size, unsigned int line, const char *file, double time, int tid ) {
+	unsigned int file_len = file ? (unsigned int)strlen(file) : 0;
+	unsigned int size = 32 + file_len;
+	unsigned char *payload = malloc(size);
+	if( payload == NULL ) return;
+	stream_write_u64(payload,pc); stream_write_u64(payload + 8,module_base); stream_write_u64(payload + 16,module_size);
+	stream_write_u32(payload + 24,line); stream_write_u32(payload + 28,file_len);
+	if( file_len ) memcpy(payload + 32,file,file_len);
+	stream_record(PROFILE_STREAM_EVENT,0,time,tid,PROFILE_EVENT_NATIVE_LOCATION,payload,size);
+	free(payload);
+}
+
+#ifdef HL_WIN
+/* The start of the function holding pc, from its unwind data; 0 when pc has none (a leaf function, or 32-bit). */
+static unsigned long long function_start( unsigned long long pc ) {
+#	ifdef HL_64
+	DWORD64 image_base;
+	PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry((DWORD64)pc,&image_base,NULL);
+	return fn ? (unsigned long long)(image_base + fn->BeginAddress) : 0;
+#	else
+	(void)pc;
+	return 0;
+#	endif
+}
+#endif
+
+static void stream_native_symbol_locked( void *address, double time, int tid );
+
+/* Callers must not have another thread suspended: a suspended thread may hold native_lock. */
 static void stream_native_symbol( void *address, double time, int tid ) {
+	if( native_lock == NULL ) return;
+	hl_mutex_acquire(native_lock);
+	stream_native_symbol_locked(address,time,tid);
+	hl_mutex_release(native_lock);
+}
+
+static void stream_native_symbol_locked( void *address, double time, int tid ) {
+	{
+		void *start, *base;
+		int size;
+		const char *stub = hl_jit_support_symbol(address,&start,&base,&size);
+		if( stub ) {
+			unsigned long long pc = (unsigned long long)(uintptr_t)address;
+			unsigned int slot = (unsigned int)((pc >> 4) & 4095);
+			if( native_seen[slot] == pc ) return;
+			native_seen[slot] = pc;
+			stream_native_symbol_record(pc,(unsigned long long)(uintptr_t)start,"[hashlink-jit-support]",stub,time,tid);
+			stream_native_location_record(pc,(unsigned long long)(uintptr_t)base,(unsigned long long)size,0,NULL,time,tid);
+			return;
+		}
+	}
 #if defined(HL_LINUX) || defined(HL_MAC)
 	unsigned long long pc = (unsigned long long)(uintptr_t)address;
 	unsigned int slot = (unsigned int)((pc >> 4) & 4095);
@@ -195,9 +247,11 @@ static void stream_native_symbol( void *address, double time, int tid ) {
 	if( native_seen[slot] == pc || !dladdr(address,&info) || info.dli_sname == NULL ) return;
 	native_seen[slot] = pc;
 	stream_native_symbol_record(pc,(unsigned long long)(uintptr_t)info.dli_saddr,info.dli_fname ? info.dli_fname : "[native]",info.dli_sname,time,tid);
+	stream_native_location_record(pc,(unsigned long long)(uintptr_t)info.dli_fbase,0,0,NULL,time,tid);
 #elif defined(HL_WIN)
 	static HANDLE process;
 	static bool initialized;
+	static double modules_refreshed;
 	unsigned long long pc = (unsigned long long)(uintptr_t)address;
 	unsigned int slot = (unsigned int)((pc >> 4) & 4095);
 	DWORD64 displacement = 0;
@@ -211,13 +265,65 @@ static void stream_native_symbol( void *address, double time, int tid ) {
 		initialized = true;
 	}
 	memset(&module_info,0,sizeof(module_info)); module_info.SizeOfStruct = sizeof(module_info);
-	if( !SymGetModuleInfo64(process,(DWORD64)pc,&module_info) ) return;
+	if( !SymGetModuleInfo64(process,(DWORD64)pc,&module_info) ) {
+		// JIT code is described by the module metadata instead.
+		if( hl_module_is_jit_code(address) ) { native_seen[slot] = pc; return; }
+		// A library loaded after the last refresh is unknown to DbgHelp until the module list is refreshed; until then the
+		// pc is looked up again on later samples rather than cached as unresolvable.
+		bool refreshed = time - modules_refreshed >= 0.1;
+		if( refreshed ) modules_refreshed = time;
+		if( !refreshed || !SymRefreshModuleList(process) || !SymGetModuleInfo64(process,(DWORD64)pc,&module_info) ) {
+			// DbgHelp does not list every image the loader maps (some driver libraries); name those by module and offset.
+			HMODULE image;
+			char path[MAX_PATH], name[MAX_PATH + 32];
+			const char *file;
+			if( !GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)address,&image)
+				|| !GetModuleFileNameA(image,path,sizeof(path)) ) {
+				// Not an image at all: code generated at run time by another library. It cannot become known later.
+				native_seen[slot] = pc;
+				return;
+			}
+			const IMAGE_NT_HEADERS *headers = (const IMAGE_NT_HEADERS*)((const unsigned char*)image + ((const IMAGE_DOS_HEADER*)image)->e_lfanew);
+			unsigned long long start = function_start(pc);
+			if( start == 0 ) start = pc;
+			file = strrchr(path,'\\');
+			file = file ? file + 1 : path;
+			snprintf(name,sizeof(name),"%s+0x%llx",file,start - (unsigned long long)(uintptr_t)image);
+			stream_native_symbol_record(pc,start,path,name,time,tid);
+			stream_native_location_record(pc,(unsigned long long)(uintptr_t)image,(unsigned long long)headers->OptionalHeader.SizeOfImage,0,NULL,time,tid);
+			native_seen[slot] = pc;
+			return;
+		}
+	}
 	memset(&symbol_info,0,sizeof(symbol_info)); symbol_info.info.SizeOfStruct = sizeof(SYMBOL_INFO); symbol_info.info.MaxNameLen = MAX_SYM_NAME;
-	if( SymFromAddr(process,(DWORD64)pc,&displacement,&symbol_info.info) )
-		stream_native_symbol_record(pc,(unsigned long long)symbol_info.info.Address,module_info.ImageName && *module_info.ImageName ? module_info.ImageName : module_info.ModuleName,symbol_info.info.Name,time,tid);
-	else {
+	{
 		const char *module = module_info.ImageName && *module_info.ImageName ? module_info.ImageName : module_info.ModuleName;
-		stream_native_symbol_record(pc,(unsigned long long)module_info.BaseOfImage,module,module_info.ModuleName,time,tid);
+		bool named = SymFromAddr(process,(DWORD64)pc,&displacement,&symbol_info.info) != FALSE;
+		bool exact = named && !(symbol_info.info.Flags & SYMFLAG_EXPORT);
+		// Without debug information DbgHelp names the nearest export. That is this function only when the export starts
+		// the unwind range holding pc; otherwise the frame is named by that range's start, as an offset from the export, so
+		// every sample in one function shares a name.
+		unsigned long long start = function_start(pc);
+		if( named && !exact )
+			exact = start != 0 && start == (unsigned long long)symbol_info.info.Address;
+		if( exact )
+			stream_native_symbol_record(pc,(unsigned long long)symbol_info.info.Address,module,symbol_info.info.Name,time,tid);
+		else {
+			char name[MAX_SYM_NAME + MAX_PATH + 32];
+			if( start == 0 ) start = pc;
+			if( named && start >= (unsigned long long)symbol_info.info.Address )
+				snprintf(name,sizeof(name),"%s!%s+0x%llx",module_info.ModuleName,symbol_info.info.Name,start - (unsigned long long)symbol_info.info.Address);
+			else
+				snprintf(name,sizeof(name),"%s+0x%llx",module_info.ModuleName,start - (unsigned long long)module_info.BaseOfImage);
+			stream_native_symbol_record(pc,start,module,name,time,tid);
+		}
+	}
+	{
+		IMAGEHLP_LINE64 line;
+		DWORD line_displacement = 0;
+		memset(&line,0,sizeof(line)); line.SizeOfStruct = sizeof(line);
+		bool has_line = SymGetLineFromAddr64(process,(DWORD64)pc,&line_displacement,&line) && line.FileName;
+		stream_native_location_record(pc,(unsigned long long)module_info.BaseOfImage,(unsigned long long)module_info.ImageSize,has_line ? (unsigned int)line.LineNumber : 0,has_line ? line.FileName : NULL,time,tid);
 	}
 	native_seen[slot] = pc;
 #else
@@ -786,6 +892,8 @@ void hl_profile_setup( int sample_count ) {
 	if( stream.lock == NULL ) {
 		stream.lock = hl_mutex_alloc(false);
 		hl_add_root(&stream.lock);
+		native_lock = hl_mutex_alloc(false);
+		hl_add_root(&native_lock);
 	}
 	if( data.waitCond == NULL ) {
 		data.waitCond = hl_condition_alloc();

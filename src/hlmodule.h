@@ -334,6 +334,8 @@ typedef unsigned char h_bool;
 
 extern int hl_jit_trampoline;
 void hl_jit_tag_callback( void *native );
+/* Names the shared JIT support stub containing addr, for profilers; NULL when addr is not in one. */
+const char *hl_jit_support_symbol( void *addr, void **start, void **base, int *size );
 
 HL_EXTERN_C HL_EXPORT hl_module *hl_module_alloc( hl_code *code );
 HL_EXTERN_C HL_EXPORT int hl_module_init( hl_module *m, int flags );

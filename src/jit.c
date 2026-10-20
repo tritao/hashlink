@@ -251,9 +251,33 @@ static void *jit_support_code = NULL;
 static int jit_support_code_size = 0;
 static int arg_reg_count = 0;
 static int arg_fp_count = 0;
+static jit_special_funs jit_support_funs;
 #ifdef WIN64_UNWIND_TABLES
 static PRUNTIME_FUNCTION jit_support_unwind = NULL;
 #endif
+
+/* Names the shared JIT stub containing addr, for profilers; NULL when addr is not in the stubs. */
+const char *hl_jit_support_symbol( void *addr, void **start, void **base, int *size ) {
+	unsigned char *code = (unsigned char*)jit_support_code, *pc = (unsigned char*)addr;
+	struct { int offset; const char *name; } stubs[] = {
+		{ 0, "hl_jit_null_check" },
+		{ jit_support_funs.c2hl, "hl_jit_c2hl" },
+		{ jit_support_funs.hl2c, "hl_jit_hl2c" },
+#ifdef JIT_CUSTOM_LONGJUMP
+		{ jit_support_funs.longjump, "hl_jit_longjump" },
+#endif
+		{ jit_support_funs.trampoline, "hl_jit_trampoline" },
+	};
+	int found = -1, offset;
+	if( code == NULL || pc < code || pc >= code + jit_support_code_size ) return NULL;
+	offset = (int)(pc - code);
+	for(int i=0;i<(int)(sizeof(stubs)/sizeof(stubs[0]));i++)
+		if( (i == 0 || stubs[i].offset > 0) && stubs[i].offset <= offset && (found < 0 || stubs[i].offset >= stubs[found].offset) ) found = i;
+	*start = code + stubs[found].offset;
+	*base = code;
+	*size = jit_support_code_size;
+	return stubs[found].name;
+}
 
 static void hl_jit_free_support() {
 	if( jit_support_code == NULL ) return;
@@ -428,6 +452,7 @@ static void *hl_jit_code_finalize( jit_ctx *ctx, hl_module *m, int *codesize, hl
 			if( jit_support_code == NULL ) return NULL;
 			hl_jit_write_begin();
 			memcpy(jit_support_code,ctx->final_code,ctx->special_code_size);
+			jit_support_funs = ctx->code_funs;
 			hl_jit_write_end(jit_support_code,jit_support_code_size);
 #			ifdef WIN64_UNWIND_TABLES
 			// The copied stubs keep their offsets, and the shared unwind info at offset 0 comes with them.

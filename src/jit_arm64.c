@@ -2878,3 +2878,8 @@ void hl_jit_patch_method( void *old_fun, void **new_fun_table ) {
 	memcpy(code + sizeof(ins), &new_fun_table, sizeof(new_fun_table));
 	hl_jit_write_end(code, 20);
 }
+
+/* This backend does not name its support stubs, so profiler samples in them stay attributed to the JIT code region. */
+const char *hl_jit_support_symbol( void *addr, void **start, void **base, int *size ) {
+	return NULL;
+}
