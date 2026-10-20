@@ -249,6 +249,7 @@ typedef struct {
 
 typedef struct _jit_ctx jit_ctx;
 typedef struct _hl_patch_code hl_patch_code;
+typedef struct _hl_patch_live hl_patch_live;
 
 typedef struct {
 	hl_code *code;
@@ -303,6 +304,8 @@ typedef struct {
 	/* Bounds of every patch code region ever installed (retired ones included), so an address outside them is not patch code. */
 	void *patch_lo;
 	void *patch_hi;
+	/* The distinct allocations patch_owners refers to, ordered by code address; replaced when a patch commits. */
+	hl_patch_live *patch_live;
 } hl_module;
 
 HL_EXTERN_C HL_EXPORT hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg );
@@ -365,6 +368,8 @@ bool hl_module_patch_debug_source_span_get( hl_module *module, int region, int f
 int hl_module_patch_debug_source_snapshot_count( hl_module *module, int region );
 bool hl_module_patch_debug_source_snapshot_get( hl_module *module, int region, int snapshot, hl_source_snapshot *out );
 void hl_module_patch_release_all( hl_module *module );
+/* Registers (+1) or unregisters (-1) a thread that reads patch code concurrently with commits; see hlpatch.c. */
+void hl_module_patch_readers( int delta );
 /** Force teardown during initialization failure or process shutdown only. */
 HL_EXTERN_C HL_EXPORT void hl_module_free_shutdown( hl_module *m );
 /** Retire an initialized module only when tracked borrowers have cleared. */

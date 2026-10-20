@@ -882,6 +882,7 @@ static void hl_profile_loop( void *_ ) {
 	free(data.tmpMemory);
 	data.tmpMemory = NULL;
 	data.sample_count = 0;
+	hl_module_patch_readers(-1);
 	data.stopLoop = false;
 }
 
@@ -929,6 +930,8 @@ void hl_profile_setup( int sample_count ) {
 	action.sa_flags = SA_SIGINFO | SA_RESTART;
 	sigaction(SIGPROF, &action, NULL);
 #	endif
+	// The sampler resolves the code it samples while the program may be patching it.
+	hl_module_patch_readers(1);
 	hl_thread_start(hl_profile_loop,NULL,false);
 #	endif
 }

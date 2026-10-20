@@ -180,7 +180,10 @@ static void append_region( diag_buffer *buffer, hl_code *code, unsigned long lon
 static bool send_metadata( hl_socket *socket, unsigned int request_id ) {
 	diag_buffer buffer = {0};
 	int count;
-	hl_module **modules = hl_module_registry_snapshot(&count);
+	hl_module **modules;
+	// Patch regions are read while the program may be patching them.
+	hl_module_patch_readers(1);
+	modules = hl_module_registry_snapshot(&count);
 	/* Schema 4 adds each JIT region's introduction revision. */
 	buffer_u32(&buffer,4);
 	buffer_u32(&buffer,(unsigned int)count);
@@ -227,6 +230,7 @@ static bool send_metadata( hl_socket *socket, unsigned int request_id ) {
 		}
 	}
 	hl_module_registry_snapshot_free(modules,count);
+	hl_module_patch_readers(-1);
 	if( buffer.failed ) { free(buffer.data); return false; }
 	{
 		bool sent = send_frame(socket,DIAG_SERVICE_PROFILER,DIAG_PROFILE_METADATA,DIAG_RESPONSE,request_id,buffer.data,buffer.length);

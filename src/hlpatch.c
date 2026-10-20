@@ -19,6 +19,7 @@ struct _hl_patch_code {
 	int source_snapshot_count;
 	hl_source_snapshot *source_snapshots;
 	void *gdb_jit_entry;
+	bool listed;
 #ifdef WIN64_UNWIND_TABLES
 	/* The patch code's own function table, registered at its base address so Windows can unwind through it. */
 	PRUNTIME_FUNCTION unwind_table;
@@ -81,22 +82,99 @@ static void patch_code_free( hl_patch_code *code ) {
 	free(code);
 }
 
+/*
+ * The allocations live slots use, by code address. Readers on other threads (profilers, debuggers), and a Linux sampler
+ * interrupting the patching thread, may hold an earlier list, so a list is published by one pointer store and superseded
+ * lists stay until the module releases its patches. An allocation no slot uses any more is freed once the new list is
+ * published, unless a concurrent reader is registered: it is then retired, as is code direct calls may still reach, and
+ * stays until the module releases its patches.
+ */
+struct _hl_patch_live {
+	struct _hl_patch_live *previous;
+	int count;
+	hl_patch_code *entries[1];
+};
+
+static bool patch_code_contains( hl_patch_code *owner, void *addr );
+
+/*
+ * Threads that read patch code without the patching thread's cooperation (the profiler's sampler, a diagnostics
+ * connection) count themselves here while they may hold a patch address or list. A commit publishes its list before it
+ * reads the count and a reader counts itself before it loads the list, all sequentially consistent, so either the commit
+ * sees the reader and keeps the superseded code, or the reader sees the new list.
+ */
+static int patch_readers = 0;
+
+#if defined(__GNUC__) || defined(__clang__)
+#	define patch_readers_add(delta) __atomic_fetch_add(&patch_readers,(delta),__ATOMIC_SEQ_CST)
+#	define patch_readers_get() __atomic_load_n(&patch_readers,__ATOMIC_SEQ_CST)
+#	define patch_store(target,value) __atomic_store_n(&(target),(value),__ATOMIC_SEQ_CST)
+#	define patch_load(source) __atomic_load_n(&(source),__ATOMIC_SEQ_CST)
+#else
+#	define patch_readers_add(delta) InterlockedExchangeAdd((volatile LONG*)&patch_readers,(LONG)(delta))
+#	define patch_readers_get() InterlockedCompareExchange((volatile LONG*)&patch_readers,0,0)
+#	define patch_store(target,value) InterlockedExchangePointer((PVOID volatile*)&(target),(PVOID)(value))
+#	define patch_load(source) InterlockedCompareExchangePointer((PVOID volatile*)&(source),NULL,NULL)
+#endif
+
+void hl_module_patch_readers( int delta ) {
+	patch_readers_add(delta);
+}
+
+static int by_code( const void *a, const void *b ) {
+	unsigned char *x = (unsigned char*)(*(hl_patch_code*const*)a)->code, *y = (unsigned char*)(*(hl_patch_code*const*)b)->code;
+	return x < y ? -1 : x > y ? 1 : 0;
+}
+
+/* A commit adds one allocation at most, so the next list needs room for one entry more than the current one. */
+static hl_patch_live *patch_live_alloc( hl_module *m ) {
+	return (hl_patch_live*)malloc(sizeof(hl_patch_live) + sizeof(hl_patch_code*) * ((m->patch_live ? m->patch_live->count : 0) + 1));
+}
+
+static void patch_live_publish( hl_module *m, hl_patch_live *next ) {
+	int slots = module_slot_count(m), n = 0;
+	for(int i=0;i<slots;i++){hl_patch_code *owner=m->patch_owners[i];if(owner)owner->listed=true;}
+	for(int i=0;i<slots;i++){hl_patch_code *owner=m->patch_owners[i];if(owner&&owner->listed){owner->listed=false;next->entries[n++]=owner;}}
+	qsort(next->entries,n,sizeof(hl_patch_code*),by_code);
+	next->count = n;
+	next->previous = m->patch_live;
+	patch_store(m->patch_live,next);
+}
+
+static void patch_live_free( hl_module *m ) {
+	hl_patch_live *list = m->patch_live;
+	m->patch_live = NULL;
+	while( list ) {
+		hl_patch_live *previous = list->previous;
+		free(list);
+		list = previous;
+	}
+}
+
+static hl_patch_code *patch_live_find( hl_patch_live *list, void *addr ) {
+	int lo = 0, hi = list ? list->count : 0;
+	while( lo < hi ) {
+		int mid = (lo + hi) >> 1;
+		if( (unsigned char*)list->entries[mid]->code <= (unsigned char*)addr ) lo = mid + 1; else hi = mid;
+	}
+	return lo > 0 && patch_code_contains(list->entries[lo - 1],addr) ? list->entries[lo - 1] : NULL;
+}
+
 void hl_module_patch_release_all( hl_module *m ) {
+	if(m)patch_live_free(m);
 	if(!m||!m->patch_owners)return;
 	for(int i=0;i<module_slot_count(m);i++){hl_patch_code *owner=m->patch_owners[i];if(owner){m->patch_owners[i]=NULL;if(--owner->references==0)patch_code_free(owner);}}
 	while(m->retired_patch_code){hl_patch_code *owner=m->retired_patch_code;m->retired_patch_code=owner->next_retired;patch_code_free(owner);}
 }
 
 int hl_module_patch_allocation_count( hl_module *m ) {
-	int count=0;
-	if(!m||!m->patch_owners)return 0;
-	for(int i=0;i<module_slot_count(m);i++){hl_patch_code *owner=m->patch_owners[i];if(!owner)continue;bool seen=false;for(int j=0;j<i;j++)if(m->patch_owners[j]==owner){seen=true;break;}if(!seen)count++;}
-	return count;
+	hl_patch_live *live = m == NULL ? NULL : (hl_patch_live*)patch_load(m->patch_live);
+	return live == NULL ? 0 : live->count;
 }
 
 int hl_module_patch_retired_allocation_count( hl_module *m ) {
 	int count=0;
-	for(hl_patch_code *owner=m==NULL?NULL:m->retired_patch_code;owner;owner=owner->next_retired)count++;
+	for(hl_patch_code *owner=m==NULL?NULL:(hl_patch_code*)patch_load(m->retired_patch_code);owner;owner=owner->next_retired)count++;
 	return count;
 }
 
@@ -144,13 +222,11 @@ bool hl_module_patch_resolve_pos( hl_module *m, void *addr, hl_function **functi
 	// Most addresses asked about are not patch code (a stack scan asks about every candidate), and deciding that by
 	// walking every function's owner costs time proportional to the module size.
 	if( m->patch_hi == NULL || addr < m->patch_lo || addr >= m->patch_hi ) return false;
-	for(int i=0;i<module_slot_count(m);i++) {
-		hl_patch_code *owner = m->patch_owners[i];
-		if( owner == NULL ) continue;
-		for(int j=0;j<i;j++) if( m->patch_owners[j] == owner ) { owner = NULL; break; }
+	{
+		hl_patch_code *owner = patch_live_find((hl_patch_live*)patch_load(m->patch_live),addr);
 		if( owner != NULL && patch_code_resolve_pos(m,owner,addr,function,opcode) ) return true;
 	}
-	for(hl_patch_code *owner=m->retired_patch_code;owner;owner=owner->next_retired)
+	for(hl_patch_code *owner=(hl_patch_code*)patch_load(m->retired_patch_code);owner;owner=owner->next_retired)
 		if( patch_code_resolve_pos(m,owner,addr,function,opcode) ) return true;
 	return false;
 }
@@ -166,15 +242,13 @@ int hl_module_patch_debug_region_count( hl_module *m ) {
 }
 
 static hl_patch_code *patch_debug_region_at( hl_module *m, int region, bool *retired ) {
-	int current = 0;
+	hl_patch_live *live;
+	int current;
 	if( m == NULL || region < 0 ) return NULL;
-	for(int i=0;m->patch_owners && i<module_slot_count(m);i++) {
-		hl_patch_code *owner = m->patch_owners[i];
-		if( owner == NULL ) continue;
-		for(int j=0;j<i;j++) if( m->patch_owners[j] == owner ) { owner = NULL; break; }
-		if( owner != NULL && current++ == region ) { *retired = false; return owner; }
-	}
-	for(hl_patch_code *owner=m->retired_patch_code;owner;owner=owner->next_retired)
+	live = (hl_patch_live*)patch_load(m->patch_live);
+	current = live ? live->count : 0;
+	if( region < current ) { *retired = false; return live->entries[region]; }
+	for(hl_patch_code *owner=(hl_patch_code*)patch_load(m->retired_patch_code);owner;owner=owner->next_retired)
 		if( current++ == region ) { *retired = true; return owner; }
 	return NULL;
 }
@@ -774,7 +848,7 @@ static bool stage_patch_types( hl_module *m, hl_patch *patch, uchar **strings, v
 }
 
 h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_msg ) {
-	const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;hl_code code;hl_module temp;patch_layout layout={0};bool staged_added=false;
+	const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;hl_code code;hl_module temp;patch_layout layout={0};bool staged_added=false;hl_patch_live *live_block=NULL;hl_patch_code *superseded=NULL;
 	if(!m||!patch||!m->patchable){error="Module is not patchable";goto fail;}
 	if(patch->function_count<=0){error="Patch contains no functions";goto fail;}
 	if(m->revision!=patch->base_revision||patch->revision<=patch->base_revision){error="Stale patch revision";goto fail;}
@@ -825,6 +899,7 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	if(!RtlAddFunctionTable(allocation->unwind_table,temp.unwind_table_size,(DWORD64)allocation->code)){error="Could not register patch unwind table";goto fail;}
 	allocation->unwind_registered=true;
 #endif
+	live_block=patch_live_alloc(m);if(!live_block){error="Out of memory listing patch code";goto fail;}
 	if(inject_patch_failure(m,3,&error))goto fail;
 	temp.jit_code=allocation->code;temp.codesize=allocation->code_size;temp.jit_debug=allocation->jit_debug;temp.gdb_jit_entry=NULL;hl_gdb_jit_register_patch(&temp);allocation->gdb_jit_entry=temp.gdb_jit_entry;free(combined_functions);combined_functions=NULL;
 	if(type_allocation_count){int needed=m->patch_type_allocation_count+type_allocation_count;if(needed>m->patch_type_allocation_capacity){int capacity=needed<16?16:needed*2;void **owners=(void**)realloc(m->patch_type_allocations,sizeof(void*)*capacity);if(!owners){error="Out of memory publishing patch types";goto fail;}m->patch_type_allocations=owners;m->patch_type_allocation_capacity=capacity;}}
@@ -832,8 +907,12 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	free(type_allocations);type_allocations=NULL;type_allocation_count=0;for(int i=m->code->ntypes;i<code.ntypes;i++)m->code->types[i].gc_owner=m;m->code->ntypes=code.ntypes;
 	if(m->patch_lo==NULL||allocation->code<m->patch_lo)m->patch_lo=allocation->code;
 	if(m->patch_hi==NULL||(void*)((unsigned char*)allocation->code+allocation->code_size)>m->patch_hi)m->patch_hi=(unsigned char*)allocation->code+allocation->code_size;
-	for(int i=0;i<patch->function_count;i++){int slot=allocation->functions[i].findex;hl_patch_code *old=m->patch_owners[slot];void *target=(unsigned char*)allocation->code+offsets[i];if(m->patch_targets){if(old==NULL&&m->patch_targets[slot]!=NULL)hl_jit_patch_method(m->patch_targets[slot],m->patch_targets+slot);m->patch_targets[slot]=target;}else{hl_jit_patch_method(m->functions_ptrs[slot],m->functions_ptrs+slot);m->functions_ptrs[slot]=target;}m->patch_owners[slot]=allocation;allocation->references++;if(old&&--old->references==0){if(m->patch_targets)patch_code_free(old);else{old->next_retired=m->retired_patch_code;m->retired_patch_code=old;}}}
+	for(int i=0;i<patch->function_count;i++){int slot=allocation->functions[i].findex;hl_patch_code *old=m->patch_owners[slot];void *target=(unsigned char*)allocation->code+offsets[i];if(m->patch_targets){if(old==NULL&&m->patch_targets[slot]!=NULL)hl_jit_patch_method(m->patch_targets[slot],m->patch_targets+slot);m->patch_targets[slot]=target;}else{hl_jit_patch_method(m->functions_ptrs[slot],m->functions_ptrs+slot);m->functions_ptrs[slot]=target;}m->patch_owners[slot]=allocation;allocation->references++;if(old&&--old->references==0){if(m->patch_targets){old->next_retired=superseded;superseded=old;}else{old->next_retired=m->retired_patch_code;patch_store(m->retired_patch_code,old);}}}
 	publish_added_functions(m,patch);staged_added=false;
+	patch_live_publish(m,live_block);live_block=NULL;
+	// Stable dispatch no longer reaches superseded code; only a concurrent reader may still hold it.
+	if(superseded&&patch_readers_get()==0)while(superseded){hl_patch_code *next=superseded->next_retired;patch_code_free(superseded);superseded=next;}
+	while(superseded){hl_patch_code *next=superseded->next_retired;superseded->next_retired=m->retired_patch_code;patch_store(m->retired_patch_code,superseded);superseded=next;}
 	free(layout.indexes);layout.indexes=NULL;
 	if(m->patch_ustrings==NULL)m->patch_initial_string_count=patch->base_string_count;
 	free(m->patch_ints);free(m->patch_floats);free(m->patch_strings);free(m->patch_string_lens);free(m->patch_ustrings);free(m->patch_string_data);
@@ -844,6 +923,7 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 fail:
 	if(jit) hl_jit_free(jit,false);
 	if(staged_added) unstage_added_functions(m,patch);
+	free(live_block);
 	free(layout.indexes);
 	free(combined_functions);
 	free(offsets);
