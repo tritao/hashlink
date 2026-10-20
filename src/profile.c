@@ -33,6 +33,10 @@
 #endif
 #endif
 
+#ifndef HL_WIN
+#include <time.h>
+#endif
+
 #ifdef HL_LINUX
 #include <dlfcn.h>
 #include <semaphore.h>
@@ -573,6 +577,35 @@ static void profile_pause_remote() {
 	hl_condition_release(data.waitCond);
 }
 
+/*
+ * Waits until the next sample is due instead of spinning a core. Windows needs a high-resolution waitable timer for
+ * sub-millisecond waits; where that is unavailable the loop polls as before rather than sampling at the scheduler tick.
+ */
+static void profile_sleep( double seconds ) {
+	if( seconds <= 0 ) return;
+	if( seconds > 0.01 ) seconds = 0.01;
+#ifdef HL_WIN
+#	ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#		define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#	endif
+	static HANDLE timer = NULL;
+	static bool timer_ready = false;
+	LARGE_INTEGER due;
+	if( !timer_ready ) {
+		timer_ready = true;
+		timer = CreateWaitableTimerExW(NULL,NULL,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);
+	}
+	if( timer == NULL ) return;
+	due.QuadPart = -(LONGLONG)(seconds * 1e7);
+	if( SetWaitableTimer(timer,&due,0,NULL,NULL,FALSE) ) WaitForSingleObject(timer,INFINITE);
+#else
+	struct timespec wait;
+	wait.tv_sec = 0;
+	wait.tv_nsec = (long)(seconds * 1e9);
+	nanosleep(&wait,NULL);
+#endif
+}
+
 static void hl_profile_loop( void *_ ) {
 	double next = hl_sys_time();
 	double next_gc_stats = next;
@@ -594,8 +627,11 @@ static void hl_profile_loop( void *_ ) {
 				data.waitLoop = true;
 				hl_condition_wait(data.waitCond);
 				data.waitLoop = false;
+				hl_condition_release(data.waitCond);
+			} else {
+				hl_condition_release(data.waitCond);
+				profile_sleep((next < next_gc_stats ? next : next_gc_stats) - t);
 			}
-			hl_condition_release(data.waitCond);
 			continue;
 		}
 		hl_condition_release(data.waitCond);
