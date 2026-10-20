@@ -351,8 +351,66 @@ static void *get_thread_frameptr( void ) {
 #endif
 }
 
+#if defined(HL_WIN_DESKTOP) && defined(HL_64) && defined(HL_VCC)
+#define WIN64_SAMPLE_UNWIND
+/* The registers of the thread being sampled; only the sampler thread touches it. */
+static CONTEXT sample_context;
+
+/* A superseded JIT entry rewritten by hl_jit_patch_method: mov rax, imm64; jmp [rax]. It has no frame of its own. */
+static bool is_patch_entry_stub( DWORD64 pc, DWORD64 image_base, PRUNTIME_FUNCTION fn ) {
+	const unsigned char *entry = (const unsigned char*)(image_base + fn->BeginAddress);
+	return pc < (DWORD64)entry + 12 && entry[0] == 0x48 && entry[1] == 0xB8 && entry[10] == 0xFF && entry[11] == 0x20;
+}
+
+/*
+ * Walks a stack copied while the thread was suspended, so every frame is reported: JIT functions, the native code they
+ * call and the JIT callbacks that code makes. Windows unwind data drives each step (JIT code registers its own tables);
+ * a pc without unwind data is a leaf that has pushed nothing but its return address. Registers that point into the
+ * original stack are moved into the copy before each step, since unwinding reads saved values through them.
+ */
+static int unwind_stack_copy( const CONTEXT *stopped, const unsigned char *copy, DWORD64 lo, DWORD64 hi, void **out, int max ) {
+	CONTEXT c = *stopped;
+	DWORD64 delta = (DWORD64)copy - lo, copy_lo = (DWORD64)copy, copy_hi = hi + delta, last_sp = 0;
+	int count = 0;
+#	define RELOCATE(r) if( c.r >= lo && c.r < hi ) c.r += delta
+#	define RELOCATE_ALL() RELOCATE(Rsp); RELOCATE(Rbp); RELOCATE(Rbx); RELOCATE(Rsi); RELOCATE(Rdi); RELOCATE(R12); RELOCATE(R13); RELOCATE(R14); RELOCATE(R15)
+	RELOCATE_ALL();
+	__try {
+		while( count < max && c.Rip && c.Rsp >= copy_lo && c.Rsp + 8 <= copy_hi && c.Rsp > last_sp ) {
+			DWORD64 image_base;
+			PRUNTIME_FUNCTION fn;
+			out[count++] = (void*)c.Rip;
+			last_sp = c.Rsp;
+			fn = RtlLookupFunctionEntry(c.Rip,&image_base,NULL);
+			if( fn && !is_patch_entry_stub(c.Rip,image_base,fn) ) {
+				void *handler_data;
+				DWORD64 establisher_frame;
+				RtlVirtualUnwind(UNW_FLAG_NHANDLER,image_base,c.Rip,fn,&c,&handler_data,&establisher_frame,NULL);
+			} else if( count == 1 ) {
+				c.Rip = *(DWORD64*)c.Rsp;
+				c.Rsp += 8;
+			} else {
+				// Only the interrupted function can be a leaf: a caller made a call, so it has unwind data. A return address
+				// without any means the walk has left real frames.
+				break;
+			}
+			RELOCATE_ALL();
+		}
+	} __except( EXCEPTION_EXECUTE_HANDLER ) {
+	}
+#	undef RELOCATE_ALL
+#	undef RELOCATE
+	return count;
+}
+#endif
+
 static void *get_thread_stackptr( thread_handle *t, void **eip ) {
-#ifdef HL_WIN_DESKTOP
+#ifdef WIN64_SAMPLE_UNWIND
+	sample_context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+	if( !GetThreadContext(t->h,&sample_context) ) return NULL;
+	*eip = (void*)sample_context.Rip;
+	return (void*)sample_context.Rsp;
+#elif defined(HL_WIN_DESKTOP)
 	CONTEXT c;
 	c.ContextFlags = CONTEXT_CONTROL;
 	if( !GetThreadContext(t->h,&c) ) return NULL;
@@ -494,11 +552,18 @@ static void read_thread_data( thread_handle *t ) {
 	}
 #endif
 	pause_thread(t, false);
+#ifdef WIN64_SAMPLE_UNWIND
+	sampling_cost.stopped += hl_sys_time() - stopped_at;
+	double capture_started = hl_sys_time();
+	int count = unwind_stack_copy(&sample_context,(unsigned char*)(data.tmpMemory + 2),(DWORD64)stack,(DWORD64)stack + size,data.stackOut,MAX_STACK_COUNT);
+	sampling_cost.capture += hl_sys_time() - capture_started;
+#else
 	data.tmpMemory[0] = eip;
 	data.tmpMemory[1] = stack;
 	size += sizeof(void*) * 2;
 
 	int count = hl_module_capture_stack_range((char*)data.tmpMemory+size, (void**)data.tmpMemory, data.stackOut, MAX_STACK_COUNT);
+#endif
 #endif
 	/* Stack scanning finds managed return addresses; preserve a native instruction
 	   pointer as the leaf when the thread was interrupted inside a shared library. */
@@ -513,7 +578,7 @@ static void read_thread_data( thread_handle *t ) {
 			count++;
 		}
 	}
-#elif defined(HL_WIN)
+#elif defined(HL_WIN) && !defined(WIN64_SAMPLE_UNWIND)
 	if( eip && count < MAX_STACK_COUNT ) {
 		memmove(data.stackOut + 1,data.stackOut,sizeof(void*) * count);
 		data.stackOut[0] = eip;
