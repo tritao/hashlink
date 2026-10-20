@@ -335,7 +335,7 @@ if (WITH_VM)
     endif()
 endif()
 
-add_executable(hlprof-live tools/hlprof-live.c)
+add_executable(hlprof-live tools/hlprof-live.c tools/pftrace.c)
 if(WIN32)
     target_link_libraries(hlprof-live PRIVATE ws2_32)
 endif()

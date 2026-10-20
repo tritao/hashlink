@@ -287,8 +287,8 @@ $(HLC): $(BOOT) $(LIBHL)
 $(HL) $(HLC):
 	$(CC) $(LDFLAGS) $(USE_LIBHL_LDFLAGS) $^ $($@_LDLIBS) -o $@
 
-$(HLPROF_LIVE): tools/hlprof-live.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(HLPROF_LIVE_LDLIBS) -o $@
+$(HLPROF_LIVE): tools/hlprof-live.c tools/pftrace.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $^ $(HLPROF_LIVE_LDLIBS) -o $@
 
 %.hdll: HDLL_LINK = $(CC) $(LDFLAGS)
 %.hdll:
