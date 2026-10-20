@@ -130,6 +130,8 @@ static struct {
 	unsigned long long next;
 	unsigned long long dropped;
 	unsigned long long consumer;
+	// Where the client's latest read began: it has received everything before this, while `consumer` only says what was sent.
+	unsigned long long received;
 	hl_mutex *lock;
 	bool remote_paused;
 	int requested_rate;
@@ -768,6 +770,7 @@ static void profile_pause_remote() {
  * sub-millisecond waits; where that is unavailable the loop polls as before rather than sampling at the scheduler tick.
  */
 static void profile_sleep( double seconds ) {
+	// Only the sampler thread calls this: an auto-reset timer releases one waiter per expiry.
 	if( seconds <= 0 ) return;
 	if( seconds > 0.01 ) seconds = 0.01;
 #ifdef HL_WIN
@@ -974,6 +977,7 @@ unsigned int hl_profile_stream_read( unsigned long long cursor, void *output, un
 	if( cursor < stream.first ) cursor = stream.first;
 	if( cursor > stream.next ) cursor = stream.next;
 	if( stream.next - cursor < capacity ) capacity = (unsigned int)(stream.next - cursor);
+	stream.received = cursor;
 	while( total < capacity ) {
 		unsigned int offset = (unsigned int)(cursor % PROFILE_STREAM_SIZE);
 		unsigned int count = PROFILE_STREAM_SIZE - offset;
@@ -1003,6 +1007,7 @@ bool hl_profile_stream_configure( int sample_rate, bool enabled ) {
 			hl_mutex_acquire(stream.lock);
 			stream.requested_rate = sample_rate;
 			stream.consumer = stream.next;
+			stream.received = stream.next;
 			stream.last_adjust = hl_sys_time();
 			stream.last_consume = stream.last_adjust;
 			hl_mutex_release(stream.lock);
@@ -1171,6 +1176,36 @@ static void profile_print_cost( void ) {
 		sampling_cost.samples, window, window > 0 ? sampling_cost.samples / window : 0.0,
 		sampling_cost.stopped * 1e6 / sampling_cost.samples, window > 0 ? 100.0 * sampling_cost.stopped / window : 0.0,
 		sampling_cost.capture * 1e6 / sampling_cost.samples, sampling_cost.total * 1e6 / sampling_cost.samples);
+}
+
+/*
+ * A diagnostics client reads the stream in the background, so records written just before exit (the last spans and
+ * counters) would be lost with the process. Give a client that is reading up to a second to take them. The client reads
+ * through the diagnostics server, so this must run before hl_diagnostics_stop, and a record only counts as taken once the
+ * client asks for what follows it: a reply that was sent can still be lost when the server closes the connection.
+ */
+void hl_profile_drain( void ) {
+	unsigned long long target;
+	double deadline = hl_sys_time() + 1.0;
+	if( stream.lock == NULL ) return;
+	hl_mutex_acquire(stream.lock);
+	target = stream.next;
+	hl_mutex_release(stream.lock);
+	while( hl_sys_time() < deadline ) {
+		bool reading, drained;
+		hl_mutex_acquire(stream.lock);
+		reading = stream.last_consume > 0 && hl_sys_time() - stream.last_consume < 1.0;
+		drained = stream.received >= target;
+		hl_mutex_release(stream.lock);
+		if( drained || !reading ) return;
+		// Not profile_sleep: its timer belongs to the sampler thread.
+#		ifdef HL_WIN
+		Sleep(5);
+#		else
+		struct timespec wait = { 0, 5000000 };
+		nanosleep(&wait,NULL);
+#		endif
+	}
 }
 
 void hl_profile_end() {

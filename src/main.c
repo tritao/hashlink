@@ -483,6 +483,7 @@ int main(int argc, pchar *argv[]) {
 		hl_profile_wait_for_start();
 	ctx.ret = hl_dyn_call_safe(&cl,NULL,0,&isExc);
 	fflush(stdout);
+	hl_profile_drain();
 	hl_diagnostics_stop();
 	hl_profile_end();
 	if( isExc ) {

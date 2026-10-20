@@ -448,6 +448,8 @@ HL_EXTERN_C HL_EXPORT int hl_runtime_failed_retirements_count();
 void hl_profile_setup( int sample_count );
 /** Wait until a remote diagnostics profiler has configured the stream. */
 void hl_profile_wait_for_start( void );
+/** Give a diagnostics client that is reading the stream up to a second to take the last records. Call it while diagnostics still run. */
+void hl_profile_drain( void );
 void hl_profile_end();
 
 #endif
