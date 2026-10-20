@@ -350,7 +350,9 @@ int main( int argc,char **argv ) {
 	if(!capture_open(&output,output_path,u32(hello+12),(uint32_t)rate)){fprintf(stderr,"Could not open capture file %s\n",output_path);goto done;}
 	if(!fetch_symbols(sock,&table,id++,&output)||!table.count){fprintf(stderr,"Could not load symbols\n");goto done;}
 	put32(config,(uint32_t)rate);put32(config+4,1);put32(config+8,(uint32_t)allocation_interval);if(!request(sock,P_CONFIGURE,id++,config,12,&reply,&reply_size)||!parse_status(reply,reply_size)){fprintf(stderr,"Could not start profiler\n");goto done;}
-	cursor=u64(reply+8);dropped=u64(reply+16);free(reply);reply=NULL;pending=(unsigned char*)malloc(512*1024);if(!pending)goto done;
+	/* Configuring releases a program held by --diagnostics-wait before this reply is built, so its first records can already
+	   be past `next`; read from the consumer position configuration set, which older runtimes do not report. */
+	cursor=reply_size>=56?u64(reply+40):u64(reply+8);dropped=u64(reply+16);free(reply);reply=NULL;pending=(unsigned char*)malloc(512*1024);if(!pending)goto done;
 	printf("Connected to HashLink process %u, %zu symbols, sampling at %d Hz\n",u32(hello+12),table.count,rate);signal(SIGINT,stop_signal);
 #ifdef SIGTERM
 	signal(SIGTERM,stop_signal);
