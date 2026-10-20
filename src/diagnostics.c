@@ -177,6 +177,38 @@ static void append_region( diag_buffer *buffer, hl_code *code, unsigned long lon
 			append_function(buffer,code,functions + i,debug + i,(unsigned int)debug[i].start,function_end(debug,debug_count,i,size) - (unsigned int)debug[i].start);
 }
 
+/* Each function of a patchable module is called through a small entry stub that jumps to its current code, so a sample can
+   stop in one. The stubs are listed as a region of their own (flag 4), each named after the function it enters. The region
+   has revision 0, since the stubs belong to no revision, so readers that key functions by revision keep them apart. */
+static void append_entry_region( diag_buffer *buffer, hl_module *module ) {
+	hl_code *code = module->code;
+	unsigned int stride = HL_JIT_PATCH_ENTRY_STRIDE, size = (unsigned int)module->patch_entry_code_size, count_at;
+	int valid = 0, nfunctions = code->nfunctions + code->npatchfunctions;
+	buffer_u64(buffer,(unsigned long long)(uintptr_t)module->patch_entry_code);
+	buffer_u64(buffer,size);
+	buffer_u32(buffer,4);
+	buffer_u32(buffer,0);
+	count_at = buffer->length;
+	buffer_u32(buffer,0);
+	for(int i=0;i<nfunctions;i++) {
+		hl_function *function = code->functions + i;
+		char name[768];
+		unsigned int length;
+		if( function->findex < 0 || (unsigned int)function->findex >= size / stride ) continue;
+		function_name(code,function,name,sizeof(name) - 8);
+		strcat(name," [entry]");
+		length = (unsigned int)strlen(name);
+		buffer_u32(buffer,(unsigned int)function->findex);
+		buffer_u32(buffer,(unsigned int)function->findex * stride);
+		buffer_u32(buffer,stride);
+		buffer_u32(buffer,length);
+		buffer_bytes(buffer,name,length);
+		buffer_u32(buffer,0);
+		valid++;
+	}
+	if( !buffer->failed ) write_u32(buffer->data + count_at,(unsigned int)valid);
+}
+
 static bool send_metadata( hl_socket *socket, unsigned int request_id ) {
 	diag_buffer buffer = {0};
 	int count;
@@ -190,9 +222,10 @@ static bool send_metadata( hl_socket *socket, unsigned int request_id ) {
 	for(int i=0;i<count;i++) {
 		hl_module *module = modules[i];
 		int patch_count = hl_module_patch_debug_region_count(module);
+		bool entries = module->patch_entry_code != NULL;
 		buffer_u64(&buffer,module->diagnostics_id);
 		buffer_u32(&buffer,(unsigned int)module->revision);
-		buffer_u32(&buffer,(unsigned int)(1 + patch_count));
+		buffer_u32(&buffer,(unsigned int)(1 + patch_count + (entries ? 1 : 0)));
 		buffer_u32(&buffer,(unsigned int)module->code->ndebugfiles);
 		for(int file_index=0;file_index<module->code->ndebugfiles;file_index++) {
 			buffer_u32(&buffer,(unsigned int)module->code->debugfiles_lens[file_index]);
@@ -228,6 +261,7 @@ static bool send_metadata( hl_socket *socket, unsigned int request_id ) {
 			}
 			if( !buffer.failed ) write_u32(buffer.data + count_at,(unsigned int)valid);
 		}
+		if( entries ) append_entry_region(&buffer,module);
 	}
 	hl_module_registry_snapshot_free(modules,count);
 	hl_module_patch_readers(-1);

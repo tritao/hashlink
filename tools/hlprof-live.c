@@ -28,7 +28,7 @@ enum { F_RESPONSE=1, F_ERROR=2, CAP_PROFILE=1, CAP_SYMBOLS=2 };
 #include "pftrace.h"
 
 typedef struct { uint32_t offset,end,opcode_index,opcode,line; char *file; uint64_t self,total; } source_line;
-typedef struct { uint64_t start,end,self,total,region_base,region_size,module_id; uint32_t function_id,revision; char *name; source_line *lines; uint32_t line_count; } symbol;
+typedef struct { uint64_t start,end,self,total,region_base,region_size,module_id; uint32_t function_id,revision,region_flags; char *name; source_line *lines; uint32_t line_count; } symbol;
 typedef struct { symbol *items; size_t count,capacity; } symbols;
 typedef struct { const unsigned char *data; size_t length,pos; } reader;
 typedef struct { FILE *file; double started; int failed; } capture;
@@ -132,7 +132,8 @@ static int add_native( uint64_t pc,uint64_t base,const unsigned char *module,uin
 }
 static void free_native( void ){while(native_symbols){native_symbol *next=native_symbols->next;free(native_symbols->module);free(native_symbols->name);free(native_symbols->file);free(native_symbols);native_symbols=next;}}
 static int add_native_location( const unsigned char *payload,uint32_t size ) {
-	if(size<32||u32(payload+28)!=size-32)return 0;native_symbol *n=resolve_native(u64(payload));if(!n||n->file)return 1;
+	if(size<32||u32(payload+28)!=size-32)return 0;
+	native_symbol *n=resolve_native(u64(payload));if(!n||n->file)return 1;
 	n->module_base=u64(payload+8);n->module_size=u64(payload+16);n->line=u32(payload+24);
 	if(size>32){n->file=(char*)malloc((size_t)size-31);if(!n->file)return 0;memcpy(n->file,payload+32,size-32);n->file[size-32]=0;}
 	return 1;
@@ -148,7 +149,7 @@ static int parse_symbols( const unsigned char *data,uint32_t size,symbols *curre
 			uint64_t base,region_size;uint32_t flags,region_revision=revision,nfunctions;if(!get64(&r,&base)||!get64(&r,&region_size)||!get32(&r,&flags)||(schema>=4&&!get32(&r,&region_revision))||!get32(&r,&nfunctions))goto fail;
 			for(uint32_t f=0;f<nfunctions;f++){
 				uint32_t fid,off,len,nlen;if(!get32(&r,&fid)||!get32(&r,&off)||!get32(&r,&len)||!get32(&r,&nlen)||nlen>r.length-r.pos||!len||(uint64_t)off+len>region_size)goto fail;
-				symbol *added=add_symbol(&next,base+off,base+off+len,fid,region_revision,r.data+r.pos,nlen);if(!added)goto fail;added->region_base=base;added->region_size=region_size;added->module_id=module_id;
+				symbol *added=add_symbol(&next,base+off,base+off+len,fid,region_revision,r.data+r.pos,nlen);if(!added)goto fail;added->region_base=base;added->region_size=region_size;added->module_id=module_id;added->region_flags=flags;
 				r.pos+=nlen;
 				if(schema>=2){uint32_t lines;if(!get32(&r,&lines))goto fail;added->lines=(source_line*)calloc(lines,sizeof(source_line));if(lines&&!added->lines)goto fail;added->line_count=lines;for(uint32_t i=0;i<lines;i++){uint32_t offset,end=0,opcode_index=0,opcode=0,file,line;if(!get32(&r,&offset)||(schema>=3&&(!get32(&r,&end)||!get32(&r,&opcode_index)||!get32(&r,&opcode)))||!get32(&r,&file)||!get32(&r,&line)||offset>=len||(schema>=3&&(end<=offset||end>len))||file>=file_count||(i&&offset<added->lines[i-1].offset))goto fail;added->lines[i].offset=offset;added->lines[i].end=end;added->lines[i].opcode_index=opcode_index;added->lines[i].opcode=opcode;added->lines[i].line=line;added->lines[i].file=(char*)malloc(strlen(files[file])+1);if(!added->lines[i].file)goto fail;strcpy(added->lines[i].file,files[file]);}}
 			}
@@ -219,7 +220,7 @@ static uint64_t pf_time( pf_export *pf,double seconds ){uint64_t ns=seconds>0?(u
 static char *pf_text( const unsigned char *data,uint32_t size ){char *text=(char*)malloc((size_t)size+1);if(text){memcpy(text,data,size);text[size]=0;}return text;}
 static uint64_t pf_frame( pf_export *pf,symbols *s,uint64_t pc ) {
 	symbol *x=resolve(s,pc);
-	if(x){char mapping[64];source_line *line=resolve_line(x,pc);snprintf(mapping,sizeof(mapping),"[hashlink-jit m%llu r%u]",(unsigned long long)x->module_id,x->revision);
+	if(x){char mapping[64];source_line *line=resolve_line(x,pc);if(x->region_flags&4)snprintf(mapping,sizeof(mapping),"[hashlink-jit-entries m%llu]",(unsigned long long)x->module_id);else snprintf(mapping,sizeof(mapping),"[hashlink-jit m%llu r%u]",(unsigned long long)x->module_id,x->revision);
 		uint64_t id=pftrace_mapping(pf->trace,mapping,x->region_base,x->region_base+x->region_size);
 		return pftrace_frame(pf->trace,x->name,id,pc-x->region_base,line?line->file:NULL,line?line->line:0);}
 	native_symbol *n=resolve_native(pc);
