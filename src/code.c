@@ -430,11 +430,11 @@ const char *hl_code_function_name( hl_code *code, hl_function *function ) {
 	if( code == NULL || function == NULL || code->function_names == NULL ) return NULL;
 	// Callers mostly hold a pointer into the function table, and asking for every function's name would otherwise scan the
 	// whole table each time.
-	if( function >= code->functions && function < code->functions + code->nfunctions ) {
+	if( function >= code->functions && function < code->functions + code->nfunctions + code->npatchfunctions ) {
 		int at = (int)(function - code->functions);
 		if( code->functions[at].findex == function->findex ) return code->function_names[at];
 	}
-	for(int i=0;i<code->nfunctions;i++)
+	for(int i=0;i<code->nfunctions+code->npatchfunctions;i++)
 		if( code->functions[i].findex == function->findex ) return code->function_names[i];
 	return NULL;
 }
@@ -584,10 +584,11 @@ hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg ) {
 		n->findex = UINDEX();
 	}
 	CHK_ERROR();
-	ALLOC(c->functions, hl_function, c->nfunctions);
-	ALLOC(c->function_stable_ids, int, c->nfunctions);
-	ALLOC(c->function_names, char*, c->nfunctions);
-	ALLOC(c->function_names_lens, int, c->nfunctions);
+	c->functions_capacity = c->nfunctions > 0x7FFFFFFF - HL_PATCH_FUNCTION_RESERVE - c->nnatives ? c->nfunctions : c->nfunctions + HL_PATCH_FUNCTION_RESERVE;
+	ALLOC(c->functions, hl_function, c->functions_capacity);
+	ALLOC(c->function_stable_ids, int, c->functions_capacity);
+	ALLOC(c->function_names, char*, c->functions_capacity);
+	ALLOC(c->function_names_lens, int, c->functions_capacity);
 	for(i=0;i<c->nfunctions;i++) c->function_stable_ids[i] = -1;
 	for(i=0;i<c->nfunctions;i++) {
 		hl_read_function(r,c->functions+i);

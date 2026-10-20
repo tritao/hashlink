@@ -22,9 +22,26 @@ struct _hl_patch_code {
 	hl_patch_code *next_retired;
 };
 
-static hl_function *find_live_function( hl_module *m, int findex ) {
-	for(int i=0;i<m->code->nfunctions;i++) if(m->code->functions[i].findex==findex)return m->code->functions+i;
-	return NULL;
+/* Slots in use: the loaded functions and natives, then the functions patches have added. */
+static int module_slot_count( hl_module *m ) {
+	return m->code->nfunctions + m->code->nnatives + m->code->npatchfunctions;
+}
+
+/*
+ * The functions a patch is checked and compiled against: the module's functions, then the ones the patch adds, with the
+ * natives after them all. JIT code tells natives from functions by their index, so the natives' indexes move past the
+ * added functions here; the module's own table keeps them where its load-time code expects.
+ */
+typedef struct {
+	hl_function *functions;
+	int count;
+	int *indexes;
+	int slots;
+} patch_layout;
+
+static hl_function *layout_function( patch_layout *layout, int findex ) {
+	int index = findex < 0 || findex >= layout->slots ? -1 : layout->indexes[findex];
+	return index < 0 || index >= layout->count ? NULL : layout->functions + index;
 }
 
 static int find_debug_file( hl_code *code, const char *path, int length ) {
@@ -57,14 +74,14 @@ static void patch_code_free( hl_patch_code *code ) {
 
 void hl_module_patch_release_all( hl_module *m ) {
 	if(!m||!m->patch_owners)return;
-	for(int i=0;i<m->code->nfunctions+m->code->nnatives;i++){hl_patch_code *owner=m->patch_owners[i];if(owner){m->patch_owners[i]=NULL;if(--owner->references==0)patch_code_free(owner);}}
+	for(int i=0;i<module_slot_count(m);i++){hl_patch_code *owner=m->patch_owners[i];if(owner){m->patch_owners[i]=NULL;if(--owner->references==0)patch_code_free(owner);}}
 	while(m->retired_patch_code){hl_patch_code *owner=m->retired_patch_code;m->retired_patch_code=owner->next_retired;patch_code_free(owner);}
 }
 
 int hl_module_patch_allocation_count( hl_module *m ) {
 	int count=0;
 	if(!m||!m->patch_owners)return 0;
-	for(int i=0;i<m->code->nfunctions+m->code->nnatives;i++){hl_patch_code *owner=m->patch_owners[i];if(!owner)continue;bool seen=false;for(int j=0;j<i;j++)if(m->patch_owners[j]==owner){seen=true;break;}if(!seen)count++;}
+	for(int i=0;i<module_slot_count(m);i++){hl_patch_code *owner=m->patch_owners[i];if(!owner)continue;bool seen=false;for(int j=0;j<i;j++)if(m->patch_owners[j]==owner){seen=true;break;}if(!seen)count++;}
 	return count;
 }
 
@@ -118,7 +135,7 @@ bool hl_module_patch_resolve_pos( hl_module *m, void *addr, hl_function **functi
 	// Most addresses asked about are not patch code (a stack scan asks about every candidate), and deciding that by
 	// walking every function's owner costs time proportional to the module size.
 	if( m->patch_hi == NULL || addr < m->patch_lo || addr >= m->patch_hi ) return false;
-	for(int i=0;i<m->code->nfunctions+m->code->nnatives;i++) {
+	for(int i=0;i<module_slot_count(m);i++) {
 		hl_patch_code *owner = m->patch_owners[i];
 		if( owner == NULL ) continue;
 		for(int j=0;j<i;j++) if( m->patch_owners[j] == owner ) { owner = NULL; break; }
@@ -142,7 +159,7 @@ int hl_module_patch_debug_region_count( hl_module *m ) {
 static hl_patch_code *patch_debug_region_at( hl_module *m, int region, bool *retired ) {
 	int current = 0;
 	if( m == NULL || region < 0 ) return NULL;
-	for(int i=0;m->patch_owners && i<m->code->nfunctions+m->code->nnatives;i++) {
+	for(int i=0;m->patch_owners && i<module_slot_count(m);i++) {
 		hl_patch_code *owner = m->patch_owners[i];
 		if( owner == NULL ) continue;
 		for(int j=0;j<i;j++) if( m->patch_owners[j] == owner ) { owner = NULL; break; }
@@ -359,6 +376,8 @@ void hl_patch_free( hl_patch *patch ) {
 	}
 	for(i=0;i<patch->type_count;i++) if(patch->types[i].tag==HFUN) free(patch->types[i].data.fun.arguments);
 	free(patch->types);
+	for(i=0;i<patch->added_function_count;i++) free(patch->added_functions[i].name);
+	free(patch->added_functions);
 	for(i=0;i<patch->debug_file_count;i++) free(patch->debug_files[i]);
 	for(i=0;i<patch->source_snapshot_count;i++) free(patch->source_snapshots[i].content);
 	free(patch->source_snapshots);
@@ -369,13 +388,13 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 	patch_reader r = { data, data + (size < 0 ? 0 : size), NULL };
 	hl_patch *patch = (hl_patch*)calloc(1,sizeof(hl_patch));
 	const unsigned char *p; int version, i, j, count, tag, section_count, section_length;
-	bool have_symbols = false, have_functions = false, have_debug = false, have_snapshots = false;
+	bool have_symbols = false, have_functions = false, have_debug = false, have_snapshots = false, have_added = false;
 #define FAIL(msg) do { r.error = msg; goto fail; } while(0)
 	if( patch == NULL ) FAIL("Out of memory reading HLP");
 	if( !take(&r,3,&p) ) goto fail;
 	if( memcmp(p,"HLP",3) != 0 ) FAIL("Invalid HLP magic");
 	if( !read_byte(&r,&version) ) goto fail;
-	if( version != 7 ) FAIL("Unsupported HLP version");
+	if( version != 8 ) FAIL("Unsupported HLP version");
 	if( !take(&r,16,&p) ) goto fail;
 	memcpy(patch->module_id,p,16);
 	if( !read_count(&r,&patch->base_revision) || !read_count(&r,&patch->revision) ) goto fail;
@@ -450,6 +469,19 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 				snapshot->content=(unsigned char*)malloc(snapshot->length);if(snapshot->length&&!snapshot->content)FAIL("Out of memory reading source snapshot");
 				memcpy(snapshot->content,content,snapshot->length);
 			}
+		} else if( tag == 5 ) {
+			if( have_added ) FAIL("Duplicate HLP added functions section");
+			have_added=true;
+			if(!read_count(&s,&patch->added_function_count))goto section_fail;
+			patch->added_functions=(hl_patch_added_function*)calloc(patch->added_function_count,sizeof(hl_patch_added_function));
+			if(patch->added_function_count&&!patch->added_functions)FAIL("Out of memory reading added functions");
+			for(i=0;i<patch->added_function_count;i++) {
+				hl_patch_added_function *added=patch->added_functions+i;
+				if(!read_count(&s,&added->stable_id)||!read_count(&s,&added->findex)||!read_index(&s,&added->type)||!read_count(&s,&count)||!take(&s,count,&p))goto section_fail;
+				added->name=(char*)malloc(count+1);if(!added->name)FAIL("Out of memory reading added functions");
+				memcpy(added->name,p,count);added->name[count]=0;
+				for(j=0;j<i;j++)if(patch->added_functions[j].stable_id==added->stable_id||patch->added_functions[j].findex==added->findex)FAIL("Duplicate HLP added function");
+			}
 		} else {
 			s.p = s.end;
 		}
@@ -471,9 +503,12 @@ fail:
 
 static bool valid_reg( hl_patch_function *f, int reg ) { return reg >= 0 && reg < f->register_count; }
 
-static bool valid_function_target( hl_module *m, int index ) {
-	return index >= 0 && index < m->code->nfunctions + m->code->nnatives && m->functions_ptrs[index] != NULL
-		&& m->functions_indexes[index] >= 0 && m->functions_indexes[index] < m->code->nfunctions;
+static bool valid_call_target( hl_module *m, patch_layout *layout, int index ) {
+	return index >= 0 && index < layout->slots && m->functions_ptrs[index] != NULL;
+}
+
+static bool valid_function_target( hl_module *m, patch_layout *layout, int index ) {
+	return valid_call_target(m,layout,index) && layout_function(layout,index) != NULL;
 }
 
 // The JIT keeps at most this many try regions open (jit_emit.c MAX_TRAPS).
@@ -531,8 +566,8 @@ static bool validate_traps( hl_patch_function *f, const char **error ) {
 	return ok;
 }
 
-static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function *f, const char **error ) {
-	hl_function *live=find_live_function(m,f->findex);
+static bool validate_function( hl_module *m, hl_patch *patch, patch_layout *layout, hl_patch_function *f, const char **error ) {
+	hl_function *live=layout_function(layout,f->findex);
 	int type_count=patch->base_type_count+patch->type_count;
 	if(!live){*error="Unknown stable function slot";return false;}
 	if(f->type<0||f->type>=type_count||live->type!=m->code->types+f->type){*error="Patch function signature changed";return false;}
@@ -549,11 +584,11 @@ static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function 
 		case OAdd:case OSub:case OMul:case OSDiv:case OSMod:case OShl:case OSShr:case OUShr:case OAnd:case OOr:case OXor:
 			if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||!valid_reg(f,p[2])){*error="Invalid arithmetic operands";return false;}break;
 		case OCall0:case OCall1:case OCall2:case OCall3:case OCall4:
-			if(!valid_reg(f,p[0])||p[1]<0||p[1]>=m->code->nfunctions+m->code->nnatives||m->functions_ptrs[p[1]]==NULL){*error="Invalid call target";return false;}
+			if(!valid_reg(f,p[0])||!valid_call_target(m,layout,p[1])){*error="Invalid call target";return false;}
 			for(int k=2;k<op->operand_count;k++) if(!valid_reg(f,p[k])){*error="Invalid call argument";return false;}
 			break;
 		case OCallN:
-			if(!valid_reg(f,p[0])||p[1]<0||p[1]>=m->code->nfunctions+m->code->nnatives||m->functions_ptrs[p[1]]==NULL||p[2]<0||p[2]!=op->operand_count-3){*error="Invalid variadic call";return false;}
+			if(!valid_reg(f,p[0])||!valid_call_target(m,layout,p[1])||p[2]<0||p[2]!=op->operand_count-3){*error="Invalid variadic call";return false;}
 			for(int k=3;k<op->operand_count;k++) if(!valid_reg(f,p[k])){*error="Invalid call argument";return false;}
 			break;
 		case OCallMethod:case OCallThis:
@@ -565,10 +600,10 @@ static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function 
 			for(int k=3;k<op->operand_count;k++) if(!valid_reg(f,p[k])){*error="Invalid call argument";return false;}
 			break;
 		case OStaticClosure:
-			if(!valid_reg(f,p[0])||!valid_function_target(m,p[1])){*error="Invalid static closure";return false;}
+			if(!valid_reg(f,p[0])||!valid_function_target(m,layout,p[1])){*error="Invalid static closure";return false;}
 			break;
 		case OInstanceClosure:
-			if(!valid_reg(f,p[0])||!valid_function_target(m,p[1])||!valid_reg(f,p[2])){*error="Invalid instance closure";return false;}
+			if(!valid_reg(f,p[0])||!valid_function_target(m,layout,p[1])||!valid_reg(f,p[2])){*error="Invalid instance closure";return false;}
 			break;
 		case OField:
 			if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||p[2]<0){*error="Invalid field read";return false;}
@@ -648,6 +683,61 @@ static bool validate_patch_types( hl_module *m, hl_patch *patch, int string_coun
 	return true;
 }
 
+/* Checks the functions a patch adds, and builds the layout its code is checked and compiled against. */
+static bool stage_patch_layout( hl_module *m, hl_patch *patch, patch_layout *layout, const char **error ) {
+	int loaded=m->code->nfunctions+m->code->npatchfunctions,added=patch->added_function_count,base_types=patch->base_type_count;
+	if(added&&m->patch_targets==NULL){*error="Module cannot take added functions";return false;}
+	if(added>m->code->functions_capacity-loaded){*error="Added function capacity exceeded";return false;}
+	for(int i=0;i<added;i++){
+		hl_patch_added_function *a=patch->added_functions+i;int kind,bodies=0;
+		if(a->findex!=module_slot_count(m)+i){*error="Added function is not in the next free slot";return false;}
+		if(a->type<0||a->type>=base_types+patch->type_count){*error="Invalid added function type";return false;}
+		kind=a->type<base_types?m->code->types[a->type].kind:patch->types[a->type-base_types].tag;
+		if(kind!=HFUN&&kind!=HMETHOD){*error="Invalid added function type";return false;}
+		for(int j=0;j<patch->function_count;j++)if(patch->functions[j].findex==a->findex)bodies++;
+		if(bodies!=1){*error="Added function has no body";return false;}
+	}
+	layout->count=loaded+added;layout->slots=module_slot_count(m)+added;
+	layout->functions=(hl_function*)calloc(layout->count>0?layout->count:1,sizeof(hl_function));
+	layout->indexes=(int*)malloc(sizeof(int)*layout->slots);
+	if(!layout->functions||!layout->indexes){free(layout->functions);free(layout->indexes);layout->functions=NULL;layout->indexes=NULL;*error="Out of memory applying patch";return false;}
+	memcpy(layout->functions,m->code->functions,sizeof(hl_function)*loaded);
+	memcpy(layout->indexes,m->functions_indexes,sizeof(int)*module_slot_count(m));
+	for(int i=0;i<added;i++){
+		hl_function *f=layout->functions+loaded+i;
+		f->type=m->code->types+patch->added_functions[i].type;f->findex=patch->added_functions[i].findex;
+		layout->indexes[f->findex]=loaded+i;
+	}
+	for(int i=0;i<m->code->nnatives;i++)layout->indexes[m->code->natives[i].findex]=layout->count+i;
+	return true;
+}
+
+/* Records the functions a committed patch added, so later patches and lookups see them as the module's own. */
+static void publish_added_functions( hl_module *m, hl_patch *patch ) {
+	for(int i=0;i<patch->added_function_count;i++){
+		hl_patch_added_function *a=patch->added_functions+i;
+		int at=m->code->nfunctions+m->code->npatchfunctions,length=(int)strlen(a->name);
+		hl_function *f=m->code->functions+at;
+		memset(f,0,sizeof(*f));f->type=m->code->types+a->type;f->findex=a->findex;
+		m->code->function_stable_ids[at]=a->stable_id;
+		m->code->function_names[at]=(char*)hl_malloc(&m->code->alloc,length+1);
+		memcpy(m->code->function_names[at],a->name,length+1);
+		m->code->function_names_lens[at]=length;
+		m->functions_indexes[a->findex]=at;
+		m->ctx.functions_types[a->findex]=f->type;
+		m->code->npatchfunctions++;
+	}
+}
+
+/* Undoes what staging wrote into the module's unused entries for added functions. */
+static void unstage_added_functions( hl_module *m, hl_patch *patch ) {
+	int loaded=m->code->nfunctions+m->code->npatchfunctions;
+	for(int i=0;i<patch->added_function_count;i++){
+		m->code->function_names[loaded+i]=NULL;m->code->function_names_lens[loaded+i]=0;
+		m->ctx.functions_types[patch->added_functions[i].findex]=NULL;
+	}
+}
+
 static bool inject_patch_failure( hl_module *m, int stage, const char **error ) {
 	if(m->patch_failure_stage!=stage)return false;
 	m->patch_failure_stage=0;*error="Injected patch staging failure";return true;
@@ -675,14 +765,16 @@ static bool stage_patch_types( hl_module *m, hl_patch *patch, uchar **strings, v
 }
 
 h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_msg ) {
-	const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;hl_code code;hl_module temp;
+	const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;hl_code code;hl_module temp;patch_layout layout={0};bool staged_added=false;
 	if(!m||!patch||!m->patchable){error="Module is not patchable";goto fail;}
 	if(patch->function_count<=0){error="Patch contains no functions";goto fail;}
 	if(m->revision!=patch->base_revision||patch->revision<=patch->base_revision){error="Stale patch revision";goto fail;}
 	if(patch->base_int_count!=m->code->nints||patch->base_float_count!=m->code->nfloats||patch->base_string_count!=m->code->nstrings||patch->base_type_count!=m->code->ntypes){error="Patch symbol base does not match module";goto fail;}
 	if(patch->int_prefix_hash!=hash_int_prefix(m->code,patch->base_int_count)||patch->float_prefix_hash!=hash_float_prefix(m->code,patch->base_float_count)||patch->string_prefix_hash!=hash_string_prefix(m->code,patch->base_string_count)||patch->type_prefix_hash!=hash_type_prefix(m,patch->base_type_count)){error="Patch symbol prefix hash does not match module";goto fail;}
 	if(!validate_patch_types(m,patch,patch->base_string_count+patch->string_count,&error))goto fail;
-	for(int i=0;i<patch->function_count;i++){for(int j=0;j<i;j++)if(patch->functions[j].findex==patch->functions[i].findex){error="Duplicate stable function slot";goto fail;}if(!validate_function(m,patch,patch->functions+i,&error))goto fail;}
+	if(!stage_patch_layout(m,patch,&layout,&error))goto fail;
+	combined_functions=layout.functions; // owned through combined_functions from here
+	for(int i=0;i<patch->function_count;i++){for(int j=0;j<i;j++)if(patch->functions[j].findex==patch->functions[i].findex){error="Duplicate stable function slot";goto fail;}if(!validate_function(m,patch,&layout,patch->functions+i,&error))goto fail;}
 	combined_ints=(int*)malloc(sizeof(int)*(patch->base_int_count+patch->int_count));if(!combined_ints){error="Out of memory applying patch";goto fail;}memcpy(combined_ints,m->code->ints,sizeof(int)*patch->base_int_count);memcpy(combined_ints+patch->base_int_count,patch->ints,sizeof(int)*patch->int_count);
 	combined_floats=(double*)malloc(sizeof(double)*(patch->base_float_count+patch->float_count));if(!combined_floats){error="Out of memory applying patch";goto fail;}memcpy(combined_floats,m->code->floats,sizeof(double)*patch->base_float_count);memcpy(combined_floats+patch->base_float_count,patch->floats,sizeof(double)*patch->float_count);
 	{int total=patch->base_string_count+patch->string_count,bytes=0,pos=0;for(int i=0;i<patch->base_string_count;i++)bytes+=m->code->strings_lens[i]+1;for(int i=0;i<patch->string_count;i++)bytes+=patch->string_lens[i]+1;combined_strings=(char**)malloc(sizeof(char*)*total);combined_string_lens=(int*)malloc(sizeof(int)*total);combined_ustrings=(uchar**)calloc(total,sizeof(uchar*));combined_string_data=(char*)malloc(bytes);if((total>0)&&(!combined_strings||!combined_string_lens||!combined_ustrings||!combined_string_data)){error="Out of memory applying patch";goto fail;}for(int i=0;i<total;i++){const char *src;int length;if(i<patch->base_string_count){src=m->code->strings[i];length=m->code->strings_lens[i];combined_ustrings[i]=(uchar*)hl_get_ustring(m->code,i);}else{src=patch->strings[i-patch->base_string_count];length=patch->string_lens[i-patch->base_string_count];int usize=hl_utf8_length((vbyte*)src,0);combined_ustrings[i]=(uchar*)malloc((usize+1)*sizeof(uchar));if(!combined_ustrings[i]){error="Out of memory applying patch";goto fail;}hl_from_utf8(combined_ustrings[i],usize,src);}combined_strings[i]=combined_string_data+pos;combined_string_lens[i]=length;memcpy(combined_string_data+pos,src,length);combined_string_data[pos+length]=0;pos+=length+1;}}
@@ -697,20 +789,24 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	for(int i=0;i<patch->source_snapshot_count;i++){allocation->source_snapshots[i]=patch->source_snapshots[i];allocation->source_snapshots[i].content=(unsigned char*)malloc(patch->source_snapshots[i].length);if(patch->source_snapshots[i].length&&!allocation->source_snapshots[i].content){error="Out of memory applying source snapshot";goto fail;}memcpy(allocation->source_snapshots[i].content,patch->source_snapshots[i].content,patch->source_snapshots[i].length);}
 	allocation->function_count=patch->function_count;allocation->functions=(hl_function*)calloc(patch->function_count,sizeof(hl_function));allocation->debug_spans=(hl_source_span**)calloc(patch->function_count,sizeof(hl_source_span*));
 	offsets=(int*)calloc(patch->function_count,sizeof(int));if(!allocation->functions||!allocation->debug_spans||!offsets){error="Out of memory applying patch";goto fail;}
-	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;hl_function *live;dst->type=m->code->types+src->type;dst->findex=src->findex;live=find_live_function(m,dst->findex);if(live){dst->obj=live->obj;dst->field=live->field;dst->ref=live->ref;}dst->nregs=src->register_count;dst->nops=src->instruction_count;dst->regs=(hl_type**)calloc(dst->nregs,sizeof(hl_type*));dst->ops=(hl_opcode*)calloc(dst->nops,sizeof(hl_opcode));if(!dst->regs||!dst->ops){error="Out of memory applying patch";goto fail;}for(int j=0;j<dst->nregs;j++)dst->regs[j]=m->code->types+src->registers[j];for(int j=0;j<dst->nops;j++){hl_patch_instruction *s=src->instructions+j;hl_opcode *d=dst->ops+j;d->op=(hl_op)s->opcode;if(s->operand_count>0)d->p1=s->operands[0];if(s->operand_count>1)d->p2=s->operands[1];if(s->operand_count>2)d->p3=s->operands[2];if(s->operand_count==4&&d->op!=OCallN&&d->op!=OCallMethod&&d->op!=OCallThis&&d->op!=OCallClosure&&d->op!=OMakeEnum)d->extra=(int*)(int_val)s->operands[3];if(s->operand_count>3&&(d->op==OCall3||d->op==OCall4||d->op==OCallN||d->op==OCallMethod||d->op==OCallThis||d->op==OCallClosure||d->op==OMakeEnum)){int count=d->op==OCall3?2:d->op==OCall4?3:s->operand_count-3;d->extra=(int*)malloc(sizeof(int)*count);if(!d->extra){error="Out of memory applying patch";goto fail;}memcpy(d->extra,s->operands+3,sizeof(int)*count);}}}
+	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;hl_function *live;dst->type=m->code->types+src->type;dst->findex=src->findex;live=combined_functions+layout.indexes[dst->findex];if(live){dst->obj=live->obj;dst->field=live->field;dst->ref=live->ref;}dst->nregs=src->register_count;dst->nops=src->instruction_count;dst->regs=(hl_type**)calloc(dst->nregs,sizeof(hl_type*));dst->ops=(hl_opcode*)calloc(dst->nops,sizeof(hl_opcode));if(!dst->regs||!dst->ops){error="Out of memory applying patch";goto fail;}for(int j=0;j<dst->nregs;j++)dst->regs[j]=m->code->types+src->registers[j];for(int j=0;j<dst->nops;j++){hl_patch_instruction *s=src->instructions+j;hl_opcode *d=dst->ops+j;d->op=(hl_op)s->opcode;if(s->operand_count>0)d->p1=s->operands[0];if(s->operand_count>1)d->p2=s->operands[1];if(s->operand_count>2)d->p3=s->operands[2];if(s->operand_count==4&&d->op!=OCallN&&d->op!=OCallMethod&&d->op!=OCallThis&&d->op!=OCallClosure&&d->op!=OMakeEnum)d->extra=(int*)(int_val)s->operands[3];if(s->operand_count>3&&(d->op==OCall3||d->op==OCall4||d->op==OCallN||d->op==OCallMethod||d->op==OCallThis||d->op==OCallClosure||d->op==OMakeEnum)){int count=d->op==OCall3?2:d->op==OCall4?3:s->operand_count-3;d->extra=(int*)malloc(sizeof(int)*count);if(!d->extra){error="Out of memory applying patch";goto fail;}memcpy(d->extra,s->operands+3,sizeof(int)*count);}}}
 	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;if(src->debug_count){dst->debug=(int*)calloc(src->debug_count*2,sizeof(int));allocation->debug_spans[i]=(hl_source_span*)calloc(src->debug_count,sizeof(hl_source_span));if(!dst->debug||!allocation->debug_spans[i]){error="Out of memory applying patch debug metadata";goto fail;}for(int j=0;j<src->debug_count;j++){hl_source_span span=src->debug_spans[j];int file=find_debug_file(m->code,patch->debug_files[span.file],patch->debug_file_lens[span.file]);if(file<0){error="Patch debug file is not present in module";goto fail;}span.file=file;dst->debug[j*2]=file;dst->debug[j*2+1]=span.line;allocation->debug_spans[i][j]=span;}}}
-	combined_functions=(hl_function*)calloc(m->code->nfunctions,sizeof(hl_function));
-	if(!combined_functions){error="Out of memory applying patch";goto fail;}
-	memcpy(combined_functions,m->code->functions,sizeof(hl_function)*m->code->nfunctions);
 	for(int i=0;i<patch->function_count;i++) {
-		int function_index=m->functions_indexes[allocation->functions[i].findex];
-		if(function_index<0||function_index>=m->code->nfunctions){error="Invalid patch function slot";goto fail;}
+		int function_index=layout.indexes[allocation->functions[i].findex];
+		if(function_index<0||function_index>=layout.count){error="Invalid patch function slot";goto fail;}
 		combined_functions[function_index]=allocation->functions[i];
 	}
-	memset(&code,0,sizeof(code));code.nints=patch->base_int_count+patch->int_count;code.ints=combined_ints;code.nfloats=patch->base_float_count+patch->float_count;code.floats=combined_floats;code.nstrings=patch->base_string_count+patch->string_count;code.strings=combined_strings;code.strings_lens=combined_string_lens;code.ustrings=combined_ustrings;code.ntypes=patch->base_type_count+patch->type_count;code.types_capacity=m->code->types_capacity;code.types=m->code->types;code.nfunctions=m->code->nfunctions;code.nnatives=m->code->nnatives;code.natives=m->code->natives;code.functions=combined_functions;code.function_names=m->code->function_names;code.function_names_lens=m->code->function_names_lens;code.hasdebug=m->code->hasdebug;code.ndebugfiles=m->code->ndebugfiles;code.debugfiles=m->code->debugfiles;code.debugfiles_lens=m->code->debugfiles_lens;code.alloc=m->code->alloc;
-	temp=*m;temp.code=&code;temp.jit_code=NULL;temp.jit_debug=NULL;temp.jit_ctx=NULL;temp.staging_patch=true;
+	// The JIT reads the added functions' names and types by slot; those entries are unused until the patch commits.
+	staged_added=true;
+	for(int i=0;i<patch->added_function_count;i++){
+		int at=m->code->nfunctions+m->code->npatchfunctions+i;
+		m->code->function_names[at]=patch->added_functions[i].name;m->code->function_names_lens[at]=(int)strlen(patch->added_functions[i].name);
+		m->ctx.functions_types[patch->added_functions[i].findex]=combined_functions[at].type;
+	}
+	memset(&code,0,sizeof(code));code.nints=patch->base_int_count+patch->int_count;code.ints=combined_ints;code.nfloats=patch->base_float_count+patch->float_count;code.floats=combined_floats;code.nstrings=patch->base_string_count+patch->string_count;code.strings=combined_strings;code.strings_lens=combined_string_lens;code.ustrings=combined_ustrings;code.ntypes=patch->base_type_count+patch->type_count;code.types_capacity=m->code->types_capacity;code.types=m->code->types;code.nfunctions=layout.count;code.functions_capacity=m->code->functions_capacity;code.nnatives=m->code->nnatives;code.natives=m->code->natives;code.functions=combined_functions;code.function_names=m->code->function_names;code.function_names_lens=m->code->function_names_lens;code.hasdebug=m->code->hasdebug;code.ndebugfiles=m->code->ndebugfiles;code.debugfiles=m->code->debugfiles;code.debugfiles_lens=m->code->debugfiles_lens;code.alloc=m->code->alloc;
+	temp=*m;temp.code=&code;temp.functions_indexes=layout.indexes;temp.jit_code=NULL;temp.jit_debug=NULL;temp.jit_ctx=NULL;temp.staging_patch=true;
 	jit=hl_jit_alloc();if(!jit){error="Could not allocate patch JIT";goto fail;}hl_jit_init(jit,&temp);
-	for(int i=0;i<patch->function_count;i++){int function_index=m->functions_indexes[allocation->functions[i].findex];offsets[i]=hl_jit_function(jit,&temp,combined_functions+function_index);if(offsets[i]<0){error="Could not JIT patch function";goto fail;}}
+	for(int i=0;i<patch->function_count;i++){int function_index=layout.indexes[allocation->functions[i].findex];offsets[i]=hl_jit_function(jit,&temp,combined_functions+function_index);if(offsets[i]<0){error="Could not JIT patch function";goto fail;}}
 	allocation->code=hl_jit_patch_code(jit,&temp,&allocation->code_size,&temp.jit_debug);allocation->jit_debug=temp.jit_debug;allocation->jit_debug_count=code.nfunctions;temp.jit_debug=NULL;if(!allocation->code){error="Could not finalize patch JIT";goto fail;}hl_jit_free(jit,false);jit=NULL;
 	if(inject_patch_failure(m,3,&error))goto fail;
 	temp.jit_code=allocation->code;temp.codesize=allocation->code_size;temp.jit_debug=allocation->jit_debug;temp.gdb_jit_entry=NULL;hl_gdb_jit_register_patch(&temp);allocation->gdb_jit_entry=temp.gdb_jit_entry;free(combined_functions);combined_functions=NULL;
@@ -719,7 +815,9 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	free(type_allocations);type_allocations=NULL;type_allocation_count=0;for(int i=m->code->ntypes;i<code.ntypes;i++)m->code->types[i].gc_owner=m;m->code->ntypes=code.ntypes;
 	if(m->patch_lo==NULL||allocation->code<m->patch_lo)m->patch_lo=allocation->code;
 	if(m->patch_hi==NULL||(void*)((unsigned char*)allocation->code+allocation->code_size)>m->patch_hi)m->patch_hi=(unsigned char*)allocation->code+allocation->code_size;
-	for(int i=0;i<patch->function_count;i++){int slot=allocation->functions[i].findex;hl_patch_code *old=m->patch_owners[slot];void *target=(unsigned char*)allocation->code+offsets[i];if(m->patch_targets){if(old==NULL)hl_jit_patch_method(m->patch_targets[slot],m->patch_targets+slot);m->patch_targets[slot]=target;}else{hl_jit_patch_method(m->functions_ptrs[slot],m->functions_ptrs+slot);m->functions_ptrs[slot]=target;}m->patch_owners[slot]=allocation;allocation->references++;if(old&&--old->references==0){if(m->patch_targets)patch_code_free(old);else{old->next_retired=m->retired_patch_code;m->retired_patch_code=old;}}}
+	for(int i=0;i<patch->function_count;i++){int slot=allocation->functions[i].findex;hl_patch_code *old=m->patch_owners[slot];void *target=(unsigned char*)allocation->code+offsets[i];if(m->patch_targets){if(old==NULL&&m->patch_targets[slot]!=NULL)hl_jit_patch_method(m->patch_targets[slot],m->patch_targets+slot);m->patch_targets[slot]=target;}else{hl_jit_patch_method(m->functions_ptrs[slot],m->functions_ptrs+slot);m->functions_ptrs[slot]=target;}m->patch_owners[slot]=allocation;allocation->references++;if(old&&--old->references==0){if(m->patch_targets)patch_code_free(old);else{old->next_retired=m->retired_patch_code;m->retired_patch_code=old;}}}
+	publish_added_functions(m,patch);staged_added=false;
+	free(layout.indexes);layout.indexes=NULL;
 	if(m->patch_ustrings==NULL)m->patch_initial_string_count=patch->base_string_count;
 	free(m->patch_ints);free(m->patch_floats);free(m->patch_strings);free(m->patch_string_lens);free(m->patch_ustrings);free(m->patch_string_data);
 	m->patch_ints=combined_ints;m->patch_floats=combined_floats;m->patch_strings=combined_strings;m->patch_string_lens=combined_string_lens;m->patch_ustrings=combined_ustrings;m->patch_string_data=combined_string_data;
@@ -728,6 +826,8 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	m->revision=patch->revision;m->patch_jit_count+=patch->function_count;free(offsets);if(error_msg)*error_msg=NULL;return true;
 fail:
 	if(jit) hl_jit_free(jit,false);
+	if(staged_added) unstage_added_functions(m,patch);
+	free(layout.indexes);
 	free(combined_functions);
 	free(offsets);
 	free(combined_ints);

@@ -91,6 +91,8 @@ typedef struct {
 
 /* Extra contiguous type slots reserved at load time for non-moving patch metadata. */
 #define HL_PATCH_TYPE_RESERVE 65536
+/* Function slots reserved at load time for functions that patches add. */
+#define HL_PATCH_FUNCTION_RESERVE 4096
 
 typedef struct {
 	int version;
@@ -103,6 +105,10 @@ typedef struct {
 	int nglobals;
 	int nnatives;
 	int nfunctions;
+	/* Functions added by patches follow the loaded ones in `functions` and the tables beside it; their slots follow the
+	   natives. `nfunctions` stays the count compiled at load, which the module's own JIT tables are sized by. */
+	int npatchfunctions;
+	int functions_capacity;
 	int nconstants;
 	int ndebugsections;
 	int entrypoint;
@@ -177,6 +183,13 @@ typedef struct {
 } hl_patch_function;
 
 typedef struct {
+	int stable_id;
+	int findex;
+	int type;
+	char *name;
+} hl_patch_added_function;
+
+typedef struct {
 	unsigned char module_id[16];
 	int base_revision;
 	int revision;
@@ -196,6 +209,8 @@ typedef struct {
 	hl_patch_type *types;
 	int function_count;
 	hl_patch_function *functions;
+	int added_function_count;
+	hl_patch_added_function *added_functions;
 	int debug_file_count;
 	char **debug_files;
 	int *debug_file_lens;

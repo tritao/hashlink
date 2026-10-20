@@ -129,7 +129,7 @@ hl_runtime_status hl_runtime_module_validate_call( hl_runtime_module *runtime, i
 
 static hl_function *find_function( hl_module *module, int stable_id ) {
 	int i;
-	for(i=0;i<module->code->nfunctions;i++)
+	for(i=0;i<module->code->nfunctions+module->code->npatchfunctions;i++)
 		if( module->code->functions[i].findex == stable_id )
 			return module->code->functions + i;
 	return NULL;
@@ -234,14 +234,23 @@ static int resolve_stable_id( hl_runtime_module *runtime, int stable_id ) {
 	return -1;
 }
 
+/* A stable ID as a patch sees it: the module's functions, then the ones the patch adds. */
+static int resolve_patch_stable_id( hl_runtime_module *runtime, hl_patch *patch, int stable_id ) {
+	int slot = resolve_stable_id(runtime,stable_id);
+	for(int i=0;slot<0&&i<patch->added_function_count;i++) if( patch->added_functions[i].stable_id == stable_id ) slot = patch->added_functions[i].findex;
+	return slot;
+}
+
 const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id ) {
 	int slot;
-	void *address;
+	void *address = NULL;
 	if( runtime == NULL ) return NULL;
+	// A patch that adds functions reallocates the identity tables under the lock.
+	hl_mutex_acquire(runtime->lock);
 	slot = resolve_stable_id(runtime,stable_id);
-	if( slot < 0 ) return NULL;
-	address = runtime->module->patch_targets ? runtime->module->patch_targets[slot] : runtime->module->functions_ptrs[slot];
-	return hl_module_resolve_jit_location(address);
+	if( slot >= 0 ) address = runtime->module->patch_targets ? runtime->module->patch_targets[slot] : runtime->module->functions_ptrs[slot];
+	hl_mutex_release(runtime->lock);
+	return address == NULL ? NULL : hl_module_resolve_jit_location(address);
 }
 
 int hl_runtime_module_debug_region_count( hl_runtime_module *runtime ) {
@@ -411,19 +420,36 @@ hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const
 	if( memcmp(runtime->module_id,patch->module_id,16) != 0 ) {
 		hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE;
 	}
+	// Added functions bring new stable IDs, in the slots the module applies them to. Make room for their identities now,
+	// so nothing can fail once the module has taken the patch.
+	for(int i=0;i<patch->added_function_count;i++)
+		if( resolve_stable_id(runtime,patch->added_functions[i].stable_id) >= 0 ) { hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE; }
+	if( patch->added_function_count > 0 ) {
+		int capacity = runtime->identity_count + patch->added_function_count;
+		int *stable_ids = (int*)realloc(runtime->stable_ids,sizeof(int) * capacity);
+		if( stable_ids != NULL ) runtime->stable_ids = stable_ids;
+		int *slots = stable_ids == NULL ? NULL : (int*)realloc(runtime->slots,sizeof(int) * capacity);
+		if( slots != NULL ) runtime->slots = slots;
+		if( stable_ids == NULL || slots == NULL ) { hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_JIT_FAILED; }
+	}
 	for(int i=0;i<patch->function_count;i++) {
-		int slot = resolve_stable_id(runtime,patch->functions[i].stable_id);
+		int slot = resolve_patch_stable_id(runtime,patch,patch->functions[i].stable_id);
 		if( slot < 0 ) { hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE; }
 		patch->functions[i].findex = slot;
 		for(int j=0;j<patch->functions[i].relocation_count;j++) {
 			int instruction=patch->functions[i].relocation_instructions[j];
-			int target=resolve_stable_id(runtime,patch->functions[i].relocation_stable_ids[j]);
+			int target=resolve_patch_stable_id(runtime,patch,patch->functions[i].relocation_stable_ids[j]);
 			int opcode=instruction<0||instruction>=patch->functions[i].instruction_count?-1:patch->functions[i].instructions[instruction].opcode;
 			if(target<0||(opcode!=OCall0&&opcode!=OCall1&&opcode!=OCall2&&opcode!=OCallN&&opcode!=OStaticClosure&&opcode!=OInstanceClosure)){hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE;}
 			patch->functions[i].instructions[instruction].operands[1]=target;
 		}
 	}
 	applied = hl_module_apply_patch(runtime->module,patch,&error);
+	if( applied )
+		for(int i=0;i<patch->added_function_count;i++) {
+			runtime->stable_ids[runtime->identity_count] = patch->added_functions[i].stable_id;
+			runtime->slots[runtime->identity_count++] = patch->added_functions[i].findex;
+		}
 	hl_patch_free(patch);
 	hl_mutex_release(runtime->lock);
 	if( applied ) {

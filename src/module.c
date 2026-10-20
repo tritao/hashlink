@@ -625,6 +625,11 @@ static void hl_module_types_dump( void (*fdump)( void *, int) ) {
 	hl_module_registry_snapshot_free(modules,module_count);
 }
 
+/* Function slots: the loaded functions and natives, then the slots reserved for functions that patches add. */
+static int module_slot_capacity( hl_code *c ) {
+	return (c->functions_capacity > c->nfunctions ? c->functions_capacity : c->nfunctions) + c->nnatives;
+}
+
 hl_module *hl_module_alloc( hl_code *c ) {
 	int i;
 	int gsize = 0;
@@ -651,17 +656,15 @@ hl_module *hl_module_alloc( hl_code *c ) {
 	}
 	memset(m->globals_data,0,gsize);
 	m->native_noreturn = (unsigned char*)calloc(c->nnatives ? c->nnatives : 1,1);
-	m->functions_ptrs = (void**)malloc(sizeof(void*)*(c->nfunctions + c->nnatives));
-	m->patch_owners = (hl_patch_code**)calloc(c->nfunctions + c->nnatives,sizeof(hl_patch_code*));
-	m->functions_indexes = (int*)malloc(sizeof(int)*(c->nfunctions + c->nnatives));
-	m->ctx.functions_types = (hl_type**)malloc(sizeof(void*)*(c->nfunctions + c->nnatives));
+	m->functions_ptrs = (void**)calloc(module_slot_capacity(c),sizeof(void*));
+	m->patch_owners = (hl_patch_code**)calloc(module_slot_capacity(c),sizeof(hl_patch_code*));
+	m->functions_indexes = (int*)malloc(sizeof(int)*module_slot_capacity(c));
+	m->ctx.functions_types = (hl_type**)calloc(module_slot_capacity(c),sizeof(void*));
 	if( m->native_noreturn == NULL || m->functions_ptrs == NULL || m->functions_indexes == NULL || m->ctx.functions_types == NULL || m->patch_owners == NULL ) {
 		hl_module_free_shutdown(m);
 		return NULL;
 	}
-	memset(m->functions_ptrs,0,sizeof(void*)*(c->nfunctions + c->nnatives));
-	memset(m->functions_indexes,0xFF,sizeof(int)*(c->nfunctions + c->nnatives));
-	memset(m->ctx.functions_types,0,sizeof(void*)*(c->nfunctions + c->nnatives));
+	memset(m->functions_indexes,0xFF,sizeof(int)*module_slot_capacity(c));
 	hl_alloc_init(&m->ctx.alloc);
 	m->ctx.functions_ptrs = m->functions_ptrs;
 	m->revision = 1;
@@ -673,7 +676,7 @@ static void null_function() {
 }
 
 static bool module_init_patch_entries( hl_module *m ) {
-	int count = m->code->nfunctions + m->code->nnatives;
+	int count = module_slot_capacity(m->code);
 	int stride = HL_JIT_PATCH_ENTRY_STRIDE;
 	m->patch_targets = (void**)calloc(count,sizeof(void*));
 	m->patch_entry_code_size = count * stride;
@@ -687,6 +690,12 @@ static bool module_init_patch_entries( hl_module *m ) {
 		void *target = m->functions_ptrs[slot];
 		void *entry = (unsigned char*)m->patch_entry_code + slot * stride;
 		m->patch_targets[slot] = target;
+		hl_jit_patch_method(entry,m->patch_targets + slot);
+		m->functions_ptrs[slot] = entry;
+	}
+	// Slots for functions a patch adds get their entries now, so code can call them once the patch publishes a target.
+	for(int slot=m->code->nfunctions+m->code->nnatives;slot<count;slot++) {
+		void *entry = (unsigned char*)m->patch_entry_code + slot * stride;
 		hl_jit_patch_method(entry,m->patch_targets + slot);
 		m->functions_ptrs[slot] = entry;
 	}
