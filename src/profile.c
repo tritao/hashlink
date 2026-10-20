@@ -89,6 +89,15 @@ struct _thread_handle {
 	thread_handle *next;
 };
 
+/* The thread that set the profiler up, named "main" in captures unless the program names it. */
+static int profile_main_tid = 0;
+/*
+ * The in-memory record behind hlprofile.dump is kept for "hl --profile" only. A diagnostics client reads the sample stream
+ * instead, and recording it again would grow without bound and leave a dump in the program's working directory.
+ */
+static bool profile_legacy_record = false;
+static bool profile_configuring_stream = false;
+
 struct _profile_data {
 	int currentPos;
 	int dataSize;
@@ -422,6 +431,7 @@ static bool pause_thread( thread_handle *t, bool b ) {
 
 static void record_data( void *ptr, int size ) {
 	profile_data *r = data.record;
+	if( !profile_legacy_record ) return;
 	if( !r || r->currentPos + size > r->dataSize ) {
 		r = malloc(sizeof(profile_data));
 		r->currentPos = 0;
@@ -524,8 +534,8 @@ static void read_thread_data( thread_handle *t ) {
 	record_data(&t->tid,sizeof(int));
 	record_data(&eventId,sizeof(int));
 	record_data(data.stackOut,sizeof(void*)*count);
-	if( *t->inf->thread_name && !*t->name ) {
-		memcpy(t->name, t->inf->thread_name, sizeof(t->name));
+	if( !*t->name && (*t->inf->thread_name || t->tid == profile_main_tid) ) {
+		if( *t->inf->thread_name ) memcpy(t->name, t->inf->thread_name, sizeof(t->name)); else strcpy(t->name, "main");
 		stream_record(PROFILE_STREAM_EVENT,0,hl_sys_time(),t->tid,PROFILE_EVENT_THREAD_NAME,t->name,(unsigned int)strlen(t->name));
 	}
 	sampling_cost.samples++;
@@ -717,6 +727,7 @@ void hl_profile_setup( int sample_count ) {
 		hl_add_root(&data.waitCond);
 	}
 	hl_setup.profile_event = profile_event;
+	if( !profile_main_tid && hl_get_thread() ) profile_main_tid = hl_get_thread()->thread_id;
 	hl_setup.before_exit = hl_profile_end;
 	hl_setup.stop_profiler = hl_profile_end;
 	if( data.sample_count ) return;
@@ -726,6 +737,7 @@ void hl_profile_setup( int sample_count ) {
 		return;
 	}
 	data.sample_count = sample_count;
+	if( !profile_configuring_stream ) profile_legacy_record = true;
 #	ifdef HL_LINUX
 	sem_init(&shared_context.msg2, 0, 0);
 	sem_init(&shared_context.msg3, 0, 0);
@@ -799,7 +811,11 @@ unsigned int hl_profile_stream_read( unsigned long long cursor, void *output, un
 bool hl_profile_stream_configure( int sample_rate, bool enabled ) {
 	if( sample_rate <= 0 || sample_rate > 100000 ) return false;
 	if( enabled ) {
-		if( !data.sample_count ) hl_profile_setup(sample_rate);
+		if( !data.sample_count ) {
+			profile_configuring_stream = true;
+			hl_profile_setup(sample_rate);
+			profile_configuring_stream = false;
+		}
 		data.sample_count = sample_rate;
 		if( stream.lock ) {
 			hl_mutex_acquire(stream.lock);
