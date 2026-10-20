@@ -476,16 +476,69 @@ static bool valid_function_target( hl_module *m, int index ) {
 		&& m->functions_indexes[index] >= 0 && m->functions_indexes[index] < m->code->nfunctions;
 }
 
+// The JIT keeps at most this many try regions open (jit_emit.c MAX_TRAPS).
+#define PATCH_MAX_TRAPS 32
+
+// Trap depth is a property of each control-flow path, not of instruction order: every exit from a try body
+// (fallthrough, return, break, continue) carries its own end-trap, and handlers may be laid out anywhere.
+// Walk the branches, require each instruction to be reached at one depth, and require returns outside traps.
+// The JIT, though, tracks traps in instruction order: an OTrap opens a region that closes at its handler, an
+// OEndTrap outside every region aborts the process, and stores write through for the catch only inside a region.
+// So each reachable instruction must also lie inside at least as many regions as traps are active on its paths.
+static bool validate_traps( hl_patch_function *f, const char **error ) {
+	int n=f->instruction_count, top=0, open=0, targets[PATCH_MAX_TRAPS];
+	int *depth=(int*)malloc(sizeof(int)*(n>0?n:1)), *pending=(int*)malloc(sizeof(int)*(n>0?n:1)), *regions=(int*)malloc(sizeof(int)*(n>0?n:1));
+	bool ok=true;
+	if(!depth||!pending||!regions){free(depth);free(pending);free(regions);*error="Out of memory validating patch traps";return false;}
+	// The JIT closes one region per instruction, the innermost, when it reaches that region's handler.
+	for(int i=0;ok&&i<n;i++){
+		if(open>0&&targets[open-1]==i)open--;
+		regions[i]=open;
+		if(f->instructions[i].opcode==OTrap){
+			if(open==PATCH_MAX_TRAPS){*error="Too many nested patch traps";ok=false;break;}
+			targets[open++]=i+1+f->instructions[i].operands[1];
+		}
+	}
+	for(int i=0;i<n;i++)depth[i]=-1;
+	if(n>0){depth[0]=0;pending[top++]=0;}
+	while(ok&&top>0){
+		int i=pending[--top],d=depth[i],next[2],next_depth[2],count=0;
+		hl_patch_instruction *op=f->instructions+i;int *p=op->operands;
+		if(regions[i]<d){*error="Patch trap outside its try region";ok=false;break;}
+		switch(op->opcode){
+		case OJTrue:case OJFalse:case OJNull:case OJNotNull:
+			next[count]=i+1+p[1];next_depth[count++]=d;next[count]=i+1;next_depth[count++]=d;break;
+		case OJSLt:case OJSGte:case OJSGt:case OJSLte:case OJULt:case OJUGte:case OJNotLt:case OJNotGte:case OJEq:case OJNotEq:
+			next[count]=i+1+p[2];next_depth[count++]=d;next[count]=i+1;next_depth[count++]=d;break;
+		case OJAlways:next[count]=i+1+p[0];next_depth[count++]=d;break;
+		case ORet:if(d!=0){*error="Unbalanced patch traps";ok=false;}break;
+		case OThrow:case ORethrow:break;
+		case OTrap:
+			if(d==PATCH_MAX_TRAPS){*error="Too many nested patch traps";ok=false;break;}
+			next[count]=i+1+p[1];next_depth[count++]=d;next[count]=i+1;next_depth[count++]=d+1;break;
+		case OEndTrap:
+			if(d==0){*error="Invalid end-trap operands";ok=false;break;}
+			next[count]=i+1;next_depth[count++]=d-1;break;
+		default:next[count]=i+1;next_depth[count++]=d;break;
+		}
+		for(int k=0;ok&&k<count;k++){
+			if(next[k]>=n)continue;
+			if(depth[next[k]]<0){depth[next[k]]=next_depth[k];pending[top++]=next[k];}
+			else if(depth[next[k]]!=next_depth[k]){*error="Inconsistent patch trap depth";ok=false;}
+		}
+	}
+	free(depth);free(pending);free(regions);
+	return ok;
+}
+
 static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function *f, const char **error ) {
 	hl_function *live=find_live_function(m,f->findex);
-	int trap_depth=0, trap_targets[256];
 	int type_count=patch->base_type_count+patch->type_count;
 	if(!live){*error="Unknown stable function slot";return false;}
 	if(f->type<0||f->type>=type_count||live->type!=m->code->types+f->type){*error="Patch function signature changed";return false;}
 	for(int i=0;i<f->register_count;i++)if(f->registers[i]<0||f->registers[i]>=type_count){*error="Invalid patch register type";return false;}
 	for(int i=0;i<f->instruction_count;i++){
 		hl_patch_instruction *op=f->instructions+i;int *p=op->operands;
-		while(trap_depth>0&&trap_targets[trap_depth-1]==i)trap_depth--;
 		switch(op->opcode){
 		case OLabel:break;
 		case OMov:if(!valid_reg(f,p[0])||!valid_reg(f,p[1])){*error="Invalid move operands";return false;}break;
@@ -565,18 +618,15 @@ static bool validate_function( hl_module *m, hl_patch *patch, hl_patch_function 
 		case ORet:if(!valid_reg(f,p[0])){*error="Invalid return register";return false;}break;
 		case OThrow:case ORethrow:if(!valid_reg(f,p[0])){*error="Invalid throw register";return false;}break;
 		case OTrap:
-			if(!valid_reg(f,p[0])||p[1]<0||i+1+p[1]>=f->instruction_count||trap_depth==256){*error="Invalid trap operands";return false;}
-			trap_targets[trap_depth++]=i+1+p[1];
+			if(!valid_reg(f,p[0])||p[1]<0||i+1+p[1]>=f->instruction_count){*error="Invalid trap operands";return false;}
 			break;
 		case OEndTrap:
-			if(!valid_reg(f,p[0])||trap_depth==0){*error="Invalid end-trap operands";return false;}
-			trap_depth--;
+			if(!valid_reg(f,p[0])){*error="Invalid end-trap operands";return false;}
 			break;
 		default:*error="Unsupported patch opcode";return false;
 		}
 	}
-	if(trap_depth!=0){*error="Unbalanced patch traps";return false;}
-	return true;
+	return validate_traps(f,error);
 }
 
 static bool validate_patch_types( hl_module *m, hl_patch *patch, int string_count, const char **error ) {
