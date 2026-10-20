@@ -1231,6 +1231,7 @@ static void profile_event( int code, vbyte *ptr, int dataLen ) {
 		break;
 	case PROFILE_EVENT_SPAN_BEGIN:
 	case PROFILE_EVENT_SPAN_END:
+	case PROFILE_EVENT_COUNTER:
 		if( data.profiling_pause ) return;
 		stream_record(PROFILE_STREAM_EVENT,0,hl_sys_time(),hl_get_thread()->thread_id,code,ptr,dataLen);
 		break;

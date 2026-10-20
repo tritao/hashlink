@@ -14,5 +14,7 @@
 #define PROFILE_EVENT_NATIVE_LOCATION 0x484C0006U
 #define PROFILE_EVENT_SPAN_BEGIN 0x484C1001U
 #define PROFILE_EVENT_SPAN_END 0x484C1002U
+/* A program-defined counter sample: f64 value, then the UTF-8 counter name. Keep haxeon.ProfileCounter in sync. */
+#define PROFILE_EVENT_COUNTER 0x484C1003U
 
 #endif
