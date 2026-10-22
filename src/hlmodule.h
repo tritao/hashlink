@@ -385,6 +385,12 @@ HL_EXTERN_C HL_EXPORT hl_module **hl_module_registry_snapshot( int *count );
 HL_EXTERN_C HL_EXPORT void hl_module_registry_snapshot_free( hl_module **modules, int count );
 /* Resolve a JIT program counter without requiring HLB source debug tables. */
 HL_EXTERN_C HL_EXPORT const char *hl_module_resolve_jit_location( void *addr );
+// Serialize crash readers with module/patch metadata publication.
+HL_EXTERN_C void hl_module_crash_write_lock( void );
+HL_EXTERN_C void hl_module_crash_write_unlock( void );
+#if defined(HL_LINUX) || defined(HL_MAC)
+HL_EXTERN_C HL_EXPORT int hl_module_resolve_crash_location( void *addr, char *buffer, int size );
+#endif
 
 typedef struct _hl_runtime_module hl_runtime_module;
 typedef enum {

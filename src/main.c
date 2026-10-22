@@ -182,6 +182,10 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 #include <signal.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <ucontext.h>
+#ifdef HL_LINUX
+#include <fcntl.h>
+#endif
 
 #define HL_CRASH_STACK_SIZE (64 * 1024)
 
@@ -234,6 +238,64 @@ static const char *signal_name( int signum ) {
 	}
 }
 
+#ifdef HL_LINUX
+static int crash_memory_fd = -1;
+#endif
+
+static void print_crash_frame( void *pc, bool return_address ) {
+	char symbol[768], line[832], *out = line;
+	// Return addresses point just past the call, whereas the interrupted PC names the faulting instruction.
+	int length = hl_module_resolve_crash_location(return_address ? (char*)pc - 1 : pc,symbol,sizeof(symbol));
+	if( length == 0 ) return;
+	out = append_text(out,"  Called from ",14);
+	out = append_text(out,symbol,(size_t)length);
+	*out++ = '\n';
+	ssize_t written = write(STDERR_FILENO,line,(size_t)(out - line));
+	(void)written;
+}
+
+static void print_crash_stack( void *context ) {
+	void *pc = NULL, *sp = NULL, **fp = NULL;
+	ucontext_t *uc = (ucontext_t*)context;
+	hl_thread_info *thread = hl_get_thread();
+	if( uc == NULL ) return;
+#if defined(HL_LINUX) && defined(__x86_64__)
+	pc = (void*)uc->uc_mcontext.gregs[REG_RIP];
+	sp = (void*)uc->uc_mcontext.gregs[REG_RSP];
+	fp = (void**)uc->uc_mcontext.gregs[REG_RBP];
+#elif defined(HL_LINUX) && defined(__aarch64__)
+	pc = (void*)uc->uc_mcontext.pc;
+	sp = (void*)uc->uc_mcontext.sp;
+	fp = (void**)uc->uc_mcontext.regs[29];
+#elif defined(HL_MAC) && defined(__x86_64__)
+	pc = (void*)uc->uc_mcontext->__ss.__rip;
+	sp = (void*)uc->uc_mcontext->__ss.__rsp;
+	fp = (void**)uc->uc_mcontext->__ss.__rbp;
+#elif defined(HL_MAC) && defined(__aarch64__)
+	pc = (void*)uc->uc_mcontext->__ss.__pc;
+	sp = (void*)uc->uc_mcontext->__ss.__sp;
+	fp = (void**)uc->uc_mcontext->__ss.__fp;
+#endif
+	print_crash_frame(pc,false);
+	if( thread == NULL || sp == NULL || thread->stack_top == NULL ) return;
+	// Bound both the walk and each read. /proc/self/mem returns an error for an unmapped
+	// frame instead of recursively faulting, including on the stack guard page.
+	for(int depth=0;depth<128;depth++) {
+		void *record[2];
+		uintptr_t frame = (uintptr_t)fp, top = (uintptr_t)thread->stack_top;
+		if( frame < (uintptr_t)sp || top < sizeof(record) || frame > top - sizeof(record)
+			|| (frame & (sizeof(void*)-1)) != 0 ) break;
+#ifdef HL_LINUX
+		if( crash_memory_fd < 0 || pread(crash_memory_fd,record,sizeof(record),(off_t)frame) != sizeof(record) ) break;
+#else
+		record[0] = fp[0]; record[1] = fp[1];
+#endif
+		print_crash_frame(record[1],true);
+		if( (uintptr_t)record[0] <= frame ) break;
+		fp = (void**)record[0];
+	}
+}
+
 static void handle_signal( int signum, siginfo_t *info, void *context ) {
 	static const char prefix[] = "HashLink fatal error: ";
 	static const char signal_prefix[] = " (signal ";
@@ -244,7 +306,6 @@ static void handle_signal( int signum, siginfo_t *info, void *context ) {
 	static const char core_hint[] = "Inspect a retained core with: coredumpctl debug ";
 #endif
 	char message[256], *out = message;
-	(void)context;
 
 	if( handling_signal ) {
 		raise(signum);
@@ -284,6 +345,7 @@ static void handle_signal( int signum, siginfo_t *info, void *context ) {
 		(void)written;
 	}
 
+	print_crash_stack(context);
 	raise(signum);
 }
 
@@ -306,6 +368,9 @@ static void uninstall_crash_stack() {
 
 static void setup_handler() {
 	struct sigaction act = {0};
+#ifdef HL_LINUX
+	crash_memory_fd = open("/proc/self/mem",O_RDONLY | O_CLOEXEC);
+#endif
 	install_crash_stack();
 	hl_setup.thread_registered = install_crash_stack;
 	hl_setup.thread_unregistered = uninstall_crash_stack;

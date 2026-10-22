@@ -85,6 +85,20 @@ static int modules_count = 0;
 static unsigned long long next_diagnostics_id = 1;
 static hl_mutex *modules_lock = NULL;
 
+#if defined(HL_LINUX) || defined(HL_MAC)
+// Signal readers never wait for a thread interrupted while changing the registry.
+static unsigned char crash_registry_busy;
+void hl_module_crash_write_lock(void) {
+	while( __atomic_test_and_set(&crash_registry_busy,__ATOMIC_ACQUIRE) ) {}
+}
+void hl_module_crash_write_unlock(void) {
+	__atomic_clear(&crash_registry_busy,__ATOMIC_RELEASE);
+}
+#else
+void hl_module_crash_write_lock(void) {}
+void hl_module_crash_write_unlock(void) {}
+#endif
+
 static void module_registry_free() {
 	if( modules_lock == NULL ) return;
 	hl_remove_root(&modules_lock);
@@ -127,7 +141,8 @@ static bool module_resolve_pos( hl_module *m, void *addr, hl_function **function
 		min--;
 		dbg = m->jit_debug + min;
 		fdebug = m->code->functions + min;
-	} while( !dbg->offsets );
+	} while( !dbg->offsets && min > 0 );
+	if( !dbg->offsets || fdebug->nops == 0 ) return false;
 	// lookup inside function
 	min = 0;
 	max = fdebug->nops;
@@ -301,6 +316,60 @@ const char *hl_module_resolve_jit_location( void *addr ) {
 static uchar *module_resolve_symbol( void *addr, uchar *out, int *outSize ) {
 	return hl_module_resolve_symbol_full(addr,out,outSize,NULL);
 }
+
+#if defined(HL_LINUX) || defined(HL_MAC)
+static char *crash_text( char *out, char *end, const char *text ) {
+	while( out < end && *text ) *out++ = *text++;
+	return out;
+}
+
+static char *crash_uint( char *out, char *end, unsigned int value ) {
+	char digits[16];
+	int count = 0;
+	do { digits[count++] = '0' + value % 10; value /= 10; } while( value );
+	while( count && out < end ) *out++ = digits[--count];
+	return out;
+}
+
+// A restricted symbolizer for the fatal signal path: no allocator, GC, stdio or mutex calls.
+int hl_module_resolve_crash_location( void *address, char *buffer, int size ) {
+	char *out = buffer, *end;
+	if( size <= 1 ) return 0;
+	end = buffer + size - 1;
+	if( __atomic_test_and_set(&crash_registry_busy,__ATOMIC_ACQUIRE) ) return 0;
+	for(int i=0;i<modules_count;i++) {
+		hl_module *m = cur_modules[i];
+		hl_function *fun;
+		int opcode;
+		if( !module_contains_address(m,address) ) continue;
+		if( !module_resolve_address(m,address,&fun,&opcode) ) break;
+		const char *name = hl_code_function_name(m->code,fun);
+		if( name ) out = crash_text(out,end,name);
+		else {
+			out = crash_text(out,end,"fun$");
+			out = crash_uint(out,end,fun->findex);
+		}
+		if( m->code->hasdebug && fun->debug && opcode >= 0 && opcode < fun->nops ) {
+			int *debug = fun->debug + opcode * 2;
+			int file = debug[0] & 0x7fffffff;
+			if( file < m->code->ndebugfiles ) {
+				out = crash_text(out,end,"(");
+				out = crash_text(out,end,m->code->debugfiles[file]);
+				out = crash_text(out,end,":");
+				out = crash_uint(out,end,debug[1]);
+				out = crash_text(out,end,")");
+			}
+		}
+		out = crash_text(out,end," [opcode=");
+		out = crash_uint(out,end,opcode);
+		out = crash_text(out,end,"]");
+		break;
+	}
+	__atomic_clear(&crash_registry_busy,__ATOMIC_RELEASE);
+	*out = 0;
+	return (int)(out - buffer);
+}
+#endif
 
 int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out, int size ) {
 #if defined(HL_64) && defined(HL_WIN)
@@ -1070,6 +1139,7 @@ static void hl_module_init_constant( hl_module *m, hl_constant *c ) {
 static void hl_module_add( hl_module *m ) {
 	module_registry_init();
 	hl_mutex_acquire(modules_lock);
+	hl_module_crash_write_lock();
 	hl_module **old_modules = cur_modules;
 	hl_module **new_modules = (hl_module**)malloc(sizeof(void*)*(modules_count + 1));
 	memcpy(new_modules, old_modules, sizeof(void*)*modules_count);
@@ -1078,6 +1148,7 @@ static void hl_module_add( hl_module *m ) {
 	cur_modules = new_modules;
 	modules_count++;
 	free(old_modules);
+	hl_module_crash_write_unlock();
 	hl_mutex_release(modules_lock);
 }
 
@@ -1537,7 +1608,30 @@ h_bool hl_module_patch( hl_module *m1, hl_code *c ) {
 	return true;
 }
 
+static void module_registry_remove( hl_module *m ) {
+	int i;
+	module_registry_init();
+	hl_mutex_acquire(modules_lock);
+	hl_module_crash_write_lock();
+	for(i=0;i<modules_count;i++)
+		if( cur_modules[i] == m ) break;
+	if( i < modules_count ) {
+		for(;i<modules_count-1;i++) cur_modules[i] = cur_modules[i+1];
+		modules_count--;
+		if( modules_count == 0 ) {
+			free(cur_modules);
+			cur_modules = NULL;
+		} else {
+			hl_module **resized = (hl_module**)realloc(cur_modules,sizeof(hl_module*) * modules_count);
+			if( resized != NULL ) cur_modules = resized;
+		}
+	}
+	hl_module_crash_write_unlock();
+	hl_mutex_release(modules_lock);
+}
+
 void hl_module_free_shutdown( hl_module *m ) {
+	module_registry_remove(m);
 	hl_gdb_jit_unregister(m);
 	hl_module_patch_release_all(m);
 	if( !m->roots_detached )
@@ -1590,22 +1684,7 @@ void hl_module_retire_prepare( hl_module *m ) {
 	int i;
 	if( m == NULL || m->retiring ) return;
 	m->retiring = true;
-	module_registry_init();
-	hl_mutex_acquire(modules_lock);
-	for(i=0;i<modules_count;i++)
-		if( cur_modules[i] == m ) break;
-	if( i < modules_count ) {
-		for(;i<modules_count-1;i++) cur_modules[i] = cur_modules[i+1];
-		modules_count--;
-		if( modules_count == 0 ) {
-			free(cur_modules);
-			cur_modules = NULL;
-		} else {
-			hl_module **resized = (hl_module**)realloc(cur_modules,sizeof(hl_module*) * modules_count);
-			if( resized != NULL ) cur_modules = resized;
-		}
-	}
-	hl_mutex_release(modules_lock);
+	module_registry_remove(m);
 	for(i=0;i<m->code->nglobals;i++)
 		if( hl_is_ptr(m->code->globals[i]) )
 			hl_remove_root(m->globals_data+m->globals_indexes[i]);

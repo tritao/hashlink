@@ -667,6 +667,7 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	if(type_allocation_count){int needed=m->patch_type_allocation_count+type_allocation_count;if(needed>m->patch_type_allocation_capacity){int capacity=needed<16?16:needed*2;void **owners=(void**)realloc(m->patch_type_allocations,sizeof(void*)*capacity);if(!owners){error="Out of memory publishing patch types";goto fail;}m->patch_type_allocations=owners;m->patch_type_allocation_capacity=capacity;}}
 	for(int i=0;i<type_allocation_count;i++)m->patch_type_allocations[m->patch_type_allocation_count++]=type_allocations[i];
 	free(type_allocations);type_allocations=NULL;type_allocation_count=0;for(int i=m->code->ntypes;i<code.ntypes;i++)m->code->types[i].gc_owner=m;m->code->ntypes=code.ntypes;
+	hl_module_crash_write_lock();
 	if(m->patch_lo==NULL||allocation->code<m->patch_lo)m->patch_lo=allocation->code;
 	if(m->patch_hi==NULL||(void*)((unsigned char*)allocation->code+allocation->code_size)>m->patch_hi)m->patch_hi=(unsigned char*)allocation->code+allocation->code_size;
 	for(int i=0;i<patch->function_count;i++){int slot=allocation->functions[i].findex;hl_patch_code *old=m->patch_owners[slot];void *target=(unsigned char*)allocation->code+offsets[i];if(m->patch_targets){if(old==NULL)hl_jit_patch_method(m->patch_targets[slot],m->patch_targets+slot);m->patch_targets[slot]=target;}else{hl_jit_patch_method(m->functions_ptrs[slot],m->functions_ptrs+slot);m->functions_ptrs[slot]=target;}m->patch_owners[slot]=allocation;allocation->references++;if(old&&--old->references==0){if(m->patch_targets)patch_code_free(old);else{old->next_retired=m->retired_patch_code;m->retired_patch_code=old;}}}
@@ -675,7 +676,7 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	m->patch_ints=combined_ints;m->patch_floats=combined_floats;m->patch_strings=combined_strings;m->patch_string_lens=combined_string_lens;m->patch_ustrings=combined_ustrings;m->patch_string_data=combined_string_data;
 	m->code->ints=combined_ints;m->code->nints=code.nints;m->code->floats=combined_floats;m->code->nfloats=code.nfloats;m->code->strings=combined_strings;m->code->strings_lens=combined_string_lens;m->code->ustrings=combined_ustrings;m->code->nstrings=code.nstrings;
 	combined_ints=NULL;combined_floats=NULL;combined_strings=NULL;combined_string_lens=NULL;combined_ustrings=NULL;combined_string_data=NULL;
-	m->revision=patch->revision;m->patch_jit_count+=patch->function_count;free(offsets);if(error_msg)*error_msg=NULL;return true;
+	m->revision=patch->revision;m->patch_jit_count+=patch->function_count;hl_module_crash_write_unlock();free(offsets);if(error_msg)*error_msg=NULL;return true;
 fail:
 	if(jit) hl_jit_free(jit,false);
 	free(combined_functions);
