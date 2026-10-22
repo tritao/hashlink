@@ -4,6 +4,7 @@
  * It reads the file with the VM's own reader (code.c), so every opcode decodes exactly as it does at run time, and
  * prints it in a form made to be diffed: two builds of the same source should give identical text, and when they do
  * not, the first differing line names the function, the section and the instruction.
+ * Recursive structural types use recursive^N to refer N levels up the current type expansion.
  *
  *   hldump [--raw] [--debug] [--function TEXT] [--hashes] [--sections] [--identities] [--spans] file.hl
  *
@@ -101,19 +102,28 @@ static int type_index(hl_type *t) {
 	return -1;
 }
 
-static void print_type(text *t, hl_type *type) {
+#define MAX_TYPE_DEPTH 128
+
+static void print_type_rec(text *t, hl_type *type, hl_type **path, int depth) {
 	int index = type_index(type);
 	if( !type ) { text_add(t, "null"); return; }
+	// Virtual fields and function arguments can point back to an enclosing structural type.
+	// Name that ancestor by its distance, independent of the bytecode's type-table indexes.
+	for(int i=depth-1;i>=0;i--) {
+		if( path[i] == type ) { text_add(t, "recursive^%d", depth-i); return; }
+	}
+	if( depth == MAX_TYPE_DEPTH ) { text_add(t, "<type-depth-limit>"); return; }
+	path[depth] = type;
 	if( raw_mode && index >= 0 ) text_add(t, "T%d:", index);
 	switch( type->kind ) {
 	case HFUN: {
 		text_add(t, "fun(");
 		for(int i=0;i<type->fun->nargs;i++) {
 			if( i ) text_add(t, ",");
-			print_type(t, type->fun->args[i]);
+			print_type_rec(t, type->fun->args[i], path, depth+1);
 		}
 		text_add(t, ")->");
-		print_type(t, type->fun->ret);
+		print_type_rec(t, type->fun->ret, path, depth+1);
 		break;
 	}
 	case HOBJ: case HSTRUCT:
@@ -127,7 +137,7 @@ static void print_type(text *t, hl_type *type) {
 		for(int i=0;i<type->virt->nfields;i++) {
 			if( i ) text_add(t, ",");
 			text_add(t, "%s:", utf8(type->virt->fields[i].name));
-			print_type(t, type->virt->fields[i].t);
+			print_type_rec(t, type->virt->fields[i].t, path, depth+1);
 		}
 		text_add(t, "}");
 		break;
@@ -137,12 +147,17 @@ static void print_type(text *t, hl_type *type) {
 		break;
 	case HREF: case HNULL: case HPACKED:
 		text_add(t, "%s<", type->kind == HREF ? "ref" : type->kind == HNULL ? "null" : "packed");
-		print_type(t, type->tparam);
+		print_type_rec(t, type->tparam, path, depth+1);
 		text_add(t, ">");
 		break;
 	default:
 		text_add(t, "%s", utf8(hl_type_str(type)));
 	}
+}
+
+static void print_type(text *t, hl_type *type) {
+	hl_type *path[MAX_TYPE_DEPTH];
+	print_type_rec(t, type, path, 0);
 }
 
 static void print_function_name(text *t, int findex) {
