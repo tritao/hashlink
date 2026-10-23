@@ -626,6 +626,7 @@ static void handle_client( hl_socket *socket ) {
 
 static void diagnostics_loop( void *_ ) {
 	hl_get_thread()->flags |= HL_THREAD_INVISIBLE;
+	hl_prof_boundary_ignore_thread();
 	while( diag_transport ) {
 		hl_socket *socket = hl_diag_transport_accept(diag_transport);
 		if( socket == NULL ) break;

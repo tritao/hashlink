@@ -708,6 +708,7 @@ static void profile_sleep( double seconds ) {
 }
 
 static void hl_profile_loop( void *_ ) {
+	hl_prof_boundary_ignore_thread();
 	double next = hl_sys_time();
 	data.tmpMemory = malloc(MAX_STACK_SIZE);
 	data.waitLoop = false;
@@ -909,7 +910,11 @@ void hl_profile_name_native_keys( void ) {
 	unsigned long long keys[256];
 	int count, tid = hl_profile_main_thread();
 	while( (count = hl_prof_native_keys_take(keys,256)) > 0 )
-		for(int i=0;i<count;i++) stream_native_symbol((void*)(uintptr_t)keys[i],hl_sys_time(),tid);
+		for(int i=0;i<count;i++) {
+			const char *boundary = hl_prof_boundary_name(keys[i]);
+			if( boundary ) stream_native_symbol_record(keys[i],keys[i],"[boundary]",boundary,hl_sys_time(),tid);
+			else stream_native_symbol((void*)(uintptr_t)keys[i],hl_sys_time(),tid);
+		}
 }
 
 /* A new session names every native pc again: its capture holds only what it streams. */

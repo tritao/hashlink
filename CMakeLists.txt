@@ -298,6 +298,7 @@ if (WITH_VM)
         src/diagnostics.c
         src/diagnostics_transport.c
         src/profile.c
+        src/prof_boundary.c
         include/lz4/lz4.c
     )
     if(APPLE)
@@ -343,6 +344,11 @@ if(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD6
     enable_language(ASM_MASM)
     add_library(hlprof_penter STATIC src/prof_penter.c src/prof_penter_x64.asm)
     target_compile_options(hlprof_penter PRIVATE $<$<COMPILE_LANGUAGE:C>:/Zl /GS->)
+    # The boundary hooks' common thunk (see src/prof_boundary.c).
+    if(TARGET hl)
+        target_sources(hl PRIVATE src/prof_boundary_x64.asm)
+        target_link_libraries(hl dxguid)
+    endif()
 endif()
 
 # Measures the profiler recorder's cost per record (see tools/hlprof-bench.c).

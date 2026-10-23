@@ -403,6 +403,12 @@ bool hl_profile_session_start( int sources, int sample_rate, int allocation_inte
 void hl_profile_session_stop( void );
 /** Consumer: streams the names of native call keys first recorded since the last call (see hl_prof_enter_native). */
 void hl_profile_name_native_keys( void );
+/** Installs the boundary hooks HL_PROF_BOUNDARY asks for (Windows x64; see prof_boundary.c). */
+void hl_prof_boundary_install( void );
+/** The calling thread's boundary calls are never recorded: the profiler's own threads. */
+void hl_prof_boundary_ignore_thread( void );
+/** The name of a boundary hook's key, or NULL when the key is not one. */
+const char *hl_prof_boundary_name( unsigned long long key );
 /** True once a module load or patch changed the symbol metadata since the last call. */
 bool hl_profile_metadata_changed( void );
 void hl_profile_stream_notify_revision( unsigned long long module_id, int revision );

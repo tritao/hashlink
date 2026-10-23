@@ -433,6 +433,7 @@ int main(int argc, pchar *argv[]) {
 	hl_setup.sys_args = (pchar**)argv;
 	hl_setup.sys_nargs = argc;
 	hl_sys_init();
+	hl_prof_boundary_install();
 	hl_register_thread(&ctx);
 	setup_handler();
 	main_ctx = &ctx;
