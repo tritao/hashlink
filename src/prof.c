@@ -9,6 +9,7 @@
 #define _GNU_SOURCE
 #endif
 #include "hlprof.h"
+#include "profile_events.h"
 
 #ifdef HL_WIN
 #	undef _GUID
@@ -603,8 +604,13 @@ HL_PRIM void hl_prof_sample( unsigned int tid, int flags, void **frames, int cou
 
 /* ---- session ---------------------------------------------------------------------------------------------------- */
 
+/* A session is open from hl_prof_start to hl_prof_stop; it records while hl_prof_on is set, which pausing clears. */
+static volatile int session_open;
+static volatile long recording_toggle;
+static volatile int recording_changes;
+
 HL_PRIM bool hl_prof_start( unsigned int pool_mib ) {
-	if( hl_prof_on ) return false;
+	if( session_open ) return false;
 	clock_init();
 	if( pool_mib == 0 ) pool_mib = 64;
 	if( !pool_allocate(pool_mib) ) return false;
@@ -616,11 +622,59 @@ HL_PRIM bool hl_prof_start( unsigned int pool_mib ) {
 	drained_bytes = 0;
 	base_ticks = now_ticks();
 	REGISTRY_UNLOCK();
+	session_open = 1;
 	STORE_RELEASE_INT(&hl_prof_on,1);
 	return true;
 }
 
+HL_PRIM bool hl_prof_set_recording( bool on ) {
+	unsigned char payload[4] = { 0, 0, 0, 0 };
+	bool ok = true;
+	/* One toggle at a time, so the RECORDING events alternate. */
+#ifdef _MSC_VER
+	while( _InterlockedCompareExchange(&recording_toggle,1,0) != 0 ) {}
+#else
+	while( !__sync_bool_compare_and_swap(&recording_toggle,0,1) ) {}
+#endif
+	if( !session_open ) ok = false;
+	else if( on != (hl_prof_on != 0) ) {
+		if( !on ) {
+			hl_prof_event(PROFILE_EVENT_RECORDING,payload,4);
+			STORE_RELEASE_INT(&hl_prof_on,0);
+		} else {
+			payload[0] = 1;
+			STORE_RELEASE_INT(&hl_prof_on,1);
+			hl_prof_event(PROFILE_EVENT_RECORDING,payload,4);
+		}
+		recording_changes++;
+	}
+	recording_toggle = 0;
+	return ok;
+}
+
+HL_PRIM int hl_prof_recording_changes( void ) {
+	return recording_changes;
+}
+
+HL_PRIM bool hl_prof_session_open( void ) {
+	return session_open != 0;
+}
+
+/* haxeon.ProfileRecording: starts or pauses recording from the program. Returns false when no session is open. */
+HL_PRIM bool hl_prof_recording_set( bool on ) {
+	return hl_prof_set_recording(on);
+}
+
+HL_PRIM bool hl_prof_recording_get( void ) {
+	return hl_prof_on != 0;
+}
+
+DEFINE_PRIM(_BOOL, prof_recording_set, _BOOL);
+DEFINE_PRIM(_BOOL, prof_recording_get, _NO_ARG);
+
 HL_PRIM void hl_prof_stop( void ) {
+	if( !session_open ) return;
+	session_open = 0;
 	if( !hl_prof_on ) return;
 	STORE_RELEASE_INT(&hl_prof_on,0);
 	/* A producer that saw recording on may still be writing its record: give it time to publish before the final drain. */

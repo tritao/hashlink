@@ -29,9 +29,13 @@ typedef struct {
 
 enum { DIAG_SERVICE_CONTROL = 0, DIAG_SERVICE_PROFILER = 2 };
 enum { DIAG_CONTROL_CAPABILITIES = 1, DIAG_CONTROL_AUTHENTICATE = 2 };
-enum { DIAG_PROFILE_STATUS = 1, DIAG_PROFILE_METADATA = 4, DIAG_PROFILE_START = 16, DIAG_PROFILE_STOP = 17 };
+enum { DIAG_PROFILE_STATUS = 1, DIAG_PROFILE_METADATA = 4, DIAG_PROFILE_START = 16, DIAG_PROFILE_STOP = 17, DIAG_PROFILE_PAUSE = 18,
+	DIAG_PROFILE_RESUME = 19 };
+/* Flags of a start request's optional fifth word. */
+#define DIAG_START_PAUSED 1
 /* Frames the runtime pushes during a session. Metadata is pushed with the type of its request. */
-enum { DIAG_PUSH_SESSION = 16, DIAG_PUSH_DATA = 17, DIAG_PUSH_CLOCK = 18, DIAG_PUSH_THREADS = 19, DIAG_PUSH_END = 20, DIAG_PUSH_STATS = 21 };
+enum { DIAG_PUSH_SESSION = 16, DIAG_PUSH_DATA = 17, DIAG_PUSH_CLOCK = 18, DIAG_PUSH_THREADS = 19, DIAG_PUSH_END = 20, DIAG_PUSH_STATS = 21,
+	DIAG_PUSH_RECORDING = 22 };
 enum { DIAG_RESPONSE = 1, DIAG_ERROR = 2, DIAG_PUSH = 4, DIAG_CAP_PROFILER = 1, DIAG_CAP_SYMBOLS = 2, DIAG_CAP_AUTH_REQUIRED = 4 };
 
 static hl_diag_transport *diag_transport;
@@ -322,6 +326,7 @@ static struct {
 	unsigned long long raw_bytes;
 	unsigned long long sent_bytes;
 	unsigned int threads_signature;
+	int recording_changes;
 	double next_clock;
 	double next_threads;
 	double next_stats;
@@ -469,6 +474,16 @@ static void session_end( hl_socket *socket ) {
 	session.finished = true;
 }
 
+/* Whether the session records, pushed whenever the program or the client pauses or resumes it. */
+static void push_recording( hl_socket *socket, bool force ) {
+	unsigned char payload[4];
+	int changes = hl_prof_recording_changes();
+	if( !force && changes == session.recording_changes ) return;
+	session.recording_changes = changes;
+	write_u32(payload,hl_prof_on ? 1 : 0);
+	push(socket,DIAG_PUSH_RECORDING,payload,sizeof(payload));
+}
+
 /* One consumer step: drain, then the periodic frames. Returns the bytes drained. */
 static unsigned long long session_pump( hl_socket *socket ) {
 	unsigned long long drained;
@@ -487,17 +502,20 @@ static unsigned long long session_pump( hl_socket *socket ) {
 	if( now >= session.next_clock ) { push_clock(socket); session.next_clock = now + 0.1; }
 	if( now >= session.next_threads ) { push_threads(socket,false); session.next_threads = now + 0.5; }
 	if( now >= session.next_stats ) { push_stats(socket); session.next_stats = now + 1.0; }
+	push_recording(socket,false);
 	hl_blocking(false);
 	if( hl_profile_metadata_changed() && !send_metadata(socket,0,DIAG_PUSH) ) session.failed = true;
 	return drained;
 }
 
-static bool session_start( hl_socket *socket, const unsigned char *payload, unsigned int request_id ) {
+static bool session_start( hl_socket *socket, const unsigned char *payload, unsigned int length, unsigned int request_id ) {
 	unsigned char frame[32];
 	int sources = (int)read_u32(payload), rate = (int)read_u32(payload + 4), interval = (int)read_u32(payload + 8);
-	unsigned int pool_mib = read_u32(payload + 12);
+	unsigned int pool_mib = read_u32(payload + 12), flags = length >= 20 ? read_u32(payload + 16) : 0;
 	double now;
 	if( session.active || !hl_prof_start(pool_mib) ) return false;
+	/* A paused session records nothing until the client or the program resumes it. */
+	if( flags & DIAG_START_PAUSED ) hl_prof_set_recording(false);
 	session.active = true;
 	session.failed = false;
 	session.finish_requested = false;
@@ -514,6 +532,7 @@ static bool session_start( hl_socket *socket, const unsigned char *payload, unsi
 	if( !session.failed && !send_metadata(socket,0,DIAG_PUSH) ) session.failed = true;
 	push_clock(socket);
 	push_threads(socket,true);
+	push_recording(socket,true);
 	now = hl_sys_time();
 	session.next_clock = now + 0.1;
 	session.next_threads = now + 0.5;
@@ -603,8 +622,10 @@ static void handle_client( hl_socket *socket ) {
 			ok = send_frame(socket,header.service,header.type,DIAG_RESPONSE,header.request_id,caps,sizeof(caps));
 		} else if( header.service == DIAG_SERVICE_PROFILER && header.type == DIAG_PROFILE_STATUS && header.length == 0 ) {
 			ok = send_status(socket,header.type,header.request_id);
-		} else if( header.service == DIAG_SERVICE_PROFILER && header.type == DIAG_PROFILE_START && header.length == 16 ) {
-			ok = session_start(socket,payload,header.request_id);
+		} else if( header.service == DIAG_SERVICE_PROFILER && header.type == DIAG_PROFILE_START && (header.length == 16 || header.length == 20) ) {
+			ok = session_start(socket,payload,header.length,header.request_id);
+		} else if( header.service == DIAG_SERVICE_PROFILER && (header.type == DIAG_PROFILE_PAUSE || header.type == DIAG_PROFILE_RESUME) && header.length == 0 ) {
+			ok = session.active && hl_prof_set_recording(header.type == DIAG_PROFILE_RESUME) && send_status(socket,header.type,header.request_id);
 		} else if( header.service == DIAG_SERVICE_PROFILER && header.type == DIAG_PROFILE_STOP && header.length == 0 ) {
 			session_end(socket);
 			ok = send_status(socket,header.type,header.request_id);

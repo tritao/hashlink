@@ -14,6 +14,9 @@
 #define PROFILE_EVENT_NATIVE_LOCATION 0x484C0006U
 /* A module was registered (u64 module id): its code is new to symbol metadata a client already holds. */
 #define PROFILE_EVENT_MODULE_LOADED 0x484C0007U
+/* Recording paused (u32 0) or resumed (u32 1) within a session. A pause is written before recording stops and a resume
+   after it starts, so the calls between them went unrecorded. */
+#define PROFILE_EVENT_RECORDING 0x484C0008U
 #define PROFILE_EVENT_SPAN_BEGIN 0x484C1001U
 #define PROFILE_EVENT_SPAN_END 0x484C1002U
 /* A program-defined counter sample: f64 value, then the UTF-8 counter name. Keep haxeon.ProfileCounter in sync. */

@@ -11,6 +11,8 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <conio.h>
+#include <io.h>
 typedef SOCKET socket_t;
 #define CLOSE_SOCKET closesocket
 #else
@@ -325,6 +327,7 @@ static int pf_event( pf_export *pf,double time,uint32_t tid,uint32_t event_id,co
 	case PROFILE_EVENT_THREAD_NAME:if(!(text=pf_text(payload,size)))return 0;pftrace_thread(pf->trace,tid,text);free(text);break;
 	case PROFILE_EVENT_MODULE_REVISION:pftrace_instant(pf->trace,ts,0,"module revision");break;
 	case PROFILE_EVENT_MODULE_LOADED:pftrace_instant(pf->trace,ts,0,"module loaded");break;
+	case PROFILE_EVENT_RECORDING:if(size>=4)pftrace_instant(pf->trace,ts,0,payload[0]?"recording resumed":"recording paused");break;
 	case PROFILE_EVENT_COUNTER:if(size>8){double value;uint64_t bits=u64(payload);memcpy(&value,&bits,sizeof(value));if(!(text=pf_text(payload+8,size-8)))return 0;pftrace_counter(pf->trace,ts,text,NULL,value);free(text);}break;
 	/* Each sample stands for interval allocations' worth of bytes, so the running sum estimates the bytes allocated. */
 	case PROFILE_EVENT_ALLOCATION_SAMPLE:if(size>=20){pf->sampled_allocation_bytes+=(double)u64(payload+8)*u32(payload+16);pftrace_counter(pf->trace,ts,"Allocated bytes (sampled estimate)","bytes",pf->sampled_allocation_bytes);}break;
@@ -379,8 +382,37 @@ static int consume( symbols *s,unsigned char *pending,size_t *length,uint64_t *s
  * Exports decode the per-thread records and turn them into the stream records consume() already reads, with a few
  * export-only event ids for what v1 had no record for. docs/PROFILER.md in Haxeon describes both formats.
  */
-enum { P_START=16, P_STOP=17 };
-enum { PUSH_METADATA=4, PUSH_SESSION=16, PUSH_DATA=17, PUSH_CLOCK=18, PUSH_THREADS=19, PUSH_END=20, PUSH_STATS=21, CAPTURE_COMPLETE=3 };
+enum { P_START=16, P_STOP=17, P_PAUSE=18, P_RESUME=19 };
+enum { PUSH_METADATA=4, PUSH_SESSION=16, PUSH_DATA=17, PUSH_CLOCK=18, PUSH_THREADS=19, PUSH_END=20, PUSH_STATS=21, PUSH_RECORDING=22, CAPTURE_COMPLETE=3 };
+
+/* Recording controls: start paused, stop once the capture reaches max_bytes (0: no limit). At a console, Enter pauses
+   and resumes recording. */
+static int start_paused;
+static uint64_t max_bytes;
+
+static int console_toggle_available( void ) {
+#ifdef _WIN32
+	return _isatty(_fileno(stdin));
+#else
+	return isatty(STDIN_FILENO);
+#endif
+}
+
+/* Whether Enter was pressed at the console since the last call. */
+static int console_toggle( void ) {
+#ifdef _WIN32
+	int pressed=0;
+	if(!console_toggle_available())return 0;
+	while(_kbhit()){int c=_getch();if(c=='\r'||c=='\n')pressed=1;}
+	return pressed;
+#else
+	fd_set set;struct timeval none={0,0};char line[256];
+	if(!console_toggle_available())return 0;
+	FD_ZERO(&set);FD_SET(STDIN_FILENO,&set);
+	if(select(STDIN_FILENO+1,&set,NULL,NULL,&none)<=0)return 0;
+	return fgets(line,sizeof(line),stdin)!=NULL;
+#endif
+}
 enum { F_PUSH=4 };
 enum { SOURCE_INSTRUMENT=1, SOURCE_SAMPLING=2, SOURCE_ALLOC=4 };
 enum { R_ENTER=0x01, R_EXIT=0x02, R_UNWIND=0x03, R_SPAN_BEGIN=0x10, R_SPAN_END=0x11, R_FRAME_MARK=0x12, R_FRAME_IDLE=0x13, R_EVENT=0x20, R_COUNTER=0x21, R_SAMPLE=0x22, R_STALL=0x30 };
@@ -405,22 +437,29 @@ static int parse_sources( const char *list ) {
 /* Writes the pushed frames of one session to path until the runtime ends it, the program exits, or the recorder is
    interrupted or reaches its duration. */
 static int record_session( socket_t sock,const char *output_path,uint32_t pid,int sources,int rate,int allocation_interval,int pool_mib,int duration,int interval ) {
-	unsigned char start[16],header[16],*payload=NULL,record[16];uint32_t id=1,payload_cap=0,stop_id=0;int code=1,ended=0,stop_sent=0;
+	unsigned char start[20],header[16],*payload=NULL,record[16];uint32_t id=1,payload_cap=0,stop_id=0;int code=1,ended=0,stop_sent=0;
 	uint64_t frames=0,bytes=0,raw=0,last_raw=0;double started=monotime(),next_report=started+interval/1000.0,stop_deadline=0,last_report=started;
+	/* Duration counts recorded time: a paused session's clock stands still. */
+	int recording=1;double recording_since=started,recorded_seconds=0;uint64_t dropped=0;
 	FILE *out=NULL;unsigned char file_header[24];uint32_t chunks_in_use=0,chunk_count=0;uint64_t stalls=0;
 	if(output_path){out=fopen(output_path,"wb");if(!out){fprintf(stderr,"Could not open capture file %s\n",output_path);return 1;}setvbuf(out,NULL,_IOFBF,1<<20);
 		memcpy(file_header,"HLPC",4);file_header[4]=2;file_header[5]=0;file_header[6]=24;file_header[7]=0;put32(file_header+8,0);put32(file_header+12,pid);put32(file_header+16,(uint32_t)rate);put32(file_header+20,(uint32_t)sources);
 		if(fwrite(file_header,1,24,out)!=24)goto done;}
-	put32(start,(uint32_t)sources);put32(start+4,(uint32_t)rate);put32(start+8,(uint32_t)allocation_interval);put32(start+12,(uint32_t)pool_mib);
-	{unsigned char h[16];h[0]=SVC_PROFILE;h[1]=P_START;h[2]=h[3]=0;put32(h+4,id++);put32(h+8,16);put32(h+12,0);if(!send_all(sock,h,16)||!send_all(sock,start,16)){fprintf(stderr,"Could not start the session\n");goto done;}}
-	printf("Recording HashLink process %u (sources 0x%x)\n",pid,sources);fflush(stdout);
+	put32(start,(uint32_t)sources);put32(start+4,(uint32_t)rate);put32(start+8,(uint32_t)allocation_interval);put32(start+12,(uint32_t)pool_mib);put32(start+16,start_paused?1:0);
+	{unsigned char h[16];uint32_t length=start_paused?20:16;h[0]=SVC_PROFILE;h[1]=P_START;h[2]=h[3]=0;put32(h+4,id++);put32(h+8,length);put32(h+12,0);if(!send_all(sock,h,16)||!send_all(sock,start,length)){fprintf(stderr,"Could not start the session\n");goto done;}}
+	recording=!start_paused;recording_since=started;
+	printf("%s HashLink process %u (sources 0x%x)\n",start_paused?"Connected to":"Recording",pid,sources);
+	if(start_paused)printf("recording paused until the program starts it (haxeon.ProfileRecording)%s\n",console_toggle_available()?" or Enter is pressed":"");
+	fflush(stdout);
 	signal(SIGINT,stop_signal);
 #ifdef SIGTERM
 	signal(SIGTERM,stop_signal);
 #endif
 	while(!ended){
 		double now=monotime();fd_set set;struct timeval wait={0,100000};int ready;
-		if(!stop_sent&&(interrupted||(duration&&now-started>=duration))){unsigned char h[16];stop_id=id++;h[0]=SVC_PROFILE;h[1]=P_STOP;h[2]=h[3]=0;put32(h+4,stop_id);put32(h+8,0);put32(h+12,0);if(!send_all(sock,h,16))break;stop_sent=1;stop_deadline=now+10;}
+		if(!stop_sent&&console_toggle()){unsigned char h[16];h[0]=SVC_PROFILE;h[1]=recording?P_PAUSE:P_RESUME;h[2]=h[3]=0;put32(h+4,id++);put32(h+8,0);put32(h+12,0);if(!send_all(sock,h,16))break;}
+		if(!stop_sent&&max_bytes&&bytes>=max_bytes&&!interrupted){fprintf(stderr,"The capture reached its size limit (%.0f MiB); stopping\n",max_bytes/1048576.0);interrupted=1;}
+		if(!stop_sent&&(interrupted||(duration&&recorded_seconds+(recording?now-recording_since:0)>=duration))){unsigned char h[16];stop_id=id++;h[0]=SVC_PROFILE;h[1]=P_STOP;h[2]=h[3]=0;put32(h+4,stop_id);put32(h+8,0);put32(h+12,0);if(!send_all(sock,h,16))break;stop_sent=1;stop_deadline=now+10;}
 		if(stop_sent&&now>stop_deadline){fprintf(stderr,"The runtime did not end the session in time\n");break;}
 		if(interval>0&&now>=next_report){double seconds=now-last_report;printf("recorded %.1f MiB (%.1f MiB/s), %llu frames, chunks %u/%u, stalls %llu\n",raw/1048576.0,seconds>0?(raw-last_raw)/1048576.0/seconds:0.0,(unsigned long long)frames,chunks_in_use,chunk_count,(unsigned long long)stalls);fflush(stdout);last_raw=raw;last_report=now;next_report=now+interval/1000.0;}
 		FD_ZERO(&set);FD_SET(sock,&set);ready=select((int)sock+1,&set,NULL,NULL,&wait);
@@ -434,6 +473,12 @@ static int record_session( socket_t sock,const char *output_path,uint32_t pid,in
 			if(!(flags&F_PUSH))continue;
 			if(type==PUSH_DATA&&size>=16)raw+=u32(payload+8);
 			if(type==PUSH_STATS&&size>=16){chunks_in_use=u32(payload);chunk_count=u32(payload+4);stalls=u64(payload+8);}
+			if(type==PUSH_RECORDING&&size>=4&&(u32(payload)!=0)!=recording){double at=monotime();
+				if(recording)recorded_seconds+=at-recording_since;else recording_since=at;
+				recording=u32(payload)!=0;printf("recording %s\n",recording?"resumed":"paused");fflush(stdout);}
+			/* Over the size limit, records the runtime pushes before it handles the stop are dropped; everything else is
+			   kept, so the capture stays complete and ends where the limit was reached. */
+			if(type==PUSH_DATA&&max_bytes&&bytes>=max_bytes){dropped+=size;continue;}
 			if(out){put32(record,type);put32(record+4,size);put64(record+8,(uint64_t)((monotime()-started)*1e9));if(fwrite(record,1,16,out)!=16||(size&&fwrite(payload,1,size,out)!=size)){fprintf(stderr,"Capture write failed\n");goto done;}}
 			frames++;bytes+=size;
 			if(type==PUSH_END)ended=1;}
@@ -441,6 +486,7 @@ static int record_session( socket_t sock,const char *output_path,uint32_t pid,in
 	if(out&&ended){unsigned char end[16];put64(end,frames);put64(end+8,bytes);put32(record,CAPTURE_COMPLETE);put32(record+4,16);put64(record+8,(uint64_t)((monotime()-started)*1e9));if(fwrite(record,1,16,out)!=16||fwrite(end,1,16,out)!=16)goto done;}
 	if(!ended)fprintf(stderr,"warning: the session ended without its final frame; the capture is partial\n");
 	printf("recorded %.1f MiB of records in %llu frames\n",raw/1048576.0,(unsigned long long)frames);
+	if(dropped)printf("dropped %.1f MiB pushed after the size limit\n",dropped/1048576.0);
 	code=0;
 done:
 	free(payload);if(out&&fclose(out)!=0){fprintf(stderr,"Capture finalization failed\n");code=1;}
@@ -467,7 +513,7 @@ static double clock_seconds( tick_clock *c,uint64_t ticks ) {
 	return ((double)a->ns-(double)c->origin_ns+((double)ticks-(double)a->ticks)*rate)/1e9;
 }
 
-typedef struct { uint32_t tid; int used; unsigned char *kinds; uint32_t count,capacity,calls; } open_stack;
+typedef struct { uint32_t tid; int used; unsigned char *kinds; uint32_t count,capacity,calls,pause; } open_stack;
 static open_stack open_stacks[4096];
 static open_stack *stack_of( uint32_t tid ) {
 	uint32_t slot=(tid*2654435761U)&4095;
@@ -479,6 +525,16 @@ static int stack_push( open_stack *s,unsigned char kind ) {
 	s->kinds[s->count++]=kind;if(kind==1)s->calls++;return 1;
 }
 static void stacks_free( void ){for(int i=0;i<4096;i++)free(open_stacks[i].kinds);memset(open_stacks,0,sizeof(open_stacks));}
+
+/* Pauses within the session (PROFILE_EVENT_RECORDING 0), collected in pass 1. Calls that ran while recording was paused
+   went unrecorded, so each thread's open calls end at a pause and its stack starts empty after it. */
+typedef struct { uint64_t ticks; uint32_t tid; int frames_closed; } recording_pause;
+static recording_pause *pauses;static uint32_t pause_count,pause_capacity;
+static int pause_compare( const void *a,const void *b ){uint64_t x=((const recording_pause*)a)->ticks,y=((const recording_pause*)b)->ticks;return x<y?-1:x>y?1:0;}
+static int add_pause( uint64_t ticks,uint32_t tid ) {
+	if(pause_count==pause_capacity){uint32_t cap=pause_capacity?pause_capacity*2:16;recording_pause *p=(recording_pause*)realloc(pauses,cap*sizeof(*p));if(!p)return 0;pauses=p;pause_capacity=cap;}
+	pauses[pause_count].ticks=ticks;pauses[pause_count].tid=tid;pauses[pause_count].frames_closed=0;pause_count++;return 1;
+}
 
 typedef struct { unsigned char *data; size_t length,capacity; } byte_buffer;
 static int out_reserve( byte_buffer *o,size_t n ) {
@@ -562,7 +618,7 @@ static uint32_t call_name( symbols *s,uint64_t key,char *out,uint32_t capacity )
 	return written<0?0:(uint32_t)written>=capacity?capacity-1:(uint32_t)written;
 }
 
-typedef struct { int open; uint64_t number; } frame_set_state;
+typedef struct { int open; uint64_t number; uint32_t tid; } frame_set_state;
 static frame_set_state frame_sets[16];
 
 /* Closes slices on a thread's track down to `calls` open calls (or every span when spans_only). */
@@ -580,6 +636,11 @@ static int decode_records( byte_buffer *o,symbols *s,tick_clock *c,uint32_t tid,
 	if(!st)return 0;
 	while(pos+8<=length){
 		uint64_t w0=u64(p+pos);uint32_t kind=(uint32_t)(w0>>56);double time=clock_seconds(c,w0&TICK_MASK);uint32_t size=8;
+		/* Crossing a pause: this thread's calls end there, and so does a frame it marked. */
+		while(st->pause<pause_count&&pauses[st->pause].ticks<=(w0&TICK_MASK)){double at=clock_seconds(c,pauses[st->pause++].ticks);
+			if(!close_slices(o,st,at,tid,0,0))return 0;
+			for(uint32_t i=0;i<16;i++)if(frame_sets[i].open&&frame_sets[i].tid==tid){frame_sets[i].open=0;
+				if(!synth_event(o,at,FRAME_TRACK_TID+i,PROFILE_EVENT_SPAN_END,NULL,0)||(i==0&&!synth_event(o,at,tid,EXPORT_FRAME_IDLE,NULL,0)))return 0;}}
 		switch(kind){
 		case R_ENTER:{if(pos+16>length)goto bad;uint32_t n=call_name(s,u64(p+pos+8),name,sizeof(name));if(!stack_push(st,1)||!synth_event(o,time,tid,EXPORT_CALL_BEGIN,name,n))return 0;size=16;break;}
 		case R_EXIT:if(st->calls&&!close_slices(o,st,time,tid,st->calls-1,0))return 0;break;
@@ -589,7 +650,7 @@ static int decode_records( byte_buffer *o,symbols *s,tick_clock *c,uint32_t tid,
 		case R_SPAN_END:{int has_span=0;for(uint32_t i=0;i<st->count;i++)if(st->kinds[i]==2)has_span=1;if(has_span&&!close_slices(o,st,time,tid,0,1))return 0;break;}
 		case R_FRAME_MARK:case R_FRAME_IDLE:{if(pos+16>length)goto bad;uint64_t set=u64(p+pos+8);size=16;if(set>=16)break;frame_set_state *f=frame_sets+set;uint32_t frame_tid=FRAME_TRACK_TID+(uint32_t)set;
 			if(f->open&&!synth_event(o,time,frame_tid,PROFILE_EVENT_SPAN_END,NULL,0))return 0;f->open=0;
-			if(kind==R_FRAME_MARK){int n=snprintf(name,sizeof(name),"Frame %llu",(unsigned long long)++f->number);if(!synth_event(o,time,frame_tid,PROFILE_EVENT_SPAN_BEGIN,name,(uint32_t)n))return 0;f->open=1;
+			if(kind==R_FRAME_MARK){int n=snprintf(name,sizeof(name),"Frame %llu",(unsigned long long)++f->number);if(!synth_event(o,time,frame_tid,PROFILE_EVENT_SPAN_BEGIN,name,(uint32_t)n))return 0;f->open=1;f->tid=tid;
 				if(set==0&&!synth_event(o,time,tid,EXPORT_FRAME_BEGIN,name,(uint32_t)n))return 0;}
 			else if(set==0&&!synth_event(o,time,tid,EXPORT_FRAME_IDLE,NULL,0))return 0;
 			break;}
@@ -606,9 +667,10 @@ bad:
 	(*malformed)++;return 1;
 }
 
-/* Registers the native symbols one thread's records name. Natively instrumented calls are named by their key when they
-   are decoded, and the runtime names a key on its consumer thread after the call, so pass 1 collects every name first. */
-static int scan_native_symbols( const unsigned char *p,uint32_t length ) {
+/* Pass 1 over one thread's records: registers the native symbols they name and collects the pauses. Natively
+   instrumented calls are named by their key when they are decoded, and the runtime names a key on its consumer thread
+   after the call, so every name is collected first; a pause applies to every thread, whichever recorded it. */
+static int scan_pass1( const unsigned char *p,uint32_t length,uint32_t tid ) {
 	uint32_t pos=0;
 	while(pos+8<=length){
 		uint32_t kind=(uint32_t)(u64(p+pos)>>56),size=8;
@@ -621,6 +683,7 @@ static int scan_native_symbols( const unsigned char *p,uint32_t length ) {
 		case R_SAMPLE:size=16+(uint32_t)((u64(p+pos+8)>>32)&0xFFFF)*8;break;
 		case R_EVENT:{uint32_t id=u32(p+pos+8),n=u32(p+pos+12);const unsigned char *payload=p+pos+16;size=16+((n+7)&~7u);
 			if(pos+size>length)return 1;
+			if(id==PROFILE_EVENT_RECORDING&&n>=4&&payload[0]==0&&!add_pause(u64(p+pos)&TICK_MASK,tid))return 0;
 			if(id==PROFILE_EVENT_NATIVE_SYMBOL&&n>=24){uint32_t module_len=u32(payload+16),name_len=u32(payload+20);if(module_len+name_len==n-24&&!add_native(u64(payload),u64(payload+8),payload+24,module_len,payload+24+module_len,name_len))return 0;}
 			break;}
 		default:return 1;}
@@ -634,6 +697,7 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 	unsigned char record_header[16],*payload=NULL,*raw=NULL;uint32_t raw_cap=0;long data_start=ftell(file);tick_clock clock={0};byte_buffer out={0},fresh={0};reorder_buffer order={0};int code=0,have_metadata=0;uint64_t malformed=0;
 	unsigned char *names=NULL;uint32_t names_size=0;
 	memset(frame_sets,0,sizeof(frame_sets));
+	pause_count=0;
 	/* pass 1: the last metadata snapshot (it lists retired regions too), clock pairs, session and thread names */
 	while(fread(record_header,1,16,file)==16){
 		uint32_t type=u32(record_header),size=u32(record_header+4);
@@ -648,9 +712,10 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 			if(flags&1){if(raw_size>raw_cap){unsigned char *r=(unsigned char*)realloc(raw,raw_size);if(!r)goto done;raw=r;raw_cap=raw_size;}
 				if(LZ4_decompress_safe((const char*)payload+16,(char*)raw,(int)(size-16),(int)raw_size)!=(int)raw_size)continue;records=raw;}
 			else raw_size=size-16;
-			if(!scan_native_symbols(records,raw_size))goto done;}
+			if(!scan_pass1(records,raw_size,u32(payload)))goto done;}
 	}
 	if(!have_metadata){fprintf(stderr,"The capture holds no symbol metadata\n");goto done;}
+	if(pause_count)qsort(pauses,pause_count,sizeof(recording_pause),pause_compare);
 	/* thread names, then the frame track names */
 	if(names_size>=4){uint32_t count=u32(names),pos=4;for(uint32_t i=0;i<count&&pos+8<=names_size;i++){uint32_t tid=u32(names+pos),n=u32(names+pos+4);if(pos+8+n>names_size)break;if(!synth_event(&out,0,tid,PROFILE_EVENT_THREAD_NAME,names+pos+8,n))goto done;pos+=8+n;}}
 	if(!synth_event(&out,0,FRAME_TRACK_TID,PROFILE_EVENT_THREAD_NAME,"Frames",6))goto done;
@@ -687,7 +752,7 @@ done:
 	return code;
 }
 
-static void usage( const char *p ){fprintf(stderr,"Usage:\n  %s [--host HOST] [--sources LIST] [--rate HZ] [--alloc-interval N] [--pool MIB] [--interval MS] [--duration SEC] [--connect-timeout SEC] [--output FILE] PORT\n  %s report [--top N] [--lines] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format folded [--lines] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format perfetto [--lines] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n  %s export --format pftrace [--process-name NAME] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n",p,p,p,p,p);}
+static void usage( const char *p ){fprintf(stderr,"Usage:\n  %s [--host HOST] [--sources LIST] [--rate HZ] [--alloc-interval N] [--pool MIB] [--interval MS] [--duration SEC] [--max-size MIB] [--paused] [--connect-timeout SEC] [--output FILE] PORT\n  %s report [--top N] [--lines] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format folded [--lines] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format perfetto [--lines] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n  %s export --format pftrace [--process-name NAME] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n",p,p,p,p,p);}
 
 static int offline( int argc,char **argv,int exporting ) {
 	const char *path=NULL,*output_path=NULL;int top=15,code=1,complete=0,format=0,show_lines=0,raw_leaf=0,perfetto_first=1,metadata_dirty=0;FILE *file=NULL,*perfetto=NULL;symbols table={0};folded_table folded_stacks={0};unsigned char header[24],record_header[16],*payload=NULL,*pending=NULL;size_t pending_len=0,pending_cap=512*1024;uint64_t samples=0,unresolved=0,dropped=0,cursor=0,last_time=0,reported_dropped=0,start_ns=0,end_ns=UINT64_MAX;int have_cursor=0;double time_origin=-1;const char *process_name="HashLink";pf_export pf={0};
@@ -744,7 +809,7 @@ int main( int argc,char **argv ) {
 	unsigned char hello[16],*reply=NULL;uint32_t reply_size;
 	if(argc>1&&!strcmp(argv[1],"report"))return offline(argc,argv,0);
 	if(argc>1&&!strcmp(argv[1],"export"))return offline(argc,argv,1);
-	for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")){usage(argv[0]);return 0;}else if(!strcmp(argv[i],"--host")&&++i<argc)host=argv[i];else if(!strcmp(argv[i],"--sources")&&++i<argc)source_list=argv[i];else if(!strcmp(argv[i],"--rate")&&++i<argc)rate=atoi(argv[i]);else if(!strcmp(argv[i],"--alloc-interval")&&++i<argc)allocation_interval=atoi(argv[i]);else if(!strcmp(argv[i],"--pool")&&++i<argc)pool_mib=atoi(argv[i]);else if(!strcmp(argv[i],"--interval")&&++i<argc)interval=atoi(argv[i]);else if(!strcmp(argv[i],"--duration")&&++i<argc)duration=atoi(argv[i]);else if(!strcmp(argv[i],"--connect-timeout")&&++i<argc)connect_timeout=atoi(argv[i]);else if(!strcmp(argv[i],"--output")&&++i<argc)output_path=argv[i];else if(argv[i][0]=='-'||port){usage(argv[0]);return 2;}else port=argv[i];}
+	for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")){usage(argv[0]);return 0;}else if(!strcmp(argv[i],"--host")&&++i<argc)host=argv[i];else if(!strcmp(argv[i],"--sources")&&++i<argc)source_list=argv[i];else if(!strcmp(argv[i],"--rate")&&++i<argc)rate=atoi(argv[i]);else if(!strcmp(argv[i],"--alloc-interval")&&++i<argc)allocation_interval=atoi(argv[i]);else if(!strcmp(argv[i],"--pool")&&++i<argc)pool_mib=atoi(argv[i]);else if(!strcmp(argv[i],"--interval")&&++i<argc)interval=atoi(argv[i]);else if(!strcmp(argv[i],"--duration")&&++i<argc)duration=atoi(argv[i]);else if(!strcmp(argv[i],"--max-size")&&++i<argc)max_bytes=(uint64_t)strtoull(argv[i],NULL,10)<<20;else if(!strcmp(argv[i],"--paused"))start_paused=1;else if(!strcmp(argv[i],"--connect-timeout")&&++i<argc)connect_timeout=atoi(argv[i]);else if(!strcmp(argv[i],"--output")&&++i<argc)output_path=argv[i];else if(argv[i][0]=='-'||port){usage(argv[0]);return 2;}else port=argv[i];}
 	sources=parse_sources(source_list);
 	if(!port||sources<0||rate<=0||allocation_interval<0||pool_mib<=0||interval<0||duration<0||connect_timeout<0){usage(argv[0]);return 2;}
 	/* An allocation interval asks for allocation samples even when the source list leaves them out. */

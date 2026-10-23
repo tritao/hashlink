@@ -62,8 +62,10 @@ Requests:
 | ---: | --- | --- | --- |
 | 1 | status | none | status |
 | 4 | metadata | none | the metadata snapshot |
-| 16 | start | 16 bytes, below | status |
+| 16 | start | 16 or 20 bytes, below | status |
 | 17 | stop | none | status |
+| 18 | pause | none | status |
+| 19 | resume | none | status |
 
 The status payload is 32 bytes: `active:u32`, `sources:u32`, `chunks:u32`,
 `chunksInUse:u32`, `dataFrames:u64`, `rawBytes:u64`. `active` is 1 while a
@@ -73,7 +75,8 @@ the buffer pool in 256 KiB chunks and `chunksInUse` the chunks not free.
 and the record bytes in them before compression.
 
 The start payload is `sources:u32`, `sampleRate:u32`, `allocInterval:u32`,
-`poolMiB:u32`. Source bits are 1 for instrumentation, 2 for sampling and 4 for
+`poolMiB:u32`, optionally followed by `flags:u32`. Flag bit 0 starts the
+session paused: it is open, but records nothing until it is resumed. Source bits are 1 for instrumentation, 2 for sampling and 4 for
 allocation samples. `sampleRate` applies when sampling is on and must be 1 to
 100000 Hz. `allocInterval` applies when allocation samples are on: one sample
 per that many allocations, up to 100000000. `poolMiB` sizes the chunk pool,
@@ -81,6 +84,11 @@ in 256 KiB chunks and at least 16; 0 means 64. The pool is kept between
 sessions and replaced only by a larger one. A start is refused (error
 response) while a session is active or when the pool cannot be allocated. A
 bad sample rate or allocation interval is found later (see the sequence below).
+
+Pause and resume stop and restart recording within the open session; the
+program can do the same (`haxeon.ProfileRecording`). Either is refused (error
+response) without a session. Whoever changes it, the runtime pushes a
+`recording` frame with the new state.
 
 A session ends on a stop request, when the program exits, or when the client
 disconnects. A stop request is answered with a status response only after the
@@ -123,6 +131,7 @@ carries the type of its request, 4.
 | 19 | threads | `count:u32`, then per thread `tid:u32, length:u32`, then the UTF-8 name |
 | 20 | end | `dataFrames:u64, rawBytes:u64` |
 | 21 | stats | `chunksInUse:u32, chunkCount:u32, stalls:u64, stallTicks:u64, rawBytes:u64, sentBytes:u64` |
+| 22 | recording | `recording:u32`: 1 while the session records, 0 while it is paused |
 
 - **session** (32 bytes). `version` is 1. `sources` echoes the request.
   `tickKind` is 1 for the TSC, 2 for `QueryPerformanceCounter`, 3 for
@@ -188,7 +197,11 @@ whole in its frame. The words after word 0:
   nameLength:u32`, then the module and the name; native location (0x484C0006),
   `pc:u64, moduleBase:u64, moduleSize:u64, line:u32, fileLength:u32`, then the
   file; module loaded (0x484C0007), the module ID (u64); module revision
-  (0x484C0001), the module ID (u64) and the revision (u32).
+  (0x484C0001), the module ID (u64) and the revision (u32); recording
+  (0x484C0008), u32 0 when recording pauses and 1 when it resumes. A pause is
+  written before recording stops and a resume after it starts, so a reader
+  closes every thread's open calls at a pause: the calls in between went
+  unrecorded.
 
 A reader keeps the open calls and spans of each thread. `EXIT` closes the
 innermost call. `UNWIND` closes the `count` innermost open calls (all of them if fewer are open). `SPAN_END`

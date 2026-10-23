@@ -62,6 +62,12 @@ HL_API unsigned long long hl_prof_monotonic_ns( void );
    waits for records in flight, after which a final drain returns everything recorded. */
 HL_API bool hl_prof_start( unsigned int pool_mib );
 HL_API void hl_prof_stop( void );
+/* Pauses (false) or resumes (true) recording within the open session, writing a PROFILE_EVENT_RECORDING event. Returns
+   false when no session is open. Any thread. */
+HL_API bool hl_prof_set_recording( bool on );
+/* Counts the pauses and resumes so far, for the consumer to notice them. */
+HL_API int hl_prof_recording_changes( void );
+HL_API bool hl_prof_session_open( void );
 
 /* Hands every record written since the last drain to fn, one contiguous segment of one thread's records at a time.
    Consumer thread only. Returns the number of bytes handed over. */
