@@ -722,6 +722,15 @@ static ereg emit_call_fid( emit_ctx *ctx, int findex, ereg *args, int nargs, emi
 }
 
 #include "jit_intrinsics.h"
+#include "hlprof.h"
+
+/* The probes an instrumented build calls (see IrInstrumentation in Haxeon): void natives that record only while a
+   session records. prof_call_depth and prof_call_unwind are not: a catch restores the depth whether or not anything records. */
+static bool is_guarded_probe( hl_native *native ) {
+	if( native->lib == NULL || strcmp(native->lib,"std") ) return false;
+	if( strcmp(native->name,"prof_call_enter") && strcmp(native->name,"prof_call_exit") ) return false;
+	return native->t->fun->ret->kind == HVOID;
+}
 
 static void emit_call_fun( emit_ctx *ctx, vreg *dst, int findex, int count, int *args_regs ) {
 	hl_module *m = ctx->mod;
@@ -744,6 +753,16 @@ static void emit_call_fun( emit_ctx *ctx, vreg *dst, int findex, int count, int 
 			} else {
 				hl_fatal1("HashLink: unresolved native findex %d", findex);
 			}
+		}
+		if( is_guarded_probe(m->code->natives + fid - m->code->nfunctions) ) {
+			/* Instrumentation probes do nothing while no session records: test the recording flag here and skip the call,
+			   so an instrumented build that is not recording pays a load and a branch per probe. */
+			emit_test(ctx,LOAD_MEM(LOAD_CONST_PTR(&hl_prof_on),0,&hlt_i32),OJFalse);
+			int skip = emit_jump(ctx,true);
+			emit_native_call(ctx,m->functions_ptrs[findex],args,count,&hlt_void);
+			split_block(ctx);
+			patch_jump(ctx,skip);
+			return;
 		}
 #		if defined(__x86_64__) || defined(_M_X64)
 		const jit_intrinsic_entry *intrinsic = jit_intrinsic_lookup(m->code->natives + fid - m->code->nfunctions);
