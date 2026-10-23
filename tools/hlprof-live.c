@@ -217,8 +217,10 @@ static int perfetto_span_event( FILE *file,int *first,uint32_t pid,uint32_t tid,
  * JIT region or native module that holds them), spans become nested slices and GC statistics become counter tracks.
  * Event times are the runtime's clock in seconds; the trace uses them as nanoseconds.
  */
-/* A thread's sampled call stack as open slices on its "Call stacks" track, root first. */
-typedef struct { uint32_t tid,depth,capacity; char **names; double last; } pf_stack;
+/* A thread's call stack on its "Call stacks" track, root first. While the thread's frames are marked, each frame (and
+   each idle stretch between frames) is a root slice, so the track reads as one flame graph per frame: a frame boundary
+   ends every slice and reopens the stack under the next root. */
+typedef struct { uint32_t tid,depth,capacity,emitted; char **names; char *root; double last; } pf_stack;
 typedef struct { pftrace *trace; uint64_t weight_ns,last_ns; uint64_t *frames; uint32_t frame_capacity; perfetto_gc_state gc; double sampled_allocation_bytes; pf_stack *stacks; uint32_t stack_count,stack_capacity; } pf_export;
 static uint64_t pf_time( pf_export *pf,double seconds ){uint64_t ns=seconds>0?(uint64_t)(seconds*1e9+0.5):1;if(ns>pf->last_ns)pf->last_ns=ns;return ns;}
 static char *pf_text( const unsigned char *data,uint32_t size ){char *text=(char*)malloc((size_t)size+1);if(text){memcpy(text,data,size);text[size]=0;}return text;}
@@ -243,27 +245,45 @@ static pf_stack *pf_stack_of( pf_export *pf,uint32_t tid ) {
 	memset(pf->stacks+pf->stack_count,0,sizeof(pf_stack));pf->stacks[pf->stack_count].tid=tid;
 	return pf->stacks+pf->stack_count++;
 }
-static void pf_stack_close( pf_export *pf,pf_stack *st,uint32_t depth,double time ) {
-	while(st->depth>depth){st->depth--;free(st->names[st->depth]);pftrace_stack_end(pf->trace,pf_time(pf,time),st->tid);}
+/* Ends open slices until `keep` remain (the root counts as one). */
+static void pf_stack_cut( pf_export *pf,pf_stack *st,uint32_t keep,double time ) {
+	while(st->emitted>keep){st->emitted--;pftrace_stack_end(pf->trace,pf_time(pf,time),st->tid);}
+}
+static void pf_stack_reopen( pf_export *pf,pf_stack *st,double time ) {
+	if(st->root){pftrace_stack_begin(pf->trace,pf_time(pf,time),st->tid,st->root);st->emitted=1;}
+	for(uint32_t i=0;i<st->depth;i++){pftrace_stack_begin(pf->trace,pf_time(pf,time),st->tid,st->names[i]);st->emitted++;}
+}
+static void pf_stack_truncate( pf_stack *st,uint32_t depth ) {
+	while(st->depth>depth)free(st->names[--st->depth]);
 }
 /* Lays a sample's stack out over time: frames shared with the previous sample extend its slices, the rest end and start
    here. Each sample stands for one sampling interval, so a thread unsampled for longer has its slices end after the last
    interval it was seen. */
 static int pf_stack_sample( pf_export *pf,symbols *s,double time,uint32_t tid,const unsigned char *leaf_first,uint32_t frames ) {
-	double interval=pf->weight_ns/1e9;uint32_t shared=0;pf_stack *st=pf_stack_of(pf,tid);
+	double interval=pf->weight_ns/1e9;uint32_t shared=0,base;pf_stack *st=pf_stack_of(pf,tid);
 	if(!st)return 0;
-	if(st->depth&&time-st->last>interval*3)pf_stack_close(pf,st,0,st->last+interval);
+	base=st->root?1:0;
+	if(st->depth&&time-st->last>interval*3){pf_stack_cut(pf,st,base,st->last+interval);pf_stack_truncate(st,0);}
 	while(shared<st->depth&&shared<frames&&!strcmp(st->names[shared],pf_function(s,u64(leaf_first+(frames-1-shared)*8))))shared++;
-	pf_stack_close(pf,st,shared,time);
+	pf_stack_cut(pf,st,base+shared,time);pf_stack_truncate(st,shared);
 	if(frames>st->capacity){char **next=(char**)realloc(st->names,sizeof(char*)*frames);if(!next)return 0;st->names=next;st->capacity=frames;}
 	for(uint32_t i=shared;i<frames;i++){const char *name=pf_function(s,u64(leaf_first+(frames-1-i)*8));size_t n=strlen(name);
 		if(!(st->names[i]=(char*)malloc(n+1)))return 0;memcpy(st->names[i],name,n+1);st->depth=i+1;
-		pftrace_stack_begin(pf->trace,pf_time(pf,time),tid,name);}
+		pftrace_stack_begin(pf->trace,pf_time(pf,time),tid,name);st->emitted++;}
 	st->last=time;
 	return 1;
 }
+/* A frame boundary on the thread: ends everything and reopens the stack under the new root ("Frame N" or "Idle"). */
+static int pf_stack_frame( pf_export *pf,double time,uint32_t tid,const char *root ) {
+	pf_stack *st=pf_stack_of(pf,tid);size_t n=strlen(root);
+	if(!st)return 0;
+	pf_stack_cut(pf,st,0,time);free(st->root);
+	if(!(st->root=(char*)malloc(n+1)))return 0;memcpy(st->root,root,n+1);
+	pf_stack_reopen(pf,st,time);
+	return 1;
+}
 static void pf_stacks_finish( pf_export *pf ) {
-	for(uint32_t i=0;i<pf->stack_count;i++){pf_stack_close(pf,pf->stacks+i,0,pf->stacks[i].last+pf->weight_ns/1e9);free(pf->stacks[i].names);}
+	for(uint32_t i=0;i<pf->stack_count;i++){pf_stack *st=pf->stacks+i;pf_stack_cut(pf,st,0,st->last+pf->weight_ns/1e9);pf_stack_truncate(st,0);free(st->names);free(st->root);}
 	free(pf->stacks);pf->stacks=NULL;pf->stack_count=pf->stack_capacity=0;
 }
 static int pf_sample( pf_export *pf,symbols *s,double time,uint32_t tid,const unsigned char *leaf_first,uint32_t frames,int gc_stop ) {
@@ -282,6 +302,8 @@ static int pf_event( pf_export *pf,double time,uint32_t tid,uint32_t event_id,co
 	case PROFILE_EVENT_SPAN_END:pftrace_slice_end(pf->trace,ts,tid);break;
 	case 0x484C2001U:if(!(text=pf_text(payload,size)))return 0;pftrace_slice_begin(pf->trace,ts,tid,text,"hl.call");free(text);break;
 	case 0x484C2002U:pftrace_slice_end(pf->trace,ts,tid);break;
+	case 0x484C2004U:if(!(text=pf_text(payload,size)))return 0;{int ok=pf_stack_frame(pf,time,tid,text);free(text);if(!ok)return 0;}break;
+	case 0x484C2005U:if(!pf_stack_frame(pf,time,tid,"Idle"))return 0;break;
 	case 0x484C2003U:if(size==8){double end;memcpy(&end,payload,8);pftrace_slice_begin(pf->trace,ts,tid,"profiler stall","hl.profiler");pftrace_slice_end(pf->trace,pf_time(pf,end),tid);}break;
 	case PROFILE_EVENT_THREAD_NAME:if(!(text=pf_text(payload,size)))return 0;pftrace_thread(pf->trace,tid,text);free(text);break;
 	case PROFILE_EVENT_MODULE_REVISION:pftrace_instant(pf->trace,ts,0,"module revision");break;
@@ -349,6 +371,9 @@ enum { R_ENTER=0x01, R_EXIT=0x02, R_UNWIND=0x03, R_SPAN_BEGIN=0x10, R_SPAN_END=0
 #define EXPORT_CALL_BEGIN 0x484C2001U
 #define EXPORT_CALL_END 0x484C2002U
 #define EXPORT_STALL 0x484C2003U
+/* The main frame set's boundaries on the thread that marked them: a frame starts (payload: its name) or the thread idles. */
+#define EXPORT_FRAME_BEGIN 0x484C2004U
+#define EXPORT_FRAME_IDLE 0x484C2005U
 #define FRAME_TRACK_TID 0x7FFFF000U
 #define TICK_MASK 0x00FFFFFFFFFFFFFFULL
 
@@ -454,6 +479,50 @@ static int synth( byte_buffer *o,int kind,int flags,double time,uint32_t tid,uin
 }
 static int synth_event( byte_buffer *o,double time,uint32_t tid,uint32_t id,const void *payload,uint32_t size ){return synth(o,2,0,time,tid,id,payload,size,NULL,0);}
 
+/* Data frames arrive in drain order, one thread's segment at a time, so records of different threads interleave only
+   roughly in time: a sample can arrive before the frame mark that precedes it. The reorder window holds synthesized
+   records and releases them in time order once they are REORDER_WINDOW seconds older than the newest record seen.
+   Symbol and thread-name events are released first, so the samples that use them resolve. A record arriving after
+   later records were released keeps its order by taking the last released time. */
+#define REORDER_WINDOW 2.0
+typedef struct { double time; uint64_t seq; size_t offset; uint32_t length; } ordered_record;
+typedef struct { byte_buffer data; ordered_record *index; size_t count,capacity; uint64_t seq,late; double newest,released; } reorder_buffer;
+static int ordered_compare( const void *a,const void *b ) {
+	const ordered_record *x=(const ordered_record*)a,*y=(const ordered_record*)b;
+	if(x->time!=y->time)return x->time<y->time?-1:1;
+	return x->seq<y->seq?-1:x->seq>y->seq?1:0;
+}
+static int reorder_add( reorder_buffer *r,const unsigned char *records,size_t length ) {
+	size_t pos=0;
+	while(length-pos>=24){uint32_t body=u32(records+pos);uint64_t bits=u64(records+pos+8);double time;
+		if(length-pos<(size_t)body+4)break;
+		memcpy(&time,&bits,8);
+		if(records[pos+4]==2){uint32_t id=u32(records+pos+20);if(id==PROFILE_EVENT_NATIVE_SYMBOL||id==PROFILE_EVENT_NATIVE_LOCATION||id==PROFILE_EVENT_THREAD_NAME)time=-1e300;}
+		if(time>r->newest)r->newest=time;
+		if(r->count==r->capacity){size_t cap=r->capacity?r->capacity*2:65536;ordered_record *next=(ordered_record*)realloc(r->index,cap*sizeof(ordered_record));if(!next)return 0;r->index=next;r->capacity=cap;}
+		if(!out_reserve(&r->data,(size_t)body+4))return 0;
+		memcpy(r->data.data+r->data.length,records+pos,(size_t)body+4);
+		r->index[r->count].time=time;r->index[r->count].seq=r->seq++;r->index[r->count].offset=r->data.length;r->index[r->count].length=body+4;r->count++;
+		r->data.length+=(size_t)body+4;pos+=(size_t)body+4;}
+	return 1;
+}
+/* Moves every record at or before `until` to out, in time order. */
+static int reorder_release( reorder_buffer *r,double until,byte_buffer *out ) {
+	size_t kept=0,released=0;byte_buffer rest={0};
+	if(!r->count)return 1;
+	qsort(r->index,r->count,sizeof(ordered_record),ordered_compare);
+	while(released<r->count&&r->index[released].time<=until)released++;
+	for(size_t i=0;i<released;i++){ordered_record *x=r->index+i;unsigned char *p;
+		if(!out_reserve(out,x->length))return 0;
+		p=out->data+out->length;memcpy(p,r->data.data+x->offset,x->length);out->length+=x->length;
+		if(x->time>-1e299){if(x->time<r->released){uint64_t bits;memcpy(&bits,&r->released,8);put64(p+8,bits);r->late++;}else r->released=x->time;}}
+	if(released==r->count){r->count=0;r->data.length=0;return 1;}
+	if(!out_reserve(&rest,r->data.length))return 0;
+	for(size_t i=released;i<r->count;i++){ordered_record *x=r->index+i;memcpy(rest.data+rest.length,r->data.data+x->offset,x->length);r->index[kept]=*x;r->index[kept].offset=rest.length;rest.length+=x->length;kept++;}
+	free(r->data.data);r->data=rest;r->count=kept;
+	return 1;
+}
+
 /* A UTF-16 or UTF-8 name from a record, as UTF-8. */
 static uint32_t record_name( const unsigned char *p,uint32_t units,uint32_t encoding,char *out,uint32_t capacity ) {
 	uint32_t n=0;
@@ -503,7 +572,9 @@ static int decode_records( byte_buffer *o,symbols *s,tick_clock *c,uint32_t tid,
 		case R_SPAN_END:{int has_span=0;for(uint32_t i=0;i<st->count;i++)if(st->kinds[i]==2)has_span=1;if(has_span&&!close_slices(o,st,time,tid,0,1))return 0;break;}
 		case R_FRAME_MARK:case R_FRAME_IDLE:{if(pos+16>length)goto bad;uint64_t set=u64(p+pos+8);size=16;if(set>=16)break;frame_set_state *f=frame_sets+set;uint32_t frame_tid=FRAME_TRACK_TID+(uint32_t)set;
 			if(f->open&&!synth_event(o,time,frame_tid,PROFILE_EVENT_SPAN_END,NULL,0))return 0;f->open=0;
-			if(kind==R_FRAME_MARK){int n=snprintf(name,sizeof(name),"Frame %llu",(unsigned long long)++f->number);if(!synth_event(o,time,frame_tid,PROFILE_EVENT_SPAN_BEGIN,name,(uint32_t)n))return 0;f->open=1;}
+			if(kind==R_FRAME_MARK){int n=snprintf(name,sizeof(name),"Frame %llu",(unsigned long long)++f->number);if(!synth_event(o,time,frame_tid,PROFILE_EVENT_SPAN_BEGIN,name,(uint32_t)n))return 0;f->open=1;
+				if(set==0&&!synth_event(o,time,tid,EXPORT_FRAME_BEGIN,name,(uint32_t)n))return 0;}
+			else if(set==0&&!synth_event(o,time,tid,EXPORT_FRAME_IDLE,NULL,0))return 0;
 			break;}
 		case R_EVENT:{if(pos+16>length)goto bad;uint32_t id=u32(p+pos+8),n=u32(p+pos+12);if(pos+16+((n+7)&~7u)>length)goto bad;if(!synth_event(o,time,tid,id,p+pos+16,n))return 0;size=16+((n+7)&~7u);break;}
 		case R_COUNTER:{if(pos+24>length)goto bad;uint32_t units=u32(p+pos+16),encoding=u32(p+pos+20),bytes=units*(encoding==1?1:2);if(pos+24+((bytes+7)&~7u)>length)goto bad;
@@ -521,7 +592,7 @@ bad:
 /* Reads a v2 capture (positioned after its header) into consume(): metadata, clock pairs and thread names first, then
    every thread's records. */
 static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,uint64_t *samples,uint64_t *unresolved,folded_table *folded_stacks,int show_lines,int raw_leaf,FILE *perfetto,int *perfetto_first,double *time_origin,uint32_t pid,pf_export *pf,int *complete ) {
-	unsigned char record_header[16],*payload=NULL,*raw=NULL;uint32_t raw_cap=0;long data_start=ftell(file);tick_clock clock={0};byte_buffer out={0};int code=0,have_metadata=0;uint64_t malformed=0;
+	unsigned char record_header[16],*payload=NULL,*raw=NULL;uint32_t raw_cap=0;long data_start=ftell(file);tick_clock clock={0};byte_buffer out={0},fresh={0};reorder_buffer order={0};int code=0,have_metadata=0;uint64_t malformed=0;
 	unsigned char *names=NULL;uint32_t names_size=0;
 	memset(frame_sets,0,sizeof(frame_sets));
 	/* pass 1: the last metadata snapshot (it lists retired regions too), clock pairs, session and thread names */
@@ -550,12 +621,17 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 			if(flags&1){if(raw_size>raw_cap){unsigned char *r=(unsigned char*)realloc(raw,raw_size);if(!r)goto done;raw=r;raw_cap=raw_size;}
 				if(LZ4_decompress_safe((const char*)payload+16,(char*)raw,(int)(size-16),(int)raw_size)!=(int)raw_size){malformed++;continue;}records=raw;}
 			else raw_size=size-16;
-			if(!decode_records(&out,table,&clock,tid,records,raw_size,&malformed))goto done;}
+			if(!decode_records(&fresh,table,&clock,tid,records,raw_size,&malformed)||!reorder_add(&order,fresh.data,fresh.length))goto done;
+			fresh.length=0;}
+		if(!reorder_release(&order,order.newest-REORDER_WINDOW,&out))goto done;
 		if(out.length>(8U<<20)&&!consume(table,out.data,&out.length,samples,unresolved,folded_stacks,show_lines,raw_leaf,NULL,perfetto,perfetto_first,time_origin,pid,pf))goto malformed_stream;
 	}
 	/* close what is still open when the capture ends */
-	{double end=clock.count?clock_seconds(&clock,clock.pairs[clock.count-1].ticks):0;for(int i=0;i<4096;i++)if(open_stacks[i].used&&!close_slices(&out,open_stacks+i,end,open_stacks[i].tid,0,0))goto done;
-		for(int i=0;i<16;i++)if(frame_sets[i].open&&!synth_event(&out,end,FRAME_TRACK_TID+(uint32_t)i,PROFILE_EVENT_SPAN_END,NULL,0))goto done;}
+	{double end=clock.count?clock_seconds(&clock,clock.pairs[clock.count-1].ticks):0;if(end<order.newest)end=order.newest;
+		for(int i=0;i<4096;i++)if(open_stacks[i].used&&!close_slices(&fresh,open_stacks+i,end,open_stacks[i].tid,0,0))goto done;
+		for(int i=0;i<16;i++)if(frame_sets[i].open&&!synth_event(&fresh,end,FRAME_TRACK_TID+(uint32_t)i,PROFILE_EVENT_SPAN_END,NULL,0))goto done;
+		if(!reorder_add(&order,fresh.data,fresh.length)||!reorder_release(&order,1e300,&out))goto done;}
+	if(order.late)fprintf(stderr,"warning: %llu records arrived more than %.0f s late and were moved to keep time order\n",(unsigned long long)order.late,REORDER_WINDOW);
 	if(out.length&&!consume(table,out.data,&out.length,samples,unresolved,folded_stacks,show_lines,raw_leaf,NULL,perfetto,perfetto_first,time_origin,pid,pf))goto malformed_stream;
 	if(malformed)fprintf(stderr,"warning: skipped %llu malformed record segments\n",(unsigned long long)malformed);
 	code=1;
@@ -563,7 +639,7 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 malformed_stream:
 	fprintf(stderr,"Malformed profiler stream\n");
 done:
-	free(payload);free(raw);free(out.data);free(clock.pairs);free(names);stacks_free();
+	free(payload);free(raw);free(out.data);free(fresh.data);free(order.data.data);free(order.index);free(clock.pairs);free(names);stacks_free();
 	return code;
 }
 
