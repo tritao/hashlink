@@ -283,6 +283,7 @@ typedef struct {
 	uint64_t hash;
 	uint64_t uuid;
 	uint64_t tc_iid;
+	uint64_t stack_uuid;	/* the thread's call-stack track, 0 until used */
 	uint32_t tid;
 	int emitted;
 	char *name;
@@ -589,11 +590,27 @@ static uint64_t track_for( pftrace *t, uint32_t tid, uint64_t ts ) {
 	return e ? e->uuid : 0;
 }
 
-void pftrace_slice_begin( pftrace *t, uint64_t ts_ns, uint32_t tid, const char *name, const char *category ) {
-	uint64_t uuid, nid;
+/* The thread's call-stack track: a child of its thread track, so it shows inside the thread's group. */
+static uint64_t stack_track_for( pftrace *t, uint32_t tid, uint64_t ts ) {
+	thread_entry *e = thread_ready(t, tid, ts);
 	size_t a;
-	if( !t || t->failed ) return;
-	uuid = track_for(t, tid, ts_ns);
+	if( !e ) return 0;
+	if( !e->stack_uuid ) {
+		e->stack_uuid = t->next_uuid++;
+		pkt_begin(t, ts);
+		a = pb_begin(&t->pk, F_PKT_TRACK_DESC);
+		pb_vi(&t->pk, 1, e->stack_uuid);
+		pb_str(&t->pk, 2, "Call stacks", 11);
+		pb_vi(&t->pk, 5, e->uuid);
+		pb_end(&t->pk, a);
+		pkt_finish(t, 0);
+	}
+	return e->stack_uuid;
+}
+
+static void slice_begin( pftrace *t, uint64_t ts_ns, uint64_t uuid, const char *name, const char *category ) {
+	uint64_t nid;
+	size_t a;
 	nid = intern_str(t, &t->event_names, F_IN_EVENT_NAMES, name);
 	if( t->failed ) return;
 	pkt_begin(t, ts_ns);
@@ -607,18 +624,42 @@ void pftrace_slice_begin( pftrace *t, uint64_t ts_ns, uint32_t tid, const char *
 	pkt_finish(t, 1);
 }
 
-void pftrace_slice_end( pftrace *t, uint64_t ts_ns, uint32_t tid ) {
-	uint64_t uuid;
+static void slice_end( pftrace *t, uint64_t ts_ns, uint64_t uuid ) {
 	size_t a;
-	if( !t || t->failed ) return;
-	uuid = track_for(t, tid, ts_ns);
-	if( t->failed ) return;
 	pkt_begin(t, ts_ns);
 	a = pb_begin(&t->pk, F_PKT_TRACK_EVENT);
 	pb_vi(&t->pk, 9, 2);	/* TYPE_SLICE_END */
 	pb_vi(&t->pk, 11, uuid);
 	pb_end(&t->pk, a);
 	pkt_finish(t, 1);
+}
+
+void pftrace_slice_begin( pftrace *t, uint64_t ts_ns, uint32_t tid, const char *name, const char *category ) {
+	uint64_t uuid;
+	if( !t || t->failed ) return;
+	uuid = track_for(t, tid, ts_ns);
+	if( !t->failed ) slice_begin(t, ts_ns, uuid, name, category);
+}
+
+void pftrace_slice_end( pftrace *t, uint64_t ts_ns, uint32_t tid ) {
+	uint64_t uuid;
+	if( !t || t->failed ) return;
+	uuid = track_for(t, tid, ts_ns);
+	if( !t->failed ) slice_end(t, ts_ns, uuid);
+}
+
+void pftrace_stack_begin( pftrace *t, uint64_t ts_ns, uint32_t tid, const char *name ) {
+	uint64_t uuid;
+	if( !t || t->failed || !tid ) return;
+	uuid = stack_track_for(t, tid, ts_ns);
+	if( !t->failed ) slice_begin(t, ts_ns, uuid, name, "hl.stack");
+}
+
+void pftrace_stack_end( pftrace *t, uint64_t ts_ns, uint32_t tid ) {
+	uint64_t uuid;
+	if( !t || t->failed || !tid ) return;
+	uuid = stack_track_for(t, tid, ts_ns);
+	if( !t->failed ) slice_end(t, ts_ns, uuid);
 }
 
 void pftrace_instant( pftrace *t, uint64_t ts_ns, uint32_t tid, const char *name ) {

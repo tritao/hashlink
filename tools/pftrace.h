@@ -35,6 +35,10 @@ void pftrace_thread( pftrace *t, uint32_t tid, const char *name );
 void pftrace_slice_begin( pftrace *t, uint64_t ts_ns, uint32_t tid, const char *name, const char *category );   /* category may be NULL */
 void pftrace_slice_end( pftrace *t, uint64_t ts_ns, uint32_t tid );
 
+/* Nested slices on the thread's "Call stacks" track, a child of its thread track: call stacks laid out over time. */
+void pftrace_stack_begin( pftrace *t, uint64_t ts_ns, uint32_t tid, const char *name );
+void pftrace_stack_end( pftrace *t, uint64_t ts_ns, uint32_t tid );
+
 /* Zero-duration instant event; tid==0 puts it on the process track. */
 void pftrace_instant( pftrace *t, uint64_t ts_ns, uint32_t tid, const char *name );
 

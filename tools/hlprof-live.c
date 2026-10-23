@@ -217,7 +217,9 @@ static int perfetto_span_event( FILE *file,int *first,uint32_t pid,uint32_t tid,
  * JIT region or native module that holds them), spans become nested slices and GC statistics become counter tracks.
  * Event times are the runtime's clock in seconds; the trace uses them as nanoseconds.
  */
-typedef struct { pftrace *trace; uint64_t weight_ns,last_ns; uint64_t *frames; uint32_t frame_capacity; perfetto_gc_state gc; double sampled_allocation_bytes; } pf_export;
+/* A thread's sampled call stack as open slices on its "Call stacks" track, root first. */
+typedef struct { uint32_t tid,depth,capacity; char **names; double last; } pf_stack;
+typedef struct { pftrace *trace; uint64_t weight_ns,last_ns; uint64_t *frames; uint32_t frame_capacity; perfetto_gc_state gc; double sampled_allocation_bytes; pf_stack *stacks; uint32_t stack_count,stack_capacity; } pf_export;
 static uint64_t pf_time( pf_export *pf,double seconds ){uint64_t ns=seconds>0?(uint64_t)(seconds*1e9+0.5):1;if(ns>pf->last_ns)pf->last_ns=ns;return ns;}
 static char *pf_text( const unsigned char *data,uint32_t size ){char *text=(char*)malloc((size_t)size+1);if(text){memcpy(text,data,size);text[size]=0;}return text;}
 static uint64_t pf_frame( pf_export *pf,symbols *s,uint64_t pc ) {
@@ -229,11 +231,47 @@ static uint64_t pf_frame( pf_export *pf,symbols *s,uint64_t pc ) {
 	if(n){uint64_t base=n->module_base?n->module_base:n->base;return pftrace_frame(pf->trace,n->name,pftrace_mapping(pf->trace,n->module,base,base+n->module_size),pc-base,n->file,n->line);}
 	{char name[40];snprintf(name,sizeof(name),"[unknown 0x%llx]",(unsigned long long)pc);return pftrace_frame(pf->trace,name,0,0,NULL,0);}
 }
+static const char *pf_function( symbols *s,uint64_t pc ) {
+	symbol *x=resolve(s,pc);native_symbol *n;
+	if(x)return x->name;
+	if((n=resolve_native(pc))!=NULL)return n->name;
+	return "[unknown]";
+}
+static pf_stack *pf_stack_of( pf_export *pf,uint32_t tid ) {
+	for(uint32_t i=0;i<pf->stack_count;i++)if(pf->stacks[i].tid==tid)return pf->stacks+i;
+	if(pf->stack_count==pf->stack_capacity){uint32_t capacity=pf->stack_capacity?pf->stack_capacity*2:16;pf_stack *next=(pf_stack*)realloc(pf->stacks,sizeof(pf_stack)*capacity);if(!next)return NULL;pf->stacks=next;pf->stack_capacity=capacity;}
+	memset(pf->stacks+pf->stack_count,0,sizeof(pf_stack));pf->stacks[pf->stack_count].tid=tid;
+	return pf->stacks+pf->stack_count++;
+}
+static void pf_stack_close( pf_export *pf,pf_stack *st,uint32_t depth,double time ) {
+	while(st->depth>depth){st->depth--;free(st->names[st->depth]);pftrace_stack_end(pf->trace,pf_time(pf,time),st->tid);}
+}
+/* Lays a sample's stack out over time: frames shared with the previous sample extend its slices, the rest end and start
+   here. Each sample stands for one sampling interval, so a thread unsampled for longer has its slices end after the last
+   interval it was seen. */
+static int pf_stack_sample( pf_export *pf,symbols *s,double time,uint32_t tid,const unsigned char *leaf_first,uint32_t frames ) {
+	double interval=pf->weight_ns/1e9;uint32_t shared=0;pf_stack *st=pf_stack_of(pf,tid);
+	if(!st)return 0;
+	if(st->depth&&time-st->last>interval*3)pf_stack_close(pf,st,0,st->last+interval);
+	while(shared<st->depth&&shared<frames&&!strcmp(st->names[shared],pf_function(s,u64(leaf_first+(frames-1-shared)*8))))shared++;
+	pf_stack_close(pf,st,shared,time);
+	if(frames>st->capacity){char **next=(char**)realloc(st->names,sizeof(char*)*frames);if(!next)return 0;st->names=next;st->capacity=frames;}
+	for(uint32_t i=shared;i<frames;i++){const char *name=pf_function(s,u64(leaf_first+(frames-1-i)*8));size_t n=strlen(name);
+		if(!(st->names[i]=(char*)malloc(n+1)))return 0;memcpy(st->names[i],name,n+1);st->depth=i+1;
+		pftrace_stack_begin(pf->trace,pf_time(pf,time),tid,name);}
+	st->last=time;
+	return 1;
+}
+static void pf_stacks_finish( pf_export *pf ) {
+	for(uint32_t i=0;i<pf->stack_count;i++){pf_stack_close(pf,pf->stacks+i,0,pf->stacks[i].last+pf->weight_ns/1e9);free(pf->stacks[i].names);}
+	free(pf->stacks);pf->stacks=NULL;pf->stack_count=pf->stack_capacity=0;
+}
 static int pf_sample( pf_export *pf,symbols *s,double time,uint32_t tid,const unsigned char *leaf_first,uint32_t frames,int gc_stop ) {
 	uint64_t ts=pf_time(pf,time);
 	if(frames>pf->frame_capacity){uint64_t *next=(uint64_t*)realloc(pf->frames,sizeof(uint64_t)*frames);if(!next)return 0;pf->frames=next;pf->frame_capacity=frames;}
 	for(uint32_t i=0;i<frames;i++)pf->frames[frames-1-i]=pf_frame(pf,s,u64(leaf_first+i*8));
 	pftrace_sample(pf->trace,ts,tid,pf->frames,frames,pf->weight_ns);
+	if(!pf_stack_sample(pf,s,time,tid,leaf_first,frames))return 0;
 	if(gc_stop)pftrace_instant(pf->trace,ts,tid,"GC stop sample");
 	return 1;
 }
@@ -578,7 +616,7 @@ static int offline( int argc,char **argv,int exporting ) {
 	if(format==1)folded_write(&folded_stacks);else if(!format)report(&table,samples,unresolved,dropped,top,show_lines);
 	code=0;
 done:
-	free(payload);free(pending);if(file)fclose(file);if(perfetto){fputs("],\"displayTimeUnit\":\"ms\"}\n",perfetto);if(fclose(perfetto)!=0)code=1;}if(pf.trace&&!pftrace_close(pf.trace)){fprintf(stderr,"Perfetto output write failed\n");code=1;}free(pf.frames);folded_free(&folded_stacks);free_native();memset(&perfetto_gc,0,sizeof(perfetto_gc));memset(perfetto_threads,0,sizeof(perfetto_threads));free_symbols(&table);return code;
+	free(payload);free(pending);if(file)fclose(file);if(perfetto){fputs("],\"displayTimeUnit\":\"ms\"}\n",perfetto);if(fclose(perfetto)!=0)code=1;}if(pf.trace)pf_stacks_finish(&pf);if(pf.trace&&!pftrace_close(pf.trace)){fprintf(stderr,"Perfetto output write failed\n");code=1;}free(pf.frames);folded_free(&folded_stacks);free_native();memset(&perfetto_gc,0,sizeof(perfetto_gc));memset(perfetto_threads,0,sizeof(perfetto_threads));free_symbols(&table);return code;
 }
 
 int main( int argc,char **argv ) {
