@@ -526,7 +526,11 @@ void hl_diagnostics_finish( void ) {
 	if( !session.active ) return;
 	session.finish_requested = true;
 	deadline = hl_sys_time() + 5.0;
+	/* Blocking for the GC: finishing builds metadata on the diagnostics thread, and a collection it starts must not
+	   wait for this thread. */
+	hl_blocking(true);
 	while( session.active && !session.finished && hl_sys_time() < deadline ) hl_sys_sleep(0.001);
+	hl_blocking(false);
 }
 
 /* status: active, sources, chunk count, chunks in use, data frames pushed, raw bytes pushed */

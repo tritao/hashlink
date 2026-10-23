@@ -800,6 +800,12 @@ static void hl_profile_loop( void *_ ) {
 
 static void profile_event( int code, vbyte *data, int dataLen );
 
+/* Sys.exit skips the end of main, so it ends a streaming session here too. */
+static void profile_before_exit( void ) {
+	hl_profile_drain();
+	hl_profile_end();
+}
+
 void hl_profile_setup( int sample_count ) {
 	#	if defined(HL_THREADS) && (defined(HL_WIN_DESKTOP) || defined(HL_LINUX) || defined (HL_MAC))
 	if( native_lock == NULL ) {
@@ -813,7 +819,7 @@ void hl_profile_setup( int sample_count ) {
 	hl_setup.profile_event = profile_event;
 	hl_setup.profile_recording = hl_profile_recording;
 	if( !profile_main_tid && hl_get_thread() ) profile_main_tid = hl_get_thread()->thread_id;
-	hl_setup.before_exit = hl_profile_end;
+	hl_setup.before_exit = profile_before_exit;
 	hl_setup.stop_profiler = hl_profile_end;
 	if( data.sample_count ) return;
 	if( sample_count < 0 ) {
