@@ -1,4 +1,4 @@
-/* Standalone HLDI sampling-profiler client. */
+/* Standalone HLDI profiler client: records sessions to HLPC captures, and reports on and exports captures. */
 #ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -15,6 +15,7 @@ typedef SOCKET socket_t;
 #define CLOSE_SOCKET closesocket
 #else
 #include <netdb.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 typedef int socket_t;
@@ -26,6 +27,7 @@ enum { SVC_PROFILE=2, P_STATUS=1, P_CONFIGURE=2, P_READ=3, P_METADATA=4 };
 enum { F_RESPONSE=1, F_ERROR=2, CAP_PROFILE=1, CAP_SYMBOLS=2 };
 #include "../src/profile_events.h"
 #include "pftrace.h"
+#include "../include/lz4/lz4.h"
 
 typedef struct { uint32_t offset,end,opcode_index,opcode,line; char *file; uint64_t self,total; } source_line;
 typedef struct { uint64_t start,end,self,total,region_base,region_size,module_id; uint32_t function_id,revision,region_flags; char *name; source_line *lines; uint32_t line_count; } symbol;
@@ -240,6 +242,9 @@ static int pf_event( pf_export *pf,double time,uint32_t tid,uint32_t event_id,co
 	switch(event_id){
 	case PROFILE_EVENT_SPAN_BEGIN:if(!(text=pf_text(payload,size)))return 0;pftrace_slice_begin(pf->trace,ts,tid,text,"hl.span");free(text);break;
 	case PROFILE_EVENT_SPAN_END:pftrace_slice_end(pf->trace,ts,tid);break;
+	case 0x484C2001U:if(!(text=pf_text(payload,size)))return 0;pftrace_slice_begin(pf->trace,ts,tid,text,"hl.call");free(text);break;
+	case 0x484C2002U:pftrace_slice_end(pf->trace,ts,tid);break;
+	case 0x484C2003U:if(size==8){double end;memcpy(&end,payload,8);pftrace_slice_begin(pf->trace,ts,tid,"profiler stall","hl.profiler");pftrace_slice_end(pf->trace,pf_time(pf,end),tid);}break;
 	case PROFILE_EVENT_THREAD_NAME:if(!(text=pf_text(payload,size)))return 0;pftrace_thread(pf->trace,tid,text);free(text);break;
 	case PROFILE_EVENT_MODULE_REVISION:pftrace_instant(pf->trace,ts,0,"module revision");break;
 	case PROFILE_EVENT_MODULE_LOADED:pftrace_instant(pf->trace,ts,0,"module loaded");break;
@@ -275,7 +280,12 @@ static int consume( symbols *s,unsigned char *pending,size_t *length,uint64_t *s
 			if(event_id==PROFILE_EVENT_NATIVE_SYMBOL&&payload_size>=24){uint32_t module_len=u32(payload+16),name_len=u32(payload+20);if(module_len+name_len!=payload_size-24||!add_native(u64(payload),u64(payload+8),payload+24,module_len,payload+24+module_len,name_len))return 0;}
 			if(event_id==PROFILE_EVENT_NATIVE_LOCATION&&!add_native_location(payload,payload_size))return 0;
 			if(pf&&!pf_event(pf,event_time,tid,event_id,payload,payload_size))return 0;
-			if(perfetto&&(event_id==PROFILE_EVENT_SPAN_BEGIN||event_id==PROFILE_EVENT_SPAN_END)){
+			if(perfetto&&(event_id==0x484C2001U||event_id==0x484C2002U)){
+                if(!perfetto_span_event(perfetto,perfetto_first,pid,tid,event_id==0x484C2001U?PROFILE_EVENT_SPAN_BEGIN:PROFILE_EVENT_SPAN_END,payload,payload_size,
+                    (event_time-*time_origin)*1000000.0))return 0;
+            }
+			else if(perfetto&&event_id==0x484C2003U&&payload_size==8){double end;memcpy(&end,payload,8);perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"X\",\"cat\":\"hl.profiler\",\"name\":\"profiler stall\",\"pid\":%u,\"tid\":%u,\"ts\":%.3f,\"dur\":%.3f}",pid,tid,(event_time-*time_origin)*1000000.0,(end-event_time)*1000000.0);}
+			else if(perfetto&&(event_id==PROFILE_EVENT_SPAN_BEGIN||event_id==PROFILE_EVENT_SPAN_END)){
                 if(!perfetto_span_event(perfetto,perfetto_first,pid,tid,event_id,payload,payload_size,
                     (event_time-*time_origin)*1000000.0))return 0;
             }
@@ -287,7 +297,239 @@ static int consume( symbols *s,unsigned char *pending,size_t *length,uint64_t *s
 		pos+=body+4;if(metadata_dirty&&*metadata_dirty)break;}
 	if(pos){memmove(pending,pending+pos,*length-pos);*length-=pos;}return 1;
 }
-static void usage( const char *p ){fprintf(stderr,"Usage:\n  %s [--host HOST] [--rate HZ] [--alloc-interval N] [--interval MS] [--duration SEC] [--connect-timeout SEC] [--top N] [--lines] [--raw-leaf] [--output FILE] PORT\n  %s report [--top N] [--lines] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format folded [--lines] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format perfetto [--lines] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n  %s export --format pftrace [--process-name NAME] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n",p,p,p,p,p);}
+/* ---- HLDI v2 sessions and HLPC v2 captures ------------------------------------------------------------------------
+ * The runtime pushes frames during a session; the recorder writes each one as a capture record of the same type.
+ * Exports decode the per-thread records and turn them into the stream records consume() already reads, with a few
+ * export-only event ids for what v1 had no record for. docs/PROFILER.md in Haxeon describes both formats.
+ */
+enum { P_START=16, P_STOP=17 };
+enum { PUSH_METADATA=4, PUSH_SESSION=16, PUSH_DATA=17, PUSH_CLOCK=18, PUSH_THREADS=19, PUSH_END=20, PUSH_STATS=21, CAPTURE_COMPLETE=3 };
+enum { F_PUSH=4 };
+enum { SOURCE_INSTRUMENT=1, SOURCE_SAMPLING=2, SOURCE_ALLOC=4 };
+enum { R_ENTER=0x01, R_EXIT=0x02, R_UNWIND=0x03, R_SPAN_BEGIN=0x10, R_SPAN_END=0x11, R_FRAME_MARK=0x12, R_FRAME_IDLE=0x13, R_EVENT=0x20, R_COUNTER=0x21, R_SAMPLE=0x22, R_STALL=0x30 };
+/* Export-only events synthesized from v2 records. */
+#define EXPORT_CALL_BEGIN 0x484C2001U
+#define EXPORT_CALL_END 0x484C2002U
+#define EXPORT_STALL 0x484C2003U
+#define FRAME_TRACK_TID 0x7FFFF000U
+#define TICK_MASK 0x00FFFFFFFFFFFFFFULL
+
+static int parse_sources( const char *list ) {
+	int sources=0;const char *p=list;
+	while(*p){const char *end=strchr(p,',');size_t n=end?(size_t)(end-p):strlen(p);
+		if(n==10&&!strncmp(p,"instrument",n))sources|=SOURCE_INSTRUMENT;else if(n==8&&!strncmp(p,"sampling",n))sources|=SOURCE_SAMPLING;else if(n==5&&!strncmp(p,"alloc",n))sources|=SOURCE_ALLOC;else return -1;
+		p+=n;if(*p==',')p++;}
+	return sources;
+}
+
+/* Writes the pushed frames of one session to path until the runtime ends it, the program exits, or the recorder is
+   interrupted or reaches its duration. */
+static int record_session( socket_t sock,const char *output_path,uint32_t pid,int sources,int rate,int allocation_interval,int pool_mib,int duration,int interval ) {
+	unsigned char start[16],header[16],*payload=NULL,record[16];uint32_t id=1,payload_cap=0,stop_id=0;int code=1,ended=0,stop_sent=0;
+	uint64_t frames=0,bytes=0,raw=0,last_raw=0;double started=monotime(),next_report=started+interval/1000.0,stop_deadline=0,last_report=started;
+	FILE *out=NULL;unsigned char file_header[24];uint32_t chunks_in_use=0,chunk_count=0;uint64_t stalls=0;
+	if(output_path){out=fopen(output_path,"wb");if(!out){fprintf(stderr,"Could not open capture file %s\n",output_path);return 1;}setvbuf(out,NULL,_IOFBF,1<<20);
+		memcpy(file_header,"HLPC",4);file_header[4]=2;file_header[5]=0;file_header[6]=24;file_header[7]=0;put32(file_header+8,0);put32(file_header+12,pid);put32(file_header+16,(uint32_t)rate);put32(file_header+20,(uint32_t)sources);
+		if(fwrite(file_header,1,24,out)!=24)goto done;}
+	put32(start,(uint32_t)sources);put32(start+4,(uint32_t)rate);put32(start+8,(uint32_t)allocation_interval);put32(start+12,(uint32_t)pool_mib);
+	{unsigned char h[16];h[0]=SVC_PROFILE;h[1]=P_START;h[2]=h[3]=0;put32(h+4,id++);put32(h+8,16);put32(h+12,0);if(!send_all(sock,h,16)||!send_all(sock,start,16)){fprintf(stderr,"Could not start the session\n");goto done;}}
+	printf("Recording HashLink process %u (sources 0x%x)\n",pid,sources);fflush(stdout);
+	signal(SIGINT,stop_signal);
+#ifdef SIGTERM
+	signal(SIGTERM,stop_signal);
+#endif
+	while(!ended){
+		double now=monotime();fd_set set;struct timeval wait={0,100000};int ready;
+		if(!stop_sent&&(interrupted||(duration&&now-started>=duration))){unsigned char h[16];stop_id=id++;h[0]=SVC_PROFILE;h[1]=P_STOP;h[2]=h[3]=0;put32(h+4,stop_id);put32(h+8,0);put32(h+12,0);if(!send_all(sock,h,16))break;stop_sent=1;stop_deadline=now+10;}
+		if(stop_sent&&now>stop_deadline){fprintf(stderr,"The runtime did not end the session in time\n");break;}
+		if(interval>0&&now>=next_report){double seconds=now-last_report;printf("recorded %.1f MiB (%.1f MiB/s), %llu frames, chunks %u/%u, stalls %llu\n",raw/1048576.0,seconds>0?(raw-last_raw)/1048576.0/seconds:0.0,(unsigned long long)frames,chunks_in_use,chunk_count,(unsigned long long)stalls);fflush(stdout);last_raw=raw;last_report=now;next_report=now+interval/1000.0;}
+		FD_ZERO(&set);FD_SET(sock,&set);ready=select((int)sock+1,&set,NULL,NULL,&wait);
+		if(ready<0)break;if(ready==0)continue;
+		if(!recv_all(sock,header,16)){if(!stop_sent)fprintf(stderr,"Profiler target disconnected; finalizing capture\n");break;}
+		{uint32_t size=u32(header+8),flags=u16(header+2),type=header[1];
+			if(size>(256U<<20)){fprintf(stderr,"Oversized frame\n");goto done;}
+			if(size>payload_cap){unsigned char *p=(unsigned char*)realloc(payload,size);if(!p)goto done;payload=p;payload_cap=size;}
+			if(size&&!recv_all(sock,payload,size)){fprintf(stderr,"Profiler target disconnected; finalizing capture\n");break;}
+			if(flags&F_ERROR){fprintf(stderr,"The runtime refused request type %u\n",type);if(type==P_START)goto done;continue;}
+			if(!(flags&F_PUSH))continue;
+			if(type==PUSH_DATA&&size>=16)raw+=u32(payload+8);
+			if(type==PUSH_STATS&&size>=16){chunks_in_use=u32(payload);chunk_count=u32(payload+4);stalls=u64(payload+8);}
+			if(out){put32(record,type);put32(record+4,size);put64(record+8,(uint64_t)((monotime()-started)*1e9));if(fwrite(record,1,16,out)!=16||(size&&fwrite(payload,1,size,out)!=size)){fprintf(stderr,"Capture write failed\n");goto done;}}
+			frames++;bytes+=size;
+			if(type==PUSH_END)ended=1;}
+	}
+	if(out&&ended){unsigned char end[16];put64(end,frames);put64(end+8,bytes);put32(record,CAPTURE_COMPLETE);put32(record+4,16);put64(record+8,(uint64_t)((monotime()-started)*1e9));if(fwrite(record,1,16,out)!=16||fwrite(end,1,16,out)!=16)goto done;}
+	if(!ended)fprintf(stderr,"warning: the session ended without its final frame; the capture is partial\n");
+	printf("recorded %.1f MiB of records in %llu frames\n",raw/1048576.0,(unsigned long long)frames);
+	code=0;
+done:
+	free(payload);if(out&&fclose(out)!=0){fprintf(stderr,"Capture finalization failed\n");code=1;}
+	return code;
+}
+
+/* ---- decoding ---- */
+
+typedef struct { uint64_t ticks,ns; } clock_pair;
+typedef struct { clock_pair *pairs; size_t count,capacity; uint64_t nominal_hz,origin_ns; } tick_clock;
+static int clock_add( tick_clock *c,uint64_t ticks,uint64_t ns ) {
+	if(c->count&&ticks<=c->pairs[c->count-1].ticks)return 1;
+	if(c->count==c->capacity){size_t cap=c->capacity?c->capacity*2:256;clock_pair *p=(clock_pair*)realloc(c->pairs,cap*sizeof(clock_pair));if(!p)return 0;c->pairs=p;c->capacity=cap;}
+	c->pairs[c->count].ticks=ticks;c->pairs[c->count].ns=ns;c->count++;return 1;
+}
+/* Seconds since the session's first clock pair, interpolated between pairs and extrapolated past the ends. */
+static double clock_seconds( tick_clock *c,uint64_t ticks ) {
+	size_t lo=0,hi;double rate;const clock_pair *a,*b;
+	if(c->count==0)return c->nominal_hz?(double)ticks/(double)c->nominal_hz:(double)ticks/1e9;
+	if(c->count==1){rate=c->nominal_hz?1e9/(double)c->nominal_hz:1.0;return ((double)c->pairs[0].ns-(double)c->origin_ns+((double)ticks-(double)c->pairs[0].ticks)*rate)/1e9;}
+	hi=c->count;while(lo<hi){size_t m=(lo+hi)>>1;if(c->pairs[m].ticks<=ticks)lo=m+1;else hi=m;}
+	if(lo==0)lo=1;if(lo>=c->count)lo=c->count-1;
+	a=c->pairs+lo-1;b=c->pairs+lo;rate=(double)(b->ns-a->ns)/(double)(b->ticks-a->ticks);
+	return ((double)a->ns-(double)c->origin_ns+((double)ticks-(double)a->ticks)*rate)/1e9;
+}
+
+typedef struct { uint32_t tid; int used; unsigned char *kinds; uint32_t count,capacity,calls; } open_stack;
+static open_stack open_stacks[4096];
+static open_stack *stack_of( uint32_t tid ) {
+	uint32_t slot=(tid*2654435761U)&4095;
+	for(uint32_t i=0;i<4096;i++){open_stack *s=open_stacks+((slot+i)&4095);if(!s->used){s->used=1;s->tid=tid;return s;}if(s->tid==tid)return s;}
+	return NULL;
+}
+static int stack_push( open_stack *s,unsigned char kind ) {
+	if(s->count==s->capacity){uint32_t cap=s->capacity?s->capacity*2:64;unsigned char *k=(unsigned char*)realloc(s->kinds,cap);if(!k)return 0;s->kinds=k;s->capacity=cap;}
+	s->kinds[s->count++]=kind;if(kind==1)s->calls++;return 1;
+}
+static void stacks_free( void ){for(int i=0;i<4096;i++)free(open_stacks[i].kinds);memset(open_stacks,0,sizeof(open_stacks));}
+
+typedef struct { unsigned char *data; size_t length,capacity; } byte_buffer;
+static int out_reserve( byte_buffer *o,size_t n ) {
+	if(o->length+n<=o->capacity)return 1;
+	size_t cap=o->capacity?o->capacity:1<<20;while(cap<o->length+n)cap*=2;
+	unsigned char *p=(unsigned char*)realloc(o->data,cap);if(!p)return 0;o->data=p;o->capacity=cap;return 1;
+}
+/* A record in the shape consume() reads: body length, kind (1 sample, 2 event), flags, time in seconds, tid, value. */
+static int synth( byte_buffer *o,int kind,int flags,double time,uint32_t tid,uint32_t value,const void *a,uint32_t a_size,const void *b,uint32_t b_size ) {
+	uint32_t body=20+a_size+b_size;unsigned char *p;uint64_t bits;
+	if(!out_reserve(o,4+(size_t)body))return 0;
+	p=o->data+o->length;put32(p,body);p[4]=(unsigned char)kind;p[5]=(unsigned char)flags;p[6]=p[7]=0;memcpy(&bits,&time,8);put64(p+8,bits);put32(p+16,tid);put32(p+20,value);
+	if(a_size)memcpy(p+24,a,a_size);if(b_size)memcpy(p+24+a_size,b,b_size);
+	o->length+=4+(size_t)body;return 1;
+}
+static int synth_event( byte_buffer *o,double time,uint32_t tid,uint32_t id,const void *payload,uint32_t size ){return synth(o,2,0,time,tid,id,payload,size,NULL,0);}
+
+/* A UTF-16 or UTF-8 name from a record, as UTF-8. */
+static uint32_t record_name( const unsigned char *p,uint32_t units,uint32_t encoding,char *out,uint32_t capacity ) {
+	uint32_t n=0;
+	if(encoding==1){n=units<capacity?units:capacity;memcpy(out,p,n);return n;}
+	for(uint32_t i=0;i<units;i++){uint32_t c=u16(p+i*2);
+		if(c>=0xD800&&c<0xDC00&&i+1<units){uint32_t d=u16(p+(i+1)*2);if(d>=0xDC00&&d<0xE000){c=0x10000+((c-0xD800)<<10)+(d-0xDC00);i++;}}
+		if(c<0x80){if(n+1>capacity)break;out[n++]=(char)c;}
+		else if(c<0x800){if(n+2>capacity)break;out[n++]=(char)(0xC0|(c>>6));out[n++]=(char)(0x80|(c&63));}
+		else if(c<0x10000){if(n+3>capacity)break;out[n++]=(char)(0xE0|(c>>12));out[n++]=(char)(0x80|((c>>6)&63));out[n++]=(char)(0x80|(c&63));}
+		else{if(n+4>capacity)break;out[n++]=(char)(0xF0|(c>>18));out[n++]=(char)(0x80|((c>>12)&63));out[n++]=(char)(0x80|((c>>6)&63));out[n++]=(char)(0x80|(c&63));}}
+	return n;
+}
+
+/* The name of an instrumented function: its key is the function's code address. */
+static uint32_t call_name( symbols *s,uint64_t key,char *out,uint32_t capacity ) {
+	symbol *x=resolve(s,key);native_symbol *n;int written;
+	if(x)written=snprintf(out,capacity,"%s",x->name);
+	else if((n=resolve_native(key))!=NULL)written=snprintf(out,capacity,"%s",n->name);
+	else written=snprintf(out,capacity,"[0x%llx]",(unsigned long long)key);
+	return written<0?0:(uint32_t)written>=capacity?capacity-1:(uint32_t)written;
+}
+
+typedef struct { int open; uint64_t number; } frame_set_state;
+static frame_set_state frame_sets[16];
+
+/* Closes slices on a thread's track down to `calls` open calls (or every span when spans_only). */
+static int close_slices( byte_buffer *o,open_stack *st,double time,uint32_t tid,uint32_t calls,int until_span ) {
+	while(st->count){unsigned char kind=st->kinds[st->count-1];
+		if(!until_span&&st->calls<=calls)break;
+		st->count--;if(kind==1)st->calls--;
+		if(!synth_event(o,time,tid,kind==1?EXPORT_CALL_END:PROFILE_EVENT_SPAN_END,NULL,0))return 0;
+		if(until_span&&kind==2)break;}
+	return 1;
+}
+
+static int decode_records( byte_buffer *o,symbols *s,tick_clock *c,uint32_t tid,const unsigned char *p,uint32_t length,uint64_t *malformed ) {
+	uint32_t pos=0;char name[1536];open_stack *st=stack_of(tid);
+	if(!st)return 0;
+	while(pos+8<=length){
+		uint64_t w0=u64(p+pos);uint32_t kind=(uint32_t)(w0>>56);double time=clock_seconds(c,w0&TICK_MASK);uint32_t size=8;
+		switch(kind){
+		case R_ENTER:{if(pos+16>length)goto bad;uint32_t n=call_name(s,u64(p+pos+8),name,sizeof(name));if(!stack_push(st,1)||!synth_event(o,time,tid,EXPORT_CALL_BEGIN,name,n))return 0;size=16;break;}
+		case R_EXIT:if(st->calls&&!close_slices(o,st,time,tid,st->calls-1,0))return 0;break;
+		case R_UNWIND:if(pos+16>length)goto bad;{uint64_t depth=u64(p+pos+8);if(depth<st->calls&&!close_slices(o,st,time,tid,(uint32_t)depth,0))return 0;}size=16;break;
+		case R_SPAN_BEGIN:{if(pos+16>length)goto bad;uint32_t units=u32(p+pos+8),encoding=u32(p+pos+12),bytes=units*(encoding==1?1:2);if(pos+16+((bytes+7)&~7u)>length)goto bad;
+			uint32_t n=record_name(p+pos+16,units,encoding,name,sizeof(name));if(!stack_push(st,2)||!synth_event(o,time,tid,PROFILE_EVENT_SPAN_BEGIN,name,n))return 0;size=16+((bytes+7)&~7u);break;}
+		case R_SPAN_END:{int has_span=0;for(uint32_t i=0;i<st->count;i++)if(st->kinds[i]==2)has_span=1;if(has_span&&!close_slices(o,st,time,tid,0,1))return 0;break;}
+		case R_FRAME_MARK:case R_FRAME_IDLE:{if(pos+16>length)goto bad;uint64_t set=u64(p+pos+8);size=16;if(set>=16)break;frame_set_state *f=frame_sets+set;uint32_t frame_tid=FRAME_TRACK_TID+(uint32_t)set;
+			if(f->open&&!synth_event(o,time,frame_tid,PROFILE_EVENT_SPAN_END,NULL,0))return 0;f->open=0;
+			if(kind==R_FRAME_MARK){int n=snprintf(name,sizeof(name),"Frame %llu",(unsigned long long)++f->number);if(!synth_event(o,time,frame_tid,PROFILE_EVENT_SPAN_BEGIN,name,(uint32_t)n))return 0;f->open=1;}
+			break;}
+		case R_EVENT:{if(pos+16>length)goto bad;uint32_t id=u32(p+pos+8),n=u32(p+pos+12);if(pos+16+((n+7)&~7u)>length)goto bad;if(!synth_event(o,time,tid,id,p+pos+16,n))return 0;size=16+((n+7)&~7u);break;}
+		case R_COUNTER:{if(pos+24>length)goto bad;uint32_t units=u32(p+pos+16),encoding=u32(p+pos+20),bytes=units*(encoding==1?1:2);if(pos+24+((bytes+7)&~7u)>length)goto bad;
+			uint32_t n=record_name(p+pos+24,units,encoding,name,sizeof(name));if(!synth(o,2,0,time,tid,PROFILE_EVENT_COUNTER,p+pos+8,8,name,n))return 0;size=24+((bytes+7)&~7u);break;}
+		case R_SAMPLE:{if(pos+16>length)goto bad;uint64_t w1=u64(p+pos+8);uint32_t sample_tid=(uint32_t)w1,frames=(uint32_t)((w1>>32)&0xFFFF),flags=(uint32_t)((w1>>48)&0xFF);if(pos+16+frames*8>length)goto bad;
+			if(!synth(o,1,(int)flags,time,sample_tid,frames,p+pos+16,frames*8,NULL,0))return 0;size=16+frames*8;break;}
+		case R_STALL:{if(pos+16>length)goto bad;double end=clock_seconds(c,u64(p+pos+8)&TICK_MASK);if(!synth_event(o,time,tid,EXPORT_STALL,&end,8))return 0;size=16;break;}
+		default:goto bad;}
+		pos+=size;}
+	return 1;
+bad:
+	(*malformed)++;return 1;
+}
+
+/* Reads a v2 capture (positioned after its header) into consume(): metadata, clock pairs and thread names first, then
+   every thread's records. */
+static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,uint64_t *samples,uint64_t *unresolved,folded_table *folded_stacks,int show_lines,int raw_leaf,FILE *perfetto,int *perfetto_first,double *time_origin,uint32_t pid,pf_export *pf,int *complete ) {
+	unsigned char record_header[16],*payload=NULL,*raw=NULL;uint32_t raw_cap=0;long data_start=ftell(file);tick_clock clock={0};byte_buffer out={0};int code=0,have_metadata=0;uint64_t malformed=0;
+	unsigned char *names=NULL;uint32_t names_size=0;
+	memset(frame_sets,0,sizeof(frame_sets));
+	/* pass 1: the last metadata snapshot (it lists retired regions too), clock pairs, session and thread names */
+	while(fread(record_header,1,16,file)==16){
+		uint32_t type=u32(record_header),size=u32(record_header+4);
+		payload=(unsigned char*)realloc(payload,size?size:1);if(!payload)goto done;
+		if(size&&fread(payload,1,size,file)!=size){fprintf(stderr,"warning: truncated capture record\n");break;}
+		if(type==PUSH_METADATA){if(!parse_symbols(payload,size,table)){fprintf(stderr,"Malformed symbol metadata\n");goto done;}have_metadata=1;}
+		else if(type==PUSH_SESSION&&size>=32)clock.nominal_hz=u64(payload+24);
+		else if(type==PUSH_CLOCK&&size>=16){if(!clock.count)clock.origin_ns=u64(payload+8);if(!clock_add(&clock,u64(payload),u64(payload+8)))goto done;}
+		else if(type==PUSH_THREADS){free(names);names=(unsigned char*)malloc(size?size:1);if(!names)goto done;memcpy(names,payload,size);names_size=size;}
+		else if(type==CAPTURE_COMPLETE)*complete=1;
+	}
+	if(!have_metadata){fprintf(stderr,"The capture holds no symbol metadata\n");goto done;}
+	/* thread names, then the frame track names */
+	if(names_size>=4){uint32_t count=u32(names),pos=4;for(uint32_t i=0;i<count&&pos+8<=names_size;i++){uint32_t tid=u32(names+pos),n=u32(names+pos+4);if(pos+8+n>names_size)break;if(!synth_event(&out,0,tid,PROFILE_EVENT_THREAD_NAME,names+pos+8,n))goto done;pos+=8+n;}}
+	if(!synth_event(&out,0,FRAME_TRACK_TID,PROFILE_EVENT_THREAD_NAME,"Frames",6))goto done;
+	/* pass 2: the threads' records */
+	if(fseek(file,data_start,SEEK_SET)!=0)goto done;
+	while(fread(record_header,1,16,file)==16){
+		uint32_t type=u32(record_header),size=u32(record_header+4);uint64_t elapsed=u64(record_header+8);
+		payload=(unsigned char*)realloc(payload,size?size:1);if(!payload)goto done;
+		if(size&&fread(payload,1,size,file)!=size)break;
+		if(type!=PUSH_DATA||size<16||elapsed<start_ns||elapsed>end_ns)continue;
+		{uint32_t tid=u32(payload),flags=u32(payload+4),raw_size=u32(payload+8);const unsigned char *records=payload+16;
+			if(flags&1){if(raw_size>raw_cap){unsigned char *r=(unsigned char*)realloc(raw,raw_size);if(!r)goto done;raw=r;raw_cap=raw_size;}
+				if(LZ4_decompress_safe((const char*)payload+16,(char*)raw,(int)(size-16),(int)raw_size)!=(int)raw_size){malformed++;continue;}records=raw;}
+			else raw_size=size-16;
+			if(!decode_records(&out,table,&clock,tid,records,raw_size,&malformed))goto done;}
+		if(out.length>(8U<<20)&&!consume(table,out.data,&out.length,samples,unresolved,folded_stacks,show_lines,raw_leaf,NULL,perfetto,perfetto_first,time_origin,pid,pf))goto malformed_stream;
+	}
+	/* close what is still open when the capture ends */
+	{double end=clock.count?clock_seconds(&clock,clock.pairs[clock.count-1].ticks):0;for(int i=0;i<4096;i++)if(open_stacks[i].used&&!close_slices(&out,open_stacks+i,end,open_stacks[i].tid,0,0))goto done;
+		for(int i=0;i<16;i++)if(frame_sets[i].open&&!synth_event(&out,end,FRAME_TRACK_TID+(uint32_t)i,PROFILE_EVENT_SPAN_END,NULL,0))goto done;}
+	if(out.length&&!consume(table,out.data,&out.length,samples,unresolved,folded_stacks,show_lines,raw_leaf,NULL,perfetto,perfetto_first,time_origin,pid,pf))goto malformed_stream;
+	if(malformed)fprintf(stderr,"warning: skipped %llu malformed record segments\n",(unsigned long long)malformed);
+	code=1;
+	goto done;
+malformed_stream:
+	fprintf(stderr,"Malformed profiler stream\n");
+done:
+	free(payload);free(raw);free(out.data);free(clock.pairs);free(names);stacks_free();
+	return code;
+}
+
+static void usage( const char *p ){fprintf(stderr,"Usage:\n  %s [--host HOST] [--sources LIST] [--rate HZ] [--alloc-interval N] [--pool MIB] [--interval MS] [--duration SEC] [--connect-timeout SEC] [--output FILE] PORT\n  %s report [--top N] [--lines] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format folded [--lines] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format perfetto [--lines] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n  %s export --format pftrace [--process-name NAME] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n",p,p,p,p,p);}
 
 static int offline( int argc,char **argv,int exporting ) {
 	const char *path=NULL,*output_path=NULL;int top=15,code=1,complete=0,format=0,show_lines=0,raw_leaf=0,perfetto_first=1,metadata_dirty=0;FILE *file=NULL,*perfetto=NULL;symbols table={0};folded_table folded_stacks={0};unsigned char header[24],record_header[16],*payload=NULL,*pending=NULL;size_t pending_len=0,pending_cap=512*1024;uint64_t samples=0,unresolved=0,dropped=0,cursor=0,last_time=0,reported_dropped=0,start_ns=0,end_ns=UINT64_MAX;int have_cursor=0;double time_origin=-1;const char *process_name="HashLink";pf_export pf={0};
@@ -305,10 +547,16 @@ static int offline( int argc,char **argv,int exporting ) {
 	if(!path||top<=0||(exporting&&!format)||(format>=2&&!output_path)){usage(argv[0]);goto done;}
 	if(format>=2&&!strcmp(path,output_path)){fprintf(stderr,"Perfetto output must differ from the capture path\n");goto done;}
 	file=fopen(path,"rb");if(!file){fprintf(stderr,"Could not open capture %s\n",path);goto done;}
-	if(fread(header,1,24,file)!=24||memcmp(header,"HLPC",4)||u16(header+4)!=1||u16(header+6)!=24){fprintf(stderr,"Invalid or unsupported HLPC capture\n");goto done;}
+	if(fread(header,1,24,file)!=24||memcmp(header,"HLPC",4)||(u16(header+4)!=1&&u16(header+4)!=2)||u16(header+6)!=24){fprintf(stderr,"Invalid or unsupported HLPC capture\n");goto done;}
 	if(format==2){perfetto=fopen(output_path,"wb");if(!perfetto){fprintf(stderr,"Could not open Perfetto output %s\n",output_path);goto done;}fputs("{\"traceEvents\":[",perfetto);}
 	if(format==3){uint32_t rate=u32(header+16);pf.weight_ns=rate?1000000000ULL/rate:1000000ULL;pf.trace=pftrace_open(output_path,u32(header+12)?u32(header+12):1,process_name);if(!pf.trace){fprintf(stderr,"Could not open Perfetto output %s\n",output_path);goto done;}}
 	pending=(unsigned char*)malloc(pending_cap);if(!pending)goto done;
+	if(u16(header+4)==2){
+		if(!read_v2(file,&table,start_ns,end_ns,&samples,&unresolved,format==1?&folded_stacks:NULL,show_lines,raw_leaf,perfetto,&perfetto_first,&time_origin,u32(header+12),pf.trace?&pf:NULL,&complete))goto done;
+		if(!complete)fprintf(stderr,"warning: partial capture; reporting complete records only\n");
+		if(format==1)folded_write(&folded_stacks);else if(!format)report(&table,samples,unresolved,dropped,top,show_lines);
+		code=0;goto done;
+	}
 	while(!complete){
 		size_t got=fread(record_header,1,16,file);uint32_t type,size;uint64_t elapsed;
 		if(got==0)break;
@@ -334,12 +582,15 @@ done:
 }
 
 int main( int argc,char **argv ) {
-	const char *host="127.0.0.1",*port=NULL,*output_path=NULL;int rate=1000,allocation_interval=0,interval=1000,duration=0,connect_timeout=0,top=15,code=1,show_lines=0,raw_leaf=0,metadata_dirty=0;socket_t sock=INVALID_SOCKET;symbols table={0};capture output={0};
-	unsigned char hello[16],config[12],read_body[12],*reply=NULL,*pending=NULL;uint32_t reply_size,id=1;uint64_t cursor=0,dropped=0,samples=0,unresolved=0;size_t pending_len=0;double started,next_report,next_metadata;
+	const char *host="127.0.0.1",*port=NULL,*output_path=NULL,*source_list="sampling";int rate=1000,allocation_interval=0,interval=2000,duration=0,connect_timeout=0,pool_mib=64,sources,code=1;socket_t sock=INVALID_SOCKET;
+	unsigned char hello[16],*reply=NULL;uint32_t reply_size;
 	if(argc>1&&!strcmp(argv[1],"report"))return offline(argc,argv,0);
 	if(argc>1&&!strcmp(argv[1],"export"))return offline(argc,argv,1);
-	for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")){usage(argv[0]);return 0;}else if(!strcmp(argv[i],"--host")&&++i<argc)host=argv[i];else if(!strcmp(argv[i],"--rate")&&++i<argc)rate=atoi(argv[i]);else if(!strcmp(argv[i],"--alloc-interval")&&++i<argc)allocation_interval=atoi(argv[i]);else if(!strcmp(argv[i],"--interval")&&++i<argc)interval=atoi(argv[i]);else if(!strcmp(argv[i],"--duration")&&++i<argc)duration=atoi(argv[i]);else if(!strcmp(argv[i],"--connect-timeout")&&++i<argc)connect_timeout=atoi(argv[i]);else if(!strcmp(argv[i],"--top")&&++i<argc)top=atoi(argv[i]);else if(!strcmp(argv[i],"--lines"))show_lines=1;else if(!strcmp(argv[i],"--raw-leaf"))raw_leaf=1;else if(!strcmp(argv[i],"--output")&&++i<argc)output_path=argv[i];else if(argv[i][0]=='-'||port){usage(argv[0]);return 2;}else port=argv[i];}
-	if(!port||rate<=0||allocation_interval<0||interval<=0||duration<0||connect_timeout<0||top<=0){usage(argv[0]);return 2;}
+	for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")){usage(argv[0]);return 0;}else if(!strcmp(argv[i],"--host")&&++i<argc)host=argv[i];else if(!strcmp(argv[i],"--sources")&&++i<argc)source_list=argv[i];else if(!strcmp(argv[i],"--rate")&&++i<argc)rate=atoi(argv[i]);else if(!strcmp(argv[i],"--alloc-interval")&&++i<argc)allocation_interval=atoi(argv[i]);else if(!strcmp(argv[i],"--pool")&&++i<argc)pool_mib=atoi(argv[i]);else if(!strcmp(argv[i],"--interval")&&++i<argc)interval=atoi(argv[i]);else if(!strcmp(argv[i],"--duration")&&++i<argc)duration=atoi(argv[i]);else if(!strcmp(argv[i],"--connect-timeout")&&++i<argc)connect_timeout=atoi(argv[i]);else if(!strcmp(argv[i],"--output")&&++i<argc)output_path=argv[i];else if(argv[i][0]=='-'||port){usage(argv[0]);return 2;}else port=argv[i];}
+	sources=parse_sources(source_list);
+	if(!port||sources<0||rate<=0||allocation_interval<0||pool_mib<=0||interval<0||duration<0||connect_timeout<0){usage(argv[0]);return 2;}
+	/* An allocation interval asks for allocation samples even when the source list leaves them out. */
+	if(allocation_interval>0)sources|=SOURCE_ALLOC;else if(sources&SOURCE_ALLOC)allocation_interval=65536;
 #ifdef _WIN32
 	{WSADATA w;if(WSAStartup(MAKEWORD(2,2),&w)){fprintf(stderr,"Winsock initialization failed\n");return 1;}}
 #endif
@@ -347,32 +598,11 @@ int main( int argc,char **argv ) {
 	signal(SIGPIPE,SIG_IGN);
 	#endif
 	sock=open_socket_until(host,port,connect_timeout);if(sock==INVALID_SOCKET){fprintf(stderr,"Could not connect to %s:%s\n",host,port);goto done;}
-	if(!recv_all(sock,hello,16)||memcmp(hello,"HLDI",4)||u16(hello+4)!=1||(u16(hello+6)&3)!=3){fprintf(stderr,"Endpoint lacks HLDI/1 profiler symbols\n");goto done;}
-	if(u16(hello+6)&4){const char *token=getenv("HL_DIAGNOSTICS_TOKEN");if(!token||!*token||!request_service(sock,0,2,id++,token,(uint32_t)strlen(token),&reply,&reply_size)){fprintf(stderr,"HLDI authentication failed; set HL_DIAGNOSTICS_TOKEN\n");goto done;}free(reply);reply=NULL;}
-	if(!capture_open(&output,output_path,u32(hello+12),(uint32_t)rate)){fprintf(stderr,"Could not open capture file %s\n",output_path);goto done;}
-	if(!fetch_symbols(sock,&table,id++,&output)||!table.count){fprintf(stderr,"Could not load symbols\n");goto done;}
-	put32(config,(uint32_t)rate);put32(config+4,1);put32(config+8,(uint32_t)allocation_interval);if(!request(sock,P_CONFIGURE,id++,config,12,&reply,&reply_size)||!parse_status(reply,reply_size)){fprintf(stderr,"Could not start profiler\n");goto done;}
-	/* Configuring releases a program held by --diagnostics-wait before this reply is built, so its first records can already
-	   be past `next`; read from the consumer position configuration set, which older runtimes do not report. */
-	cursor=reply_size>=56?u64(reply+40):u64(reply+8);dropped=u64(reply+16);free(reply);reply=NULL;pending=(unsigned char*)malloc(512*1024);if(!pending)goto done;
-	printf("Connected to HashLink process %u, %zu symbols, sampling at %d Hz\n",u32(hello+12),table.count,rate);signal(SIGINT,stop_signal);
-#ifdef SIGTERM
-	signal(SIGTERM,stop_signal);
-#endif
-	started=monotime();next_report=started+interval/1000.0;next_metadata=started+5.0;
-	while(!interrupted&&(!duration||monotime()-started<duration)){
-		put64(read_body,cursor);put32(read_body+8,256*1024);if(!request(sock,P_READ,id++,read_body,12,&reply,&reply_size)||reply_size<16){fprintf(stderr,"Profiler target disconnected; finalizing capture\n");code=0;goto done;}
-		if(!capture_record_parts(&output,2,read_body,8,reply,reply_size)){fprintf(stderr,"Capture write failed\n");goto done;}cursor=u64(reply);dropped=u64(reply+8);if(pending_len+reply_size-16>512*1024){fprintf(stderr,"Local buffer overflow\n");goto done;}memcpy(pending+pending_len,reply+16,reply_size-16);pending_len+=reply_size-16;free(reply);reply=NULL;
-		if(!consume(&table,pending,&pending_len,&samples,&unresolved,NULL,show_lines,raw_leaf,&metadata_dirty,NULL,NULL,NULL,0,NULL)){fprintf(stderr,"Malformed profile record\n");goto done;}
-		if(metadata_dirty){if(!fetch_symbols(sock,&table,id++,&output)){fprintf(stderr,"Metadata refresh failed\n");goto done;}metadata_dirty=0;if(!consume(&table,pending,&pending_len,&samples,&unresolved,NULL,show_lines,raw_leaf,&metadata_dirty,NULL,NULL,NULL,0,NULL)){fprintf(stderr,"Malformed profile record\n");goto done;}}
-		if(monotime()>=next_metadata){if(!fetch_symbols(sock,&table,id++,&output)){fprintf(stderr,"Metadata refresh failed\n");goto done;}next_metadata=monotime()+5;}
-		if(monotime()>=next_report){if(request(sock,P_STATUS,id++,NULL,0,&reply,&reply_size)&&parse_status(reply,reply_size)){dropped=u64(reply+16);free(reply);reply=NULL;}report(&table,samples,unresolved,dropped,top,show_lines);samples=unresolved=0;next_report=monotime()+interval/1000.0;}sleep_ms(interval<100?interval:100);
-	}
-	if(samples)report(&table,samples,unresolved,dropped,top,show_lines);
-	code=0;
+	if(!recv_all(sock,hello,16)||memcmp(hello,"HLDI",4)||u16(hello+4)!=2||(u16(hello+6)&3)!=3){fprintf(stderr,"Endpoint lacks HLDI/2 profiler symbols\n");goto done;}
+	if(u16(hello+6)&4){const char *token=getenv("HL_DIAGNOSTICS_TOKEN");if(!token||!*token||!request_service(sock,0,2,1000,token,(uint32_t)strlen(token),&reply,&reply_size)){fprintf(stderr,"HLDI authentication failed; set HL_DIAGNOSTICS_TOKEN\n");goto done;}free(reply);reply=NULL;}
+	code=record_session(sock,output_path,u32(hello+12),sources,rate,allocation_interval,pool_mib,duration,interval);
 done:
-	if(sock!=INVALID_SOCKET){if(code==0){put32(config,(uint32_t)rate);put32(config+4,0);put32(config+8,0);request(sock,P_CONFIGURE,id++,config,12,&reply,&reply_size);free(reply);}CLOSE_SOCKET(sock);}free(pending);free_symbols(&table);
-	capture_close(&output,cursor,dropped,code==0);if(output.failed&&code==0){fprintf(stderr,"Capture finalization failed\n");code=1;}
+	if(sock!=INVALID_SOCKET)CLOSE_SOCKET(sock);
 #ifdef _WIN32
 	WSACleanup();
 #endif

@@ -20,6 +20,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 #include <hl.h>
+#include "../hlprof.h"
 
 #ifdef HL_CONSOLE
 #	include <posix/posix.h>
@@ -183,11 +184,23 @@ HL_PRIM bool hl_sys_profile_recording( void ) {
 	return hl_setup.profile_recording();
 }
 
+/* Span names are recorded as the UTF-16 the program holds; readers convert them. */
 HL_PRIM void hl_sys_profile_span( int code, uchar *name ) {
-	if( hl_setup.profile_event && name && hl_sys_profile_recording() ) {
-		char *utf8 = hl_to_utf8(name);
-		hl_setup.profile_event(code, (vbyte*)utf8, (int)strlen(utf8));
-	}
+	if( !hl_prof_on ) return;
+	if( code == 0x484C1001 )
+		hl_prof_span_begin(name,name ? (int)ustrlen(name) : 0,HL_PROF_UTF16);
+	else
+		hl_prof_span_end();
+}
+
+/* A frame boundary (kind 0) or the start of idle time (kind 1) in frame set frame_set. */
+HL_PRIM void hl_sys_profile_frame( int kind, int frame_set ) {
+	hl_prof_frame(kind,(unsigned int)frame_set);
+}
+
+HL_PRIM void hl_sys_profile_counter( uchar *name, double value ) {
+	if( !hl_prof_on ) return;
+	hl_prof_counter(name,name ? (int)ustrlen(name) : 0,HL_PROF_UTF16,value);
 }
 
 HL_PRIM void hl_sys_exit( int code ) {
@@ -784,6 +797,8 @@ DEFINE_PRIM(_I32, sys_getpid, _NO_ARG);
 DEFINE_PRIM(_BOOL, sys_check_reload, _BYTES);
 DEFINE_PRIM(_VOID, sys_profile_event, _I32 _BYTES _I32);
 DEFINE_PRIM(_VOID, sys_profile_span, _I32 _BYTES);
+DEFINE_PRIM(_VOID, sys_profile_frame, _I32 _I32);
+DEFINE_PRIM(_VOID, sys_profile_counter, _BYTES _F64);
 DEFINE_PRIM(_VOID, sys_vtune_init, _NO_ARG);
 DEFINE_PRIM(_I32, sys_set_flags, _I32);
 DEFINE_PRIM(_BOOL, sys_has_debugger, _NO_ARG);

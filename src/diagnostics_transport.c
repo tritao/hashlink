@@ -1,6 +1,19 @@
 /* Shared transport primitives for versioned runtime diagnostics services. */
 #include "diagnostics.h"
 #include <stdlib.h>
+#ifdef HL_WIN
+#	undef _GUID
+#	include <winsock2.h>
+#else
+#	include <sys/select.h>
+#	include <sys/time.h>
+typedef int SOCKET;
+#endif
+
+/* Mirrors std/socket.c, which owns the type. */
+struct _hl_socket {
+	SOCKET sock;
+};
 
 HL_API void hl_socket_init();
 HL_API hl_socket *hl_socket_new( bool udp );
@@ -67,6 +80,20 @@ bool hl_diag_transport_recv( hl_socket *socket, void *data, int size ) {
 		pos += count;
 	}
 	return true;
+}
+
+/* 1 when the socket has data (or was closed) within timeout_ms, 0 when it has none, -1 on error. */
+int hl_diag_transport_readable( hl_socket *socket, int timeout_ms ) {
+	fd_set set;
+	struct timeval wait;
+	int result;
+	if( socket == NULL ) return -1;
+	FD_ZERO(&set);
+	FD_SET(socket->sock,&set);
+	wait.tv_sec = timeout_ms / 1000;
+	wait.tv_usec = (timeout_ms % 1000) * 1000;
+	result = select((int)socket->sock + 1,&set,NULL,NULL,&wait);
+	return result < 0 ? -1 : result > 0 ? 1 : 0;
 }
 
 void hl_diag_transport_interrupt( hl_socket *socket ) {

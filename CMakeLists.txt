@@ -183,6 +183,7 @@ endif()
 
 add_library(libhl
     src/gc.c
+    src/prof.c
     src/ryu/d2s.c
     src/ryu/f2s.c
     ${std_srcs}
@@ -297,6 +298,7 @@ if (WITH_VM)
         src/diagnostics.c
         src/diagnostics_transport.c
         src/profile.c
+        include/lz4/lz4.c
     )
     if(APPLE)
         set_target_properties(hl PROPERTIES
@@ -335,7 +337,7 @@ if (WITH_VM)
     endif()
 endif()
 
-add_executable(hlprof-live tools/hlprof-live.c tools/pftrace.c)
+add_executable(hlprof-live tools/hlprof-live.c tools/pftrace.c include/lz4/lz4.c)
 if(WIN32)
     target_link_libraries(hlprof-live PRIVATE ws2_32)
 endif()

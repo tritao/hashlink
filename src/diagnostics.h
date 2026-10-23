@@ -11,6 +11,7 @@ hl_socket *hl_diag_transport_accept( hl_diag_transport *transport );
 void hl_diag_transport_wake( hl_diag_transport *transport );
 bool hl_diag_transport_send( hl_socket *socket, const void *data, int size );
 bool hl_diag_transport_recv( hl_socket *socket, void *data, int size );
+int hl_diag_transport_readable( hl_socket *socket, int timeout_ms );
 void hl_diag_transport_interrupt( hl_socket *socket );
 void hl_diag_transport_close_client( hl_socket *socket );
 void hl_diag_transport_close( hl_diag_transport *transport );

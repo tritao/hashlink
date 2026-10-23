@@ -25,6 +25,7 @@
 #include <hl.h>
 #include <hlmodule.h>
 #include "hlsystem.h"
+#include "hlprof.h"
 
 #ifdef HL_WIN
 #include <dbghelp.h>
@@ -68,7 +69,6 @@
 
 #define MAX_STACK_SIZE (8 << 20)
 #define MAX_STACK_COUNT 2048
-#define PROFILE_STREAM_SIZE HL_PROFILE_STREAM_SIZE
 
 HL_API double hl_sys_time( void );
 int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out, int size );
@@ -91,6 +91,7 @@ struct _thread_handle {
 
 /* The thread that set the profiler up, named "main" in captures unless the program names it. */
 static int profile_main_tid = 0;
+int hl_profile_main_thread( void ) { return profile_main_tid; }
 /*
  * The in-memory record behind hlprofile.dump is kept for "hl --profile" only. A diagnostics client reads the sample stream
  * instead, and recording it again would grow without bound and leave a dump in the program's working directory.
@@ -124,25 +125,10 @@ static struct {
 	hl_condition *waitCond;
 } data = {0};
 
-static struct {
-	unsigned char *bytes;
-	unsigned long long first;
-	unsigned long long next;
-	unsigned long long dropped;
-	unsigned long long consumer;
-	// Where the client's latest read began: it has received everything before this, while `consumer` only says what was sent.
-	unsigned long long received;
-	hl_mutex *lock;
-	bool remote_paused;
-	int requested_rate;
-	double last_adjust;
-	double last_consume;
-	unsigned long long sample_records;
-	unsigned long long sample_nanos;
-	unsigned long long generated_bytes;
-} stream = {0};
+/* Session state: whether a program held by --diagnostics-wait may run, and whether symbol metadata changed. */
+static volatile bool session_waiting;
+static volatile bool metadata_changed;
 
-enum { PROFILE_STREAM_SAMPLE = 1, PROFILE_STREAM_EVENT = 2 };
 #include "profile_events.h"
 
 static volatile int profile_allocation_interval = 0;
@@ -152,7 +138,6 @@ static unsigned long long native_seen[4096];
 static hl_mutex *native_lock;
 static void stream_write_u32( unsigned char *p, unsigned int value );
 static void stream_write_u64( unsigned char *p, unsigned long long value );
-static void stream_record( int kind, int flags, double time, int tid, int value, const void *payload, unsigned int payload_size );
 static void stream_native_symbol( void *address, double time, int tid );
 
 static void profile_allocation( hl_type *type, int requested, int allocated, void *return_address ) {
@@ -164,7 +149,7 @@ static void profile_allocation( hl_type *type, int requested, int allocated, voi
 	if( interval <= 0 || ++counter < (unsigned int)interval ) return;
 	counter = 0;
 	thread = hl_get_thread();
-	if( thread == NULL || stream.lock == NULL ) return;
+	if( thread == NULL || !hl_prof_on ) return;
 	frames[0] = return_address;
 	stream_write_u64(payload,(unsigned long long)requested);
 	stream_write_u64(payload + 8,(unsigned long long)allocated);
@@ -176,7 +161,7 @@ static void profile_allocation( hl_type *type, int requested, int allocated, voi
 		stream_native_symbol(frames[i],hl_sys_time(),thread->thread_id);
 		stream_write_u64(payload + 32 + i * 8,(unsigned long long)(uintptr_t)frames[i]);
 	}
-	stream_record(PROFILE_STREAM_EVENT,0,hl_sys_time(),thread->thread_id,PROFILE_EVENT_ALLOCATION_SAMPLE,payload,32 + count * 8);
+	hl_prof_event(PROFILE_EVENT_ALLOCATION_SAMPLE,payload,32 + count * 8);
 }
 
 static void stream_native_symbol_record( unsigned long long pc, unsigned long long base, const char *module, const char *symbol, double time, int tid ) {
@@ -187,7 +172,8 @@ static void stream_native_symbol_record( unsigned long long pc, unsigned long lo
 	stream_write_u64(payload,pc); stream_write_u64(payload + 8,base);
 	stream_write_u32(payload + 16,module_len); stream_write_u32(payload + 20,symbol_len);
 	memcpy(payload + 24,module,module_len); memcpy(payload + 24 + module_len,symbol,symbol_len);
-	stream_record(PROFILE_STREAM_EVENT,0,time,tid,PROFILE_EVENT_NATIVE_SYMBOL,payload,size);
+	(void)time; (void)tid;
+	hl_prof_event(PROFILE_EVENT_NATIVE_SYMBOL,payload,size);
 	free(payload);
 }
 
@@ -199,7 +185,8 @@ static void stream_native_location_record( unsigned long long pc, unsigned long 
 	stream_write_u64(payload,pc); stream_write_u64(payload + 8,module_base); stream_write_u64(payload + 16,module_size);
 	stream_write_u32(payload + 24,line); stream_write_u32(payload + 28,file_len);
 	if( file_len ) memcpy(payload + 32,file,file_len);
-	stream_record(PROFILE_STREAM_EVENT,0,time,tid,PROFILE_EVENT_NATIVE_LOCATION,payload,size);
+	(void)time; (void)tid;
+	hl_prof_event(PROFILE_EVENT_NATIVE_LOCATION,payload,size);
 	free(payload);
 }
 
@@ -340,73 +327,6 @@ static void stream_write_u32( unsigned char *p, unsigned int value ) {
 
 static void stream_write_u64( unsigned char *p, unsigned long long value ) {
 	stream_write_u32(p,(unsigned int)value); stream_write_u32(p + 4,(unsigned int)(value >> 32));
-}
-
-static unsigned int stream_read_u32_at( unsigned long long position ) {
-	unsigned char bytes[4];
-	for(int i=0;i<4;i++) bytes[i] = stream.bytes[(position + i) % PROFILE_STREAM_SIZE];
-	return (unsigned int)bytes[0] | ((unsigned int)bytes[1] << 8) | ((unsigned int)bytes[2] << 16) | ((unsigned int)bytes[3] << 24);
-}
-
-static void stream_append_locked( const unsigned char *input, unsigned int size ) {
-	unsigned int remaining = size;
-	while( remaining ) {
-		unsigned int offset = (unsigned int)(stream.next % PROFILE_STREAM_SIZE);
-		unsigned int count = PROFILE_STREAM_SIZE - offset;
-		if( count > remaining ) count = remaining;
-		memcpy(stream.bytes + offset,input,count);
-		stream.next += count;
-		input += count;
-		remaining -= count;
-	}
-}
-
-static void stream_record( int kind, int flags, double time, int tid, int value, const void *payload, unsigned int payload_size ) {
-	unsigned int body_size = 20 + payload_size;
-	unsigned int record_size = 4 + body_size;
-	unsigned char header[24];
-	unsigned long long time_bits;
-	if( stream.lock == NULL ) return;
-	memcpy(&time_bits,&time,sizeof(time_bits));
-	stream_write_u32(header,body_size);
-	header[4] = (unsigned char)kind; header[5] = (unsigned char)flags;
-	header[6] = 0; header[7] = 0;
-	stream_write_u64(header + 8,time_bits);
-	stream_write_u32(header + 16,(unsigned int)tid);
-	stream_write_u32(header + 20,(unsigned int)value);
-	hl_mutex_acquire(stream.lock);
-	/* Idle launches expose profiler control without reserving the stream buffer. */
-	if( stream.bytes == NULL ) {
-		stream.bytes = malloc(PROFILE_STREAM_SIZE);
-		if( stream.bytes == NULL ) {
-			hl_mutex_release(stream.lock);
-			return;
-		}
-	}
-	if( record_size > PROFILE_STREAM_SIZE ) {
-		stream.dropped++;
-		hl_mutex_release(stream.lock);
-		return;
-	}
-	while( stream.next + record_size - stream.first > PROFILE_STREAM_SIZE ) {
-		unsigned int old_size = stream_read_u32_at(stream.first);
-		stream.first += 4 + old_size;
-		stream.dropped++;
-	}
-	stream_append_locked(header,sizeof(header));
-	if( payload_size ) stream_append_locked(payload,payload_size);
-	stream.generated_bytes += record_size;
-	if( stream.requested_rate > 0 && time - stream.last_adjust >= 1.0 ) {
-		unsigned long long used = stream.next - stream.consumer;
-		int next_rate = data.sample_count;
-		if( (used > PROFILE_STREAM_SIZE * 3 / 4 || time - stream.last_consume > 1.0) && next_rate > 10 ) next_rate /= 2;
-		else if( used < PROFILE_STREAM_SIZE / 4 && next_rate < stream.requested_rate ) next_rate *= 2;
-		if( next_rate < 10 ) next_rate = 10;
-		if( next_rate > stream.requested_rate ) next_rate = stream.requested_rate;
-		data.sample_count = next_rate;
-		stream.last_adjust = time;
-	}
-	hl_mutex_release(stream.lock);
 }
 
 #ifdef HL_LINUX
@@ -630,6 +550,7 @@ static void read_thread_data( thread_handle *t ) {
 	if( !pause_thread(t,true) )
 		return;
 	stopped_at = hl_sys_time();
+	unsigned long long stopped_ticks = hl_prof_ticks();
 	void *eip;
 	void *stack = get_thread_stackptr(t,&eip);
 	if( !stack ) {
@@ -697,36 +618,24 @@ static void read_thread_data( thread_handle *t ) {
 	double time = hl_sys_time();
 	hl_threads_info *gc = hl_gc_threads_info();
 	if( gc->stopping_world ) eventId |= 0x40000000;
-	{
-		unsigned char frames[MAX_STACK_COUNT * 8];
-		for(int i=0;i<count;i++) stream_native_symbol(data.stackOut[i],time,t->tid);
-		for(int i=0;i<count;i++) stream_write_u64(frames + i * 8,(unsigned long long)(uintptr_t)data.stackOut[i]);
-		stream_record(PROFILE_STREAM_SAMPLE,gc->stopping_world ? 1 : 0,time,t->tid,count,frames,count * 8);
-	}
+	for(int i=0;i<count;i++) stream_native_symbol(data.stackOut[i],time,t->tid);
+	hl_prof_sample((unsigned int)t->tid,gc->stopping_world ? 1 : 0,data.stackOut,count,stopped_ticks);
 	record_data(&time,sizeof(double));
 	record_data(&t->tid,sizeof(int));
 	record_data(&eventId,sizeof(int));
 	record_data(data.stackOut,sizeof(void*)*count);
 	if( !*t->name && (*t->inf->thread_name || t->tid == profile_main_tid) ) {
 		if( *t->inf->thread_name ) memcpy(t->name, t->inf->thread_name, sizeof(t->name)); else strcpy(t->name, "main");
-		stream_record(PROFILE_STREAM_EVENT,0,hl_sys_time(),t->tid,PROFILE_EVENT_THREAD_NAME,t->name,(unsigned int)strlen(t->name));
 	}
 	sampling_cost.samples++;
 	sampling_cost.total += hl_sys_time() - sample_started;
 	if( sampling_cost.first == 0 ) sampling_cost.first = sample_started;
 	sampling_cost.last = sample_started;
-	if( stream.lock ) {
-		double elapsed = hl_sys_time() - sample_started;
-		hl_mutex_acquire(stream.lock);
-		stream.sample_records++;
-		stream.sample_nanos += (unsigned long long)(elapsed * 1000000000.0);
-		hl_mutex_release(stream.lock);
-	}
 }
 
-/* True while samples and events are being recorded, so callers can skip building event payloads otherwise. */
+/* True while a session records, so callers can skip building event payloads otherwise. */
 static bool hl_profile_recording( void ) {
-	return data.sample_count > 0 && data.profiling_pause == 0;
+	return hl_prof_on != 0;
 }
 
 static void profile_pause() {
@@ -743,11 +652,14 @@ static void profile_resume() {
 	hl_condition_release(data.waitCond);
 }
 
+/* The sampler is paused while no session asks for samples. */
+static bool sampler_paused;
+
 static void profile_resume_remote() {
 	if( data.waitCond == NULL ) return;
 	hl_condition_acquire(data.waitCond);
-	if( stream.remote_paused ) {
-		stream.remote_paused = false;
+	if( sampler_paused ) {
+		sampler_paused = false;
 		data.profiling_pause--;
 		hl_condition_broadcast(data.waitCond);
 	}
@@ -757,8 +669,8 @@ static void profile_resume_remote() {
 static void profile_pause_remote() {
 	if( data.waitCond == NULL ) return;
 	hl_condition_acquire(data.waitCond);
-	if( !stream.remote_paused ) {
-		stream.remote_paused = true;
+	if( !sampler_paused ) {
+		sampler_paused = true;
 		data.profiling_pause++;
 		hl_condition_broadcast(data.waitCond);
 	}
@@ -797,18 +709,10 @@ static void profile_sleep( double seconds ) {
 
 static void hl_profile_loop( void *_ ) {
 	double next = hl_sys_time();
-	double next_gc_stats = next;
 	data.tmpMemory = malloc(MAX_STACK_SIZE);
 	data.waitLoop = false;
 	while( !data.stopLoop ) {
 		double t = hl_sys_time();
-		if( t >= next_gc_stats ) {
-			unsigned long long values[5]; unsigned char payload[40];
-			hl_gc_profile_stats(values,values+1,values+2,values+3,values+4);
-			for(int stat=0;stat<5;stat++) stream_write_u64(payload + stat * 8,values[stat]);
-			stream_record(PROFILE_STREAM_EVENT,0,t,0,PROFILE_EVENT_GC_STATS,payload,sizeof(payload));
-			next_gc_stats = t + 1.0;
-		}
 		hl_condition_acquire(data.waitCond);
 		if( t < next || data.profiling_pause ) {
 			if( !(t < next) ) next = t;
@@ -819,7 +723,7 @@ static void hl_profile_loop( void *_ ) {
 				hl_condition_release(data.waitCond);
 			} else {
 				hl_condition_release(data.waitCond);
-				profile_sleep((next < next_gc_stats ? next : next_gc_stats) - t);
+				profile_sleep(next - t);
 			}
 			continue;
 		}
@@ -898,9 +802,7 @@ static void profile_event( int code, vbyte *data, int dataLen );
 
 void hl_profile_setup( int sample_count ) {
 	#	if defined(HL_THREADS) && (defined(HL_WIN_DESKTOP) || defined(HL_LINUX) || defined (HL_MAC))
-	if( stream.lock == NULL ) {
-		stream.lock = hl_mutex_alloc(false);
-		hl_add_root(&stream.lock);
+	if( native_lock == NULL ) {
 		native_lock = hl_mutex_alloc(false);
 		hl_add_root(&native_lock);
 	}
@@ -915,7 +817,8 @@ void hl_profile_setup( int sample_count ) {
 	hl_setup.stop_profiler = hl_profile_end;
 	if( data.sample_count ) return;
 	if( sample_count < 0 ) {
-		// was not started with --profile : pause until we get start event
+		// was not started with --profile: the sampler waits for a session, and --diagnostics-wait for its start
+		session_waiting = true;
 		profile_pause_remote();
 		return;
 	}
@@ -949,77 +852,13 @@ void hl_profile_wait_for_start( void ) {
 	#	if defined(HL_THREADS) && (defined(HL_WIN_DESKTOP) || defined(HL_LINUX) || defined (HL_MAC))
 	if( data.waitCond == NULL ) return;
 	hl_condition_acquire(data.waitCond);
-	while( stream.remote_paused )
+	while( session_waiting )
 		hl_condition_wait(data.waitCond);
 	hl_condition_release(data.waitCond);
 	#	endif
 }
 
-void hl_profile_stream_status( unsigned long long *first, unsigned long long *next, unsigned long long *dropped, int *sample_rate, int *paused, unsigned long long *consumer, int *requested_rate, unsigned long long *sample_records, unsigned long long *sample_nanos, unsigned long long *generated_bytes ) {
-	if( stream.lock ) hl_mutex_acquire(stream.lock);
-	*first = stream.first;
-	*next = stream.next;
-	*dropped = stream.dropped;
-	*sample_rate = data.sample_count;
-	*paused = data.profiling_pause > 0;
-	*consumer = stream.consumer;
-	*requested_rate = stream.requested_rate;
-	*sample_records = stream.sample_records;
-	*sample_nanos = stream.sample_nanos;
-	*generated_bytes = stream.generated_bytes;
-	if( stream.lock ) hl_mutex_release(stream.lock);
-}
-
-unsigned int hl_profile_stream_read( unsigned long long cursor, void *output, unsigned int capacity, unsigned long long *next, unsigned long long *dropped ) {
-	unsigned int total = 0;
-	if( stream.lock == NULL || output == NULL ) { *next = 0; *dropped = 0; return 0; }
-	hl_mutex_acquire(stream.lock);
-	if( cursor < stream.first ) cursor = stream.first;
-	if( cursor > stream.next ) cursor = stream.next;
-	if( stream.next - cursor < capacity ) capacity = (unsigned int)(stream.next - cursor);
-	stream.received = cursor;
-	while( total < capacity ) {
-		unsigned int offset = (unsigned int)(cursor % PROFILE_STREAM_SIZE);
-		unsigned int count = PROFILE_STREAM_SIZE - offset;
-		if( count > capacity - total ) count = capacity - total;
-		memcpy((unsigned char*)output + total,stream.bytes + offset,count);
-		cursor += count;
-		total += count;
-	}
-	*next = cursor;
-	*dropped = stream.dropped;
-	stream.consumer = cursor;
-	stream.last_consume = hl_sys_time();
-	hl_mutex_release(stream.lock);
-	return total;
-}
-
-bool hl_profile_stream_configure( int sample_rate, bool enabled ) {
-	if( sample_rate <= 0 || sample_rate > 100000 ) return false;
-	if( enabled ) {
-		if( !data.sample_count ) {
-			profile_configuring_stream = true;
-			hl_profile_setup(sample_rate);
-			profile_configuring_stream = false;
-		}
-		data.sample_count = sample_rate;
-		if( stream.lock ) {
-			hl_mutex_acquire(stream.lock);
-			stream.requested_rate = sample_rate;
-			stream.consumer = stream.next;
-			stream.received = stream.next;
-			stream.last_adjust = hl_sys_time();
-			stream.last_consume = stream.last_adjust;
-			hl_mutex_release(stream.lock);
-		}
-		profile_resume_remote();
-	} else if( data.sample_count ) {
-		profile_pause_remote();
-	}
-	return true;
-}
-
-bool hl_profile_stream_configure_allocations( int interval ) {
+static bool configure_allocations( int interval ) {
 	extern void hl_gc_set_profile_allocation_callback( void (*callback)(hl_type*,int,int,void*) );
 	if( interval < 0 || interval > 100000000 ) return false;
 	profile_allocation_interval = interval;
@@ -1027,19 +866,54 @@ bool hl_profile_stream_configure_allocations( int interval ) {
 	return true;
 }
 
+bool hl_profile_session_start( int sources, int sample_rate, int allocation_interval ) {
+	bool sampling = (sources & HL_PROF_SOURCE_SAMPLING) != 0;
+	if( sampling && (sample_rate <= 0 || sample_rate > 100000) ) return false;
+	if( !configure_allocations((sources & HL_PROF_SOURCE_ALLOC) ? allocation_interval : 0) ) return false;
+	if( sampling ) {
+		if( !data.sample_count ) {
+			profile_configuring_stream = true;
+			hl_profile_setup(sample_rate);
+			profile_configuring_stream = false;
+		}
+		data.sample_count = sample_rate;
+		profile_resume_remote();
+	}
+	if( data.waitCond ) {
+		hl_condition_acquire(data.waitCond);
+		session_waiting = false;
+		hl_condition_broadcast(data.waitCond);
+		hl_condition_release(data.waitCond);
+	} else
+		session_waiting = false;
+	return true;
+}
+
+void hl_profile_session_stop( void ) {
+	configure_allocations(0);
+	if( data.sample_count ) profile_pause_remote();
+}
+
+bool hl_profile_metadata_changed( void ) {
+	bool changed = metadata_changed;
+	metadata_changed = false;
+	return changed;
+}
+
 void hl_profile_stream_notify_module( unsigned long long module_id ) {
 	unsigned char payload[8];
-	if( stream.lock == NULL ) return;
+	metadata_changed = true;
 	stream_write_u64(payload,module_id);
-	stream_record(PROFILE_STREAM_EVENT,0,hl_sys_time(),hl_get_thread() ? hl_get_thread()->thread_id : 0,PROFILE_EVENT_MODULE_LOADED,payload,sizeof(payload));
+	hl_prof_event(PROFILE_EVENT_MODULE_LOADED,payload,sizeof(payload));
 }
 
 void hl_profile_stream_notify_revision( unsigned long long module_id, int revision ) {
 	unsigned char payload[12];
-	if( revision <= 0 || stream.lock == NULL ) return;
+	if( revision <= 0 ) return;
+	metadata_changed = true;
 	stream_write_u64(payload,module_id);
 	stream_write_u32(payload + 8,(unsigned int)revision);
-	stream_record(PROFILE_STREAM_EVENT,0,hl_sys_time(),hl_get_thread()->thread_id,PROFILE_EVENT_MODULE_REVISION,payload,sizeof(payload));
+	hl_prof_event(PROFILE_EVENT_MODULE_REVISION,payload,sizeof(payload));
 }
 
 static bool read_profile_data( profile_reader *r, void *ptr, int size ) {
@@ -1185,34 +1059,11 @@ static void profile_print_cost( void ) {
 		sampling_cost.capture * 1e6 / sampling_cost.samples, sampling_cost.total * 1e6 / sampling_cost.samples);
 }
 
-/*
- * A diagnostics client reads the stream in the background, so records written just before exit (the last spans and
- * counters) would be lost with the process. Give a client that is reading up to a second to take them. The client reads
- * through the diagnostics server, so this must run before hl_diagnostics_stop, and a record only counts as taken once the
- * client asks for what follows it: a reply that was sent can still be lost when the server closes the connection.
- */
+/* Ends a streaming session before the program exits, so a connected client receives every record. Call it while
+   diagnostics still run. */
 void hl_profile_drain( void ) {
-	unsigned long long target;
-	double deadline = hl_sys_time() + 1.0;
-	if( stream.lock == NULL ) return;
-	hl_mutex_acquire(stream.lock);
-	target = stream.next;
-	hl_mutex_release(stream.lock);
-	while( hl_sys_time() < deadline ) {
-		bool reading, drained;
-		hl_mutex_acquire(stream.lock);
-		reading = stream.last_consume > 0 && hl_sys_time() - stream.last_consume < 1.0;
-		drained = stream.received >= target;
-		hl_mutex_release(stream.lock);
-		if( drained || !reading ) return;
-		// Not profile_sleep: its timer belongs to the sampler thread.
-#		ifdef HL_WIN
-		Sleep(5);
-#		else
-		struct timespec wait = { 0, 5000000 };
-		nanosleep(&wait,NULL);
-#		endif
-	}
+	extern void hl_diagnostics_finish( void );
+	hl_diagnostics_finish();
 }
 
 void hl_profile_end() {
@@ -1251,12 +1102,6 @@ static void profile_event( int code, vbyte *ptr, int dataLen ) {
 		}
 		data.first_record = NULL;
 		data.record = NULL;
-		if( stream.lock ) {
-			hl_mutex_acquire(stream.lock);
-			stream.first = stream.next;
-			stream.dropped = 0;
-			hl_mutex_release(stream.lock);
-		}
 		profile_resume();
 		break;
 	case -4:
@@ -1277,11 +1122,19 @@ static void profile_event( int code, vbyte *ptr, int dataLen ) {
 	case -8:
 		hl_get_thread()->flags |= HL_THREAD_INVISIBLE;
 		break;
+	/* hl.Profile.eventBytes payloads: UTF-8 span names, and counters as an f64 followed by the UTF-8 name. */
 	case PROFILE_EVENT_SPAN_BEGIN:
+		hl_prof_span_begin(ptr,dataLen,HL_PROF_UTF8);
+		break;
 	case PROFILE_EVENT_SPAN_END:
+		hl_prof_span_end();
+		break;
 	case PROFILE_EVENT_COUNTER:
-		if( data.profiling_pause ) return;
-		stream_record(PROFILE_STREAM_EVENT,0,hl_sys_time(),hl_get_thread()->thread_id,code,ptr,dataLen);
+		if( dataLen >= 8 ) {
+			double value;
+			memcpy(&value,ptr,8);
+			hl_prof_counter(ptr + 8,dataLen - 8,HL_PROF_UTF8,value);
+		}
 		break;
 	default:
 		if( code < 0 ) return;
@@ -1289,7 +1142,7 @@ static void profile_event( int code, vbyte *ptr, int dataLen ) {
 		profile_pause();
 		while( !data.waitLoop ) {}
 		double time = hl_sys_time();
-		stream_record(PROFILE_STREAM_EVENT,0,time,hl_get_thread()->thread_id,code,ptr,dataLen);
+		hl_prof_event((unsigned int)code,ptr,(unsigned int)dataLen);
 		record_data(&time,sizeof(double));
 		record_data(&hl_get_thread()->thread_id,sizeof(int));
 		record_data(&code,sizeof(int));

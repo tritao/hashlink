@@ -396,10 +396,13 @@ HL_EXTERN_C HL_EXPORT void hl_module_retirement_status_get( hl_module *m, hl_mod
 h_bool hl_module_debug( hl_module *m, int port, h_bool wait );
 bool hl_diagnostics_start( int port, bool public_bind );
 void hl_diagnostics_stop( void );
-void hl_profile_stream_status( unsigned long long *first, unsigned long long *next, unsigned long long *dropped, int *sample_rate, int *paused, unsigned long long *consumer, int *requested_rate, unsigned long long *sample_records, unsigned long long *sample_nanos, unsigned long long *generated_bytes );
-#define HL_PROFILE_STREAM_SIZE (8 << 20)
-unsigned int hl_profile_stream_read( unsigned long long cursor, void *output, unsigned int capacity, unsigned long long *next, unsigned long long *dropped );
-bool hl_profile_stream_configure( int sample_rate, bool enabled );
+/** Ends the streaming session, if any, after pushing every record to the client. */
+void hl_diagnostics_finish( void );
+/** Starts the sampler and allocation sampling a session asks for (HL_PROF_SOURCE_*), and releases --diagnostics-wait. */
+bool hl_profile_session_start( int sources, int sample_rate, int allocation_interval );
+void hl_profile_session_stop( void );
+/** True once a module load or patch changed the symbol metadata since the last call. */
+bool hl_profile_metadata_changed( void );
 void hl_profile_stream_notify_revision( unsigned long long module_id, int revision );
 void hl_profile_stream_notify_module( unsigned long long module_id );
 HL_API void hl_gc_profile_stats( unsigned long long *allocated, unsigned long long *allocations, unsigned long long *heap, unsigned long long *collections, unsigned long long *mark_micros );

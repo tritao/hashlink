@@ -20,6 +20,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 #include "hl.h"
+#include "hlprof.h"
 HL_API double hl_sys_time( void );
 #ifdef HL_WIN
 #	undef _GUID
@@ -511,6 +512,7 @@ HL_API void hl_unregister_thread() {
 	if( !t )
 		hl_fatal("Thread not registered");
 	if( hl_setup.thread_unregistered ) hl_setup.thread_unregistered();
+	hl_prof_thread_exit();
 	hl_remove_root(&t->exc_value);
 	hl_remove_root(&t->exc_handler);
 	gc_global_lock(true);

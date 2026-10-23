@@ -1,0 +1,618 @@
+/*
+ * HashLink profiler recorder. See hlprof.h, and docs/PROFILER.md in Haxeon for the design.
+ *
+ * Every thread writes records into its own chunk with plain stores and publishes its write position with a release store.
+ * The consumer reads positions with acquire loads, so neither side takes a lock to record or drain. The only atomic
+ * read-modify-write a producer makes is taking a chunk from the pool, once per HL_PROF_CHUNK_SIZE bytes.
+ */
+#ifndef _WIN32
+#define _GNU_SOURCE
+#endif
+#include "hlprof.h"
+
+#ifdef HL_WIN
+#	undef _GUID
+#	include <windows.h>
+#else
+#	include <pthread.h>
+#	include <sched.h>
+#	include <time.h>
+#	include <unistd.h>
+#	include <sys/mman.h>
+#endif
+
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#	define PROF_X86
+#	ifdef _MSC_VER
+#		include <intrin.h>
+#	else
+#		include <cpuid.h>
+#		include <x86intrin.h>
+#	endif
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#	define PROF_ARM64
+#	ifdef _MSC_VER
+#		include <intrin.h>
+#	endif
+#endif
+
+HL_PRIM int hl_thread_id();
+
+/* ---- atomics ---------------------------------------------------------------------------------------------------- */
+
+#if defined(_MSC_VER) && !defined(__clang__)
+#	if defined(PROF_X86)
+	/* x86 orders loads and stores as acquire/release already; only the compiler must not reorder around them. */
+#		define LOAD_ACQUIRE_PTR(p) prof_load_ptr((void *volatile*)(p))
+#		define STORE_RELEASE_PTR(p,v) do { _ReadWriteBarrier(); *(void *volatile*)(p) = (v); } while(0)
+#		define LOAD_ACQUIRE_INT(p) prof_load_int((volatile int*)(p))
+#		define STORE_RELEASE_INT(p,v) do { _ReadWriteBarrier(); *(volatile int*)(p) = (v); } while(0)
+static __forceinline void *prof_load_ptr( void *volatile *p ) { void *v = *p; _ReadWriteBarrier(); return v; }
+static __forceinline int prof_load_int( volatile int *p ) { int v = *p; _ReadWriteBarrier(); return v; }
+#	else
+#		define LOAD_ACQUIRE_PTR(p) ((void*)__ldar64((unsigned __int64 volatile*)(p)))
+#		define STORE_RELEASE_PTR(p,v) __stlr64((unsigned __int64 volatile*)(p),(unsigned __int64)(v))
+#		define LOAD_ACQUIRE_INT(p) ((int)__ldar32((unsigned __int32 volatile*)(p)))
+#		define STORE_RELEASE_INT(p,v) __stlr32((unsigned __int32 volatile*)(p),(unsigned __int32)(v))
+#	endif
+#	define CAS64(p,expected,desired) (_InterlockedCompareExchange64((volatile __int64*)(p),(__int64)(desired),(__int64)(expected)) == (__int64)(expected))
+#	define FETCH_ADD32(p,v) _InterlockedExchangeAdd((volatile long*)(p),(long)(v))
+#	define FETCH_ADD64(p,v) _InterlockedExchangeAdd64((volatile __int64*)(p),(__int64)(v))
+#	define FORCE_INLINE __forceinline
+#else
+#	define LOAD_ACQUIRE_PTR(p) __atomic_load_n((void**)(p),__ATOMIC_ACQUIRE)
+#	define STORE_RELEASE_PTR(p,v) __atomic_store_n((void**)(p),(void*)(v),__ATOMIC_RELEASE)
+#	define LOAD_ACQUIRE_INT(p) __atomic_load_n((int*)(p),__ATOMIC_ACQUIRE)
+#	define STORE_RELEASE_INT(p,v) __atomic_store_n((int*)(p),(v),__ATOMIC_RELEASE)
+static inline bool prof_cas64( volatile unsigned long long *p, unsigned long long expected, unsigned long long desired ) {
+	return __atomic_compare_exchange_n(p,&expected,desired,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
+}
+#	define CAS64(p,expected,desired) prof_cas64((p),(expected),(desired))
+#	define FETCH_ADD32(p,v) __atomic_fetch_add((p),(v),__ATOMIC_RELAXED)
+#	define FETCH_ADD64(p,v) __atomic_fetch_add((p),(v),__ATOMIC_RELAXED)
+#	define FORCE_INLINE inline __attribute__((always_inline))
+#endif
+
+/* ---- clock ------------------------------------------------------------------------------------------------------ */
+
+static int tick_kind;
+static bool use_tsc;
+static unsigned long long nominal_hz;
+static unsigned long long base_ticks;
+#ifdef HL_WIN
+static unsigned long long qpc_frequency;
+#endif
+
+HL_PRIM unsigned long long hl_prof_monotonic_ns( void ) {
+#ifdef HL_WIN
+	LARGE_INTEGER counter;
+	unsigned long long value;
+	QueryPerformanceCounter(&counter);
+	value = (unsigned long long)counter.QuadPart;
+	return value / qpc_frequency * 1000000000ULL + value % qpc_frequency * 1000000000ULL / qpc_frequency;
+#else
+	struct timespec now;
+#	ifdef CLOCK_MONOTONIC_RAW
+	clock_gettime(CLOCK_MONOTONIC_RAW,&now);
+#	else
+	clock_gettime(CLOCK_MONOTONIC,&now);
+#	endif
+	return (unsigned long long)now.tv_sec * 1000000000ULL + (unsigned long long)now.tv_nsec;
+#endif
+}
+
+static unsigned long long slow_ticks( void ) {
+#if defined(PROF_ARM64) && defined(_MSC_VER)
+	return (unsigned long long)_ReadStatusReg(ARM64_CNTVCT);
+#elif defined(PROF_ARM64)
+	unsigned long long value;
+	__asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(value));
+	return value;
+#elif defined(HL_WIN)
+	LARGE_INTEGER counter;
+	QueryPerformanceCounter(&counter);
+	return (unsigned long long)counter.QuadPart;
+#else
+	return hl_prof_monotonic_ns();
+#endif
+}
+
+static FORCE_INLINE unsigned long long now_ticks( void ) {
+#ifdef PROF_X86
+	if( use_tsc ) return __rdtsc();
+#endif
+	return slow_ticks();
+}
+
+HL_PRIM unsigned long long hl_prof_ticks( void ) {
+	return now_ticks();
+}
+
+static bool invariant_tsc( void ) {
+#if defined(PROF_X86) && defined(_MSC_VER)
+	int info[4];
+	__cpuid(info,0x80000000);
+	if( (unsigned int)info[0] < 0x80000007 ) return false;
+	__cpuid(info,0x80000007);
+	return (info[3] & (1 << 8)) != 0;
+#elif defined(PROF_X86)
+	unsigned int a, b, c, d;
+	if( __get_cpuid_max(0x80000000,NULL) < 0x80000007 ) return false;
+	__get_cpuid(0x80000007,&a,&b,&c,&d);
+	return (d & (1 << 8)) != 0;
+#else
+	return false;
+#endif
+}
+
+static void clock_init( void ) {
+	if( tick_kind ) return;
+#ifdef HL_WIN
+	{
+		LARGE_INTEGER frequency;
+		QueryPerformanceFrequency(&frequency);
+		qpc_frequency = (unsigned long long)frequency.QuadPart;
+	}
+#endif
+	use_tsc = invariant_tsc();
+	if( use_tsc ) {
+		/* Only informative: readers convert ticks with the session's clock pairs. */
+		unsigned long long ns0 = hl_prof_monotonic_ns(), t0 = now_ticks(), ns1;
+		do ns1 = hl_prof_monotonic_ns(); while( ns1 - ns0 < 2000000 );
+		nominal_hz = (now_ticks() - t0) * 1000000000ULL / (ns1 - ns0);
+		tick_kind = HL_PROF_TICKS_TSC;
+	} else {
+#if defined(PROF_ARM64) && defined(_MSC_VER)
+		nominal_hz = (unsigned long long)_ReadStatusReg(ARM64_CNTFRQ_EL0);
+		tick_kind = HL_PROF_TICKS_CNTVCT;
+#elif defined(PROF_ARM64)
+		__asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(nominal_hz));
+		tick_kind = HL_PROF_TICKS_CNTVCT;
+#elif defined(HL_WIN)
+		nominal_hz = qpc_frequency;
+		tick_kind = HL_PROF_TICKS_QPC;
+#else
+		nominal_hz = 1000000000ULL;
+		tick_kind = HL_PROF_TICKS_NS;
+#endif
+	}
+}
+
+HL_PRIM int hl_prof_tick_kind( void ) { clock_init(); return tick_kind; }
+HL_PRIM unsigned long long hl_prof_nominal_hz( void ) { clock_init(); return nominal_hz; }
+HL_PRIM unsigned long long hl_prof_base_ticks( void ) { return base_ticks; }
+
+/* ---- chunk pool ------------------------------------------------------------------------------------------------- */
+
+typedef struct {
+	volatile int finished;      // set with release once size and next are final
+	unsigned int size;          // bytes written, valid once finished
+	int next;                   // the chunk the thread continued in, valid once finished
+	int free_next;              // free list link
+} prof_chunk;
+
+static unsigned char *pool;
+static prof_chunk *chunks;
+static int chunk_count;
+/* The free list head: tag << 32 | (index + 1), 0 when empty. The tag changes on every push and pop, against ABA. */
+static volatile unsigned long long free_head;
+static volatile long chunks_free;
+
+static FORCE_INLINE unsigned char *chunk_data( int index ) {
+	return pool + (size_t)index * HL_PROF_CHUNK_SIZE;
+}
+
+static int pool_pop( void ) {
+	unsigned long long head, next;
+	int index;
+	do {
+		head = free_head;
+		if( (unsigned int)head == 0 ) return -1;
+		index = (int)(unsigned int)head - 1;
+		next = ((head >> 32) + 1) << 32 | (unsigned int)(chunks[index].free_next + 1);
+	} while( !CAS64(&free_head,head,next) );
+	FETCH_ADD32(&chunks_free,-1);
+	return index;
+}
+
+static void pool_push( int index ) {
+	unsigned long long head, next;
+	do {
+		head = free_head;
+		chunks[index].free_next = (int)(unsigned int)head - 1;
+		next = ((head >> 32) + 1) << 32 | (unsigned int)(index + 1);
+	} while( !CAS64(&free_head,head,next) );
+	FETCH_ADD32(&chunks_free,1);
+}
+
+static void pool_reset( void ) {
+	free_head = 0;
+	chunks_free = 0;
+	for(int i=chunk_count-1;i>=0;i--) {
+		chunks[i].finished = 0;
+		pool_push(i);
+	}
+}
+
+static bool pool_allocate( unsigned int pool_mib ) {
+	int count = (int)(((unsigned long long)pool_mib << 20) / HL_PROF_CHUNK_SIZE);
+	if( count < 16 ) count = 16;
+	if( pool && count <= chunk_count ) return true;
+	/* The pool lives as long as the process, so a record still being written when a session stops lands in valid memory.
+	   A bigger session replaces it while no session records. */
+	if( pool ) {
+#ifdef HL_WIN
+		VirtualFree(pool,0,MEM_RELEASE);
+#else
+		munmap(pool,(size_t)chunk_count * HL_PROF_CHUNK_SIZE);
+#endif
+		free(chunks);
+		pool = NULL;
+		chunks = NULL;
+		chunk_count = 0;
+	}
+#ifdef HL_WIN
+	pool = (unsigned char*)VirtualAlloc(NULL,(size_t)count * HL_PROF_CHUNK_SIZE,MEM_RESERVE | MEM_COMMIT,PAGE_READWRITE);
+#else
+	pool = (unsigned char*)mmap(NULL,(size_t)count * HL_PROF_CHUNK_SIZE,PROT_READ | PROT_WRITE,MAP_PRIVATE | MAP_ANONYMOUS,-1,0);
+	if( pool == MAP_FAILED ) pool = NULL;
+#endif
+	chunks = (prof_chunk*)calloc((size_t)count,sizeof(prof_chunk));
+	if( pool == NULL || chunks == NULL ) {
+		free(chunks);
+		chunks = NULL;
+		pool = NULL;
+		return false;
+	}
+	chunk_count = count;
+	return true;
+}
+
+/* ---- thread states ---------------------------------------------------------------------------------------------- */
+
+typedef struct prof_thread prof_thread;
+struct prof_thread {
+	/* Written by the producer. pos is published with release; the rest is the producer's own. */
+	unsigned char *volatile pos;
+	unsigned char *end;
+	int chunk;
+	unsigned int session;
+	unsigned int tid;
+	volatile int first_chunk;   // the session's first chunk, published before pos moves into it
+	volatile int exited;
+	char producer_padding[64];
+	/* Written by the consumer. */
+	int read_chunk;
+	unsigned int read_offset;
+	prof_thread *next;
+};
+
+static HL_THREAD_VAR prof_thread *prof_current;
+static prof_thread *threads;
+static unsigned int session_id;
+static volatile unsigned long long stall_count;
+static volatile unsigned long long stall_ticks;
+static unsigned long long drained_bytes;
+
+HL_PRIM volatile int hl_prof_on = 0;
+
+#ifdef HL_WIN
+static SRWLOCK registry_lock = SRWLOCK_INIT;
+#	define REGISTRY_LOCK() AcquireSRWLockExclusive(&registry_lock)
+#	define REGISTRY_UNLOCK() ReleaseSRWLockExclusive(&registry_lock)
+#else
+static pthread_mutex_t registry_lock = PTHREAD_MUTEX_INITIALIZER;
+#	define REGISTRY_LOCK() pthread_mutex_lock(&registry_lock)
+#	define REGISTRY_UNLOCK() pthread_mutex_unlock(&registry_lock)
+#endif
+
+static void thread_reset( prof_thread *t ) {
+	t->pos = NULL;
+	t->end = NULL;
+	t->chunk = -1;
+	t->first_chunk = -1;
+	t->read_chunk = -1;
+	t->read_offset = 0;
+	t->session = session_id;
+}
+
+/* The calling thread's state for the current session: created on the thread's first record, reset when a new session
+   begins. Slow path only. */
+static prof_thread *thread_state( void ) {
+	prof_thread *t = prof_current;
+	if( t && t->session == session_id ) return t;
+	REGISTRY_LOCK();
+	if( t == NULL ) {
+		t = (prof_thread*)calloc(1,sizeof(prof_thread));
+		if( t == NULL ) { REGISTRY_UNLOCK(); return NULL; }
+		t->tid = (unsigned int)hl_thread_id();
+		t->next = threads;
+		threads = t;
+		prof_current = t;
+	}
+	if( t->session != session_id ) thread_reset(t);
+	REGISTRY_UNLOCK();
+	return t;
+}
+
+static void yield_thread( void ) {
+#ifdef HL_WIN
+	SwitchToThread();
+#else
+	sched_yield();
+#endif
+}
+
+/* Moves the thread to a fresh chunk with room for bytes. When the pool is empty the thread waits for the consumer and the
+   wait is recorded as a STALL. Returns NULL when recording stopped meanwhile. */
+static unsigned char *next_chunk( prof_thread *t, unsigned int bytes ) {
+	unsigned long long stall_started = 0;
+	unsigned char *p;
+	int index = pool_pop();
+	if( bytes + 16 > HL_PROF_CHUNK_SIZE ) return NULL;
+	while( index < 0 ) {
+		if( !hl_prof_on ) return NULL;
+		if( !stall_started ) stall_started = now_ticks();
+		yield_thread();
+		index = pool_pop();
+	}
+	if( t->chunk >= 0 ) {
+		prof_chunk *old = chunks + t->chunk;
+		old->size = (unsigned int)(t->pos - chunk_data(t->chunk));
+		old->next = index;
+		STORE_RELEASE_INT(&old->finished,1);
+	} else
+		STORE_RELEASE_INT(&t->first_chunk,index);
+	chunks[index].finished = 0;
+	t->chunk = index;
+	p = chunk_data(index);
+	t->end = p + HL_PROF_CHUNK_SIZE;
+	if( stall_started ) {
+		unsigned long long ended = now_ticks();
+		((unsigned long long*)p)[0] = ((unsigned long long)HL_PROF_STALL << 56) | ((stall_started - base_ticks) & HL_PROF_TICK_MASK);
+		((unsigned long long*)p)[1] = (ended - base_ticks) & HL_PROF_TICK_MASK;
+		p += 16;
+		FETCH_ADD64(&stall_count,1);
+		FETCH_ADD64(&stall_ticks,ended - stall_started);
+	}
+	STORE_RELEASE_PTR(&t->pos,p);
+	return p;
+}
+
+/* Room for a record of bytes (a multiple of 8) on the calling thread, or NULL. */
+static FORCE_INLINE unsigned char *reserve( prof_thread **out, unsigned int bytes ) {
+	prof_thread *t = prof_current;
+	unsigned char *p;
+	if( t == NULL || t->session != session_id ) {
+		t = thread_state();
+		if( t == NULL ) return NULL;
+	}
+	p = t->pos;
+	/* A chunk is never filled to its last byte, so a published position always lies inside its own chunk; a position at
+	   the end would equal the start of the chunk after it in the pool. */
+	if( p == NULL || (size_t)(t->end - p) <= bytes ) p = next_chunk(t,bytes);
+	*out = t;
+	return p;
+}
+
+static FORCE_INLINE unsigned long long head( int kind ) {
+	return ((unsigned long long)kind << 56) | ((now_ticks() - base_ticks) & HL_PROF_TICK_MASK);
+}
+
+#define COMMIT(t,p,bytes) STORE_RELEASE_PTR(&(t)->pos,(p) + (bytes))
+
+/* ---- writers ---------------------------------------------------------------------------------------------------- */
+
+HL_PRIM void hl_prof_enter( unsigned long long key ) {
+	prof_thread *t;
+	unsigned char *p;
+	if( !hl_prof_on || (p = reserve(&t,16)) == NULL ) return;
+	((unsigned long long*)p)[0] = head(HL_PROF_ENTER);
+	((unsigned long long*)p)[1] = key;
+	COMMIT(t,p,16);
+}
+
+HL_PRIM void hl_prof_exit( void ) {
+	prof_thread *t;
+	unsigned char *p;
+	if( !hl_prof_on || (p = reserve(&t,8)) == NULL ) return;
+	((unsigned long long*)p)[0] = head(HL_PROF_EXIT);
+	COMMIT(t,p,8);
+}
+
+HL_PRIM void hl_prof_unwind( unsigned long long depth ) {
+	prof_thread *t;
+	unsigned char *p;
+	if( !hl_prof_on || (p = reserve(&t,16)) == NULL ) return;
+	((unsigned long long*)p)[0] = head(HL_PROF_UNWIND);
+	((unsigned long long*)p)[1] = depth;
+	COMMIT(t,p,16);
+}
+
+#define PAD8(n) (((n) + 7u) & ~7u)
+#define MAX_NAME_UNITS 1024
+
+static void write_named( int kind, const void *name, int units, int encoding, const double *value ) {
+	prof_thread *t;
+	unsigned char *p;
+	unsigned int size, words, bytes;
+	if( units < 0 ) units = 0;
+	if( units > MAX_NAME_UNITS ) units = MAX_NAME_UNITS;
+	size = (unsigned int)units * (encoding == HL_PROF_UTF16 ? 2u : 1u);
+	words = value ? 3 : 2;
+	bytes = words * 8 + PAD8(size);
+	if( (p = reserve(&t,bytes)) == NULL ) return;
+	((unsigned long long*)p)[0] = head(kind);
+	if( value ) memcpy(p + 8,value,8);
+	((unsigned long long*)p)[words - 1] = (unsigned long long)(unsigned int)units | ((unsigned long long)(unsigned int)encoding << 32);
+	if( size ) memcpy(p + words * 8,name,size);
+	COMMIT(t,p,bytes);
+}
+
+HL_PRIM void hl_prof_span_begin( const void *name, int units, int encoding ) {
+	if( !hl_prof_on ) return;
+	write_named(HL_PROF_SPAN_BEGIN,name,units,encoding,NULL);
+}
+
+HL_PRIM void hl_prof_span_end( void ) {
+	prof_thread *t;
+	unsigned char *p;
+	if( !hl_prof_on || (p = reserve(&t,8)) == NULL ) return;
+	((unsigned long long*)p)[0] = head(HL_PROF_SPAN_END);
+	COMMIT(t,p,8);
+}
+
+HL_PRIM void hl_prof_frame( int kind, unsigned int frame_set ) {
+	prof_thread *t;
+	unsigned char *p;
+	if( !hl_prof_on || (p = reserve(&t,16)) == NULL ) return;
+	((unsigned long long*)p)[0] = head(kind ? HL_PROF_FRAME_IDLE : HL_PROF_FRAME_MARK);
+	((unsigned long long*)p)[1] = frame_set;
+	COMMIT(t,p,16);
+}
+
+HL_PRIM void hl_prof_counter( const void *name, int units, int encoding, double value ) {
+	if( !hl_prof_on ) return;
+	write_named(HL_PROF_COUNTER,name,units,encoding,&value);
+}
+
+HL_PRIM void hl_prof_event( unsigned int id, const void *payload, unsigned int length ) {
+	prof_thread *t;
+	unsigned char *p;
+	unsigned int bytes;
+	if( !hl_prof_on || length > HL_PROF_CHUNK_SIZE - 64 ) return;
+	bytes = 16 + PAD8(length);
+	if( (p = reserve(&t,bytes)) == NULL ) return;
+	((unsigned long long*)p)[0] = head(HL_PROF_EVENT);
+	((unsigned long long*)p)[1] = (unsigned long long)id | ((unsigned long long)length << 32);
+	if( length ) memcpy(p + 16,payload,length);
+	COMMIT(t,p,bytes);
+}
+
+HL_PRIM void hl_prof_sample( unsigned int tid, int flags, void **frames, int count, unsigned long long ticks ) {
+	prof_thread *t;
+	unsigned char *p;
+	unsigned int bytes;
+	if( !hl_prof_on || count < 0 ) return;
+	if( count > 0xFFFF ) count = 0xFFFF;
+	bytes = 16 + (unsigned int)count * 8;
+	if( bytes > HL_PROF_CHUNK_SIZE - 64 || (p = reserve(&t,bytes)) == NULL ) return;
+	((unsigned long long*)p)[0] = ((unsigned long long)HL_PROF_SAMPLE << 56) | ((ticks - base_ticks) & HL_PROF_TICK_MASK);
+	((unsigned long long*)p)[1] = (unsigned long long)tid | ((unsigned long long)(unsigned int)count << 32) | ((unsigned long long)(flags & 0xFF) << 48);
+	for(int i=0;i<count;i++) ((unsigned long long*)p)[2 + i] = (unsigned long long)(uintptr_t)frames[i];
+	COMMIT(t,p,bytes);
+}
+
+/* ---- session ---------------------------------------------------------------------------------------------------- */
+
+HL_PRIM bool hl_prof_start( unsigned int pool_mib ) {
+	if( hl_prof_on ) return false;
+	clock_init();
+	if( pool_mib == 0 ) pool_mib = 64;
+	if( !pool_allocate(pool_mib) ) return false;
+	REGISTRY_LOCK();
+	pool_reset();
+	session_id++;
+	stall_count = 0;
+	stall_ticks = 0;
+	drained_bytes = 0;
+	base_ticks = now_ticks();
+	REGISTRY_UNLOCK();
+	STORE_RELEASE_INT(&hl_prof_on,1);
+	return true;
+}
+
+HL_PRIM void hl_prof_stop( void ) {
+	if( !hl_prof_on ) return;
+	STORE_RELEASE_INT(&hl_prof_on,0);
+	/* A producer that saw recording on may still be writing its record: give it time to publish before the final drain. */
+#ifdef HL_WIN
+	Sleep(2);
+#else
+	{ struct timespec wait = { 0, 2000000 }; nanosleep(&wait,NULL); }
+#endif
+}
+
+/* Hands a thread's new records to fn. Consumer only, with the registry locked. */
+static unsigned long long drain_thread( prof_thread *t, hl_prof_segment_fn fn, void *context ) {
+	unsigned long long total = 0;
+	if( t->session != session_id ) return 0;
+	if( t->read_chunk < 0 ) {
+		int first = LOAD_ACQUIRE_INT(&t->first_chunk);
+		if( first < 0 ) return 0;
+		t->read_chunk = first;
+		t->read_offset = 0;
+	}
+	while( true ) {
+		unsigned char *base = chunk_data(t->read_chunk);
+		unsigned char *pos = (unsigned char*)LOAD_ACQUIRE_PTR(&t->pos);
+		if( pos >= base && pos < base + HL_PROF_CHUNK_SIZE ) {
+			unsigned int end = (unsigned int)(pos - base);
+			if( end > t->read_offset ) {
+				fn(context,t->tid,base + t->read_offset,end - t->read_offset);
+				total += end - t->read_offset;
+				t->read_offset = end;
+			}
+			return total;
+		}
+		/* The producer has moved on: this chunk is finished. */
+		prof_chunk *c = chunks + t->read_chunk;
+		if( !LOAD_ACQUIRE_INT(&c->finished) ) return total;
+		if( c->size > t->read_offset ) {
+			fn(context,t->tid,base + t->read_offset,c->size - t->read_offset);
+			total += c->size - t->read_offset;
+		}
+		{
+			int next = c->next;
+			pool_push(t->read_chunk);
+			t->read_chunk = next;
+			t->read_offset = 0;
+		}
+	}
+}
+
+HL_PRIM unsigned long long hl_prof_drain( hl_prof_segment_fn fn, void *context ) {
+	unsigned long long total = 0;
+	prof_thread *t, **link;
+	REGISTRY_LOCK();
+	link = &threads;
+	while( (t = *link) != NULL ) {
+		total += drain_thread(t,fn,context);
+		if( LOAD_ACQUIRE_INT(&t->exited) ) {
+			/* Its last records were drained above: return its chunk and forget it. */
+			if( t->session == session_id && t->chunk >= 0 ) pool_push(t->chunk);
+			*link = t->next;
+			free(t);
+			continue;
+		}
+		link = &t->next;
+	}
+	drained_bytes += total;
+	REGISTRY_UNLOCK();
+	return total;
+}
+
+HL_PRIM void hl_prof_get_stats( hl_prof_stats *stats ) {
+	stats->chunk_count = chunk_count;
+	stats->chunks_in_use = chunk_count - (int)chunks_free;
+	stats->stalls = stall_count;
+	stats->stall_ticks = stall_ticks;
+	stats->drained_bytes = drained_bytes;
+}
+
+HL_PRIM void hl_prof_thread_exit( void ) {
+	prof_thread *t = prof_current;
+	if( t == NULL ) return;
+	prof_current = NULL;
+	REGISTRY_LOCK();
+	if( hl_prof_on && t->session == session_id ) {
+		/* The consumer drains what is left, then frees it. */
+		STORE_RELEASE_INT(&t->exited,1);
+	} else {
+		prof_thread **link = &threads;
+		while( *link && *link != t ) link = &(*link)->next;
+		if( *link ) *link = t->next;
+		free(t);
+	}
+	REGISTRY_UNLOCK();
+}
