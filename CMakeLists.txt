@@ -337,6 +337,10 @@ if (WITH_VM)
     endif()
 endif()
 
+# Measures the profiler recorder's cost per record (see tools/hlprof-bench.c).
+add_executable(hlprof-bench tools/hlprof-bench.c)
+target_link_libraries(hlprof-bench PRIVATE libhl)
+
 add_executable(hlprof-live tools/hlprof-live.c tools/pftrace.c include/lz4/lz4.c)
 if(WIN32)
     target_link_libraries(hlprof-live PRIVATE ws2_32)

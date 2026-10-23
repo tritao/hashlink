@@ -564,7 +564,10 @@ static void handle_client( hl_socket *socket ) {
 			hl_blocking(false);
 			if( ready < 0 ) break;
 			if( ready == 0 ) {
-				if( session_pump(socket) == 0 && session.active ) {
+				/* Drains are paced: polling every thread's write position continuously would pull it across cores on
+				   each record the thread writes. Records wait about a millisecond, in buffers that hold far longer. */
+				session_pump(socket);
+				if( session.active ) {
 					hl_blocking(true);
 					ready = hl_diag_transport_readable(socket,1);
 					hl_blocking(false);
