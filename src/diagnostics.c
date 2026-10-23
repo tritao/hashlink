@@ -233,7 +233,9 @@ static bool send_metadata( hl_socket *socket, unsigned int request_id, int flags
 		bool entries = module->patch_entry_code != NULL;
 		buffer_u64(&buffer,module->diagnostics_id);
 		buffer_u32(&buffer,(unsigned int)module->revision);
-		buffer_u32(&buffer,(unsigned int)(1 + patch_count + (entries ? 1 : 0)));
+		/* Patched below: a patch region can vanish between counting and reading it. */
+		unsigned int regions = 1 + (entries ? 1 : 0), regions_at = buffer.length;
+		buffer_u32(&buffer,0);
 		buffer_u32(&buffer,(unsigned int)module->code->ndebugfiles);
 		for(int file_index=0;file_index<module->code->ndebugfiles;file_index++) {
 			buffer_u32(&buffer,(unsigned int)module->code->debugfiles_lens[file_index]);
@@ -245,6 +247,7 @@ static bool send_metadata( hl_socket *socket, unsigned int request_id, int flags
 			int valid = 0;
 			unsigned int count_at;
 			if( !hl_module_patch_debug_region_get(module,region_index,&region) ) continue;
+			regions++;
 			buffer_u64(&buffer,(unsigned long long)(uintptr_t)region.code);
 			buffer_u64(&buffer,(unsigned int)region.code_size);
 			buffer_u32(&buffer,1 | (region.retired ? 2 : 0));
@@ -270,6 +273,7 @@ static bool send_metadata( hl_socket *socket, unsigned int request_id, int flags
 			if( !buffer.failed ) write_u32(buffer.data + count_at,(unsigned int)valid);
 		}
 		if( entries ) append_entry_region(&buffer,module);
+		if( !buffer.failed ) write_u32(buffer.data + regions_at,regions);
 	}
 	hl_module_registry_snapshot_free(modules,count);
 	hl_module_patch_readers(-1);
@@ -586,7 +590,7 @@ static void handle_client( hl_socket *socket ) {
 			if( payload == NULL || !hl_diag_transport_recv(socket,payload,(int)header.length) ) { free(payload); break; }
 		}
 		if( header.service == DIAG_SERVICE_CONTROL && header.type == DIAG_CONTROL_AUTHENTICATE && header.length <= 1024 ) {
-			unsigned int expected = authenticated ? 0 : (unsigned int)strlen(diag_token), difference = expected ^ header.length;
+			unsigned int expected = diag_token ? (unsigned int)strlen(diag_token) : 0, difference = expected ^ header.length;
 			for(unsigned int i=0;i<header.length;i++) difference |= payload[i] ^ (i < expected ? (unsigned char)diag_token[i] : 0);
 			authenticated = difference == 0;
 			ok = authenticated && send_frame(socket,header.service,header.type,DIAG_RESPONSE,header.request_id,NULL,0);

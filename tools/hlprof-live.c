@@ -57,7 +57,7 @@ static int parse_status( const unsigned char *data,uint32_t size ) {if(size!=32&
 
 static double monotime( void ) {
 #ifdef _WIN32
-	return GetTickCount64()/1000.0;
+	LARGE_INTEGER now,frequency;QueryPerformanceCounter(&now);QueryPerformanceFrequency(&frequency);return (double)now.QuadPart/(double)frequency.QuadPart;
 #else
 	struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+t.tv_nsec/1000000000.0;
 #endif
