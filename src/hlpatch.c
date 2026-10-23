@@ -735,6 +735,7 @@ static bool validate_function( hl_module *m, hl_patch *patch, patch_layout *layo
 		case OJAlways:if(i+1+p[0]<0||i+1+p[0]>=f->instruction_count){*error="Invalid branch";return false;}break;
 		case ORet:if(!valid_reg(f,p[0])){*error="Invalid return register";return false;}break;
 		case OThrow:case ORethrow:if(!valid_reg(f,p[0])){*error="Invalid throw register";return false;}break;
+		case ONullCheck:if(!valid_reg(f,p[0])){*error="Invalid null check register";return false;}break;
 		case OTrap:
 			if(!valid_reg(f,p[0])||p[1]<0||i+1+p[1]>=f->instruction_count){*error="Invalid trap operands";return false;}
 			break;
