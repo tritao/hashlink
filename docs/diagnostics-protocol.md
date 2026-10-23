@@ -160,7 +160,7 @@ whole in its frame. The words after word 0:
 | ---: | --- | --- |
 | 0x01 | `ENTER` | function key (u64) |
 | 0x02 | `EXIT` | none |
-| 0x03 | `UNWIND` | depth (u64): close every call deeper than this |
+| 0x03 | `UNWIND` | count (u64): close this many of the innermost open calls |
 | 0x10 | `SPAN_BEGIN` | `units:u32, encoding:u32` (0 UTF-16, 1 UTF-8), then the name padded to 8 bytes |
 | 0x11 | `SPAN_END` | none |
 | 0x12 | `FRAME_MARK` | frame set (u64) |
@@ -191,7 +191,7 @@ whole in its frame. The words after word 0:
   (0x484C0001), the module ID (u64) and the revision (u32).
 
 A reader keeps the open calls and spans of each thread. `EXIT` closes the
-innermost call. `UNWIND` closes calls until `depth` remain open. `SPAN_END`
+innermost call. `UNWIND` closes the `count` innermost open calls (all of them if fewer are open). `SPAN_END`
 closes the innermost span. A frame set's frames run from one `FRAME_MARK` to
 the next, and `FRAME_IDLE` ends the open frame.
 

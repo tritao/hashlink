@@ -75,7 +75,11 @@ HL_API void hl_prof_thread_exit( void );
 /* Writers. Each records on the calling thread and does nothing while no session records. */
 HL_API void hl_prof_enter( unsigned long long key );
 HL_API void hl_prof_exit( void );
-HL_API void hl_prof_unwind( unsigned long long depth );
+/* The calling thread's instrumentation depth (ENTER minus EXIT records over its life). A try saves it; when a throw lands
+   in the catch, hl_prof_unwind writes one UNWIND record closing the calls the throw skipped (the depth beyond the saved
+   one) and restores the depth. */
+HL_API int hl_prof_depth( void );
+HL_API void hl_prof_unwind( int depth );
 HL_API void hl_prof_span_begin( const void *name, int units, int encoding );
 HL_API void hl_prof_span_end( void );
 HL_API void hl_prof_frame( int kind, unsigned int frame_set );

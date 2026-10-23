@@ -1047,8 +1047,12 @@ struct _hl_trap_ctx {
 	jmp_buf buf;
 	hl_trap_ctx *prev;
 	vdynamic *tcheck;
+	int prof_depth;
 };
-#define hl_trap(ctx,r,label) { hl_thread_info *__tinf = hl_get_thread(); ctx.tcheck = NULL; ctx.prev = __tinf->trap_current; __tinf->trap_current = &ctx; if( setjmp(ctx.buf) ) { r = __tinf->exc_value; goto label; } }
+/* A catch in C closes the profiler slices of the instrumented calls the throw skipped, as Haxe catches do. */
+HL_API int hl_prof_depth( void );
+HL_API void hl_prof_unwind( int depth );
+#define hl_trap(ctx,r,label) { hl_thread_info *__tinf = hl_get_thread(); ctx.tcheck = NULL; ctx.prof_depth = hl_prof_depth(); ctx.prev = __tinf->trap_current; __tinf->trap_current = &ctx; if( setjmp(ctx.buf) ) { hl_prof_unwind(ctx.prof_depth); r = __tinf->exc_value; goto label; } }
 #define hl_endtrap(ctx)	hl_get_thread()->trap_current = ctx.prev
 
 #define HL_EXC_MAX_STACK	0x100

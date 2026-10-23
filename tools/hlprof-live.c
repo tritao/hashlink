@@ -220,7 +220,7 @@ static int perfetto_span_event( FILE *file,int *first,uint32_t pid,uint32_t tid,
 /* A thread's call stack on its "Call stacks" track, root first. While the thread's frames are marked, each frame (and
    each idle stretch between frames) is a root slice, so the track reads as one flame graph per frame: a frame boundary
    ends every slice and reopens the stack under the next root. */
-typedef struct { uint32_t tid,depth,capacity,emitted; char **names; char *root; double last; } pf_stack;
+typedef struct { uint32_t tid,depth,capacity,emitted; char **names; char *root; double last; int instrumented; } pf_stack;
 typedef struct { pftrace *trace; uint64_t weight_ns,last_ns; uint64_t *frames; uint32_t frame_capacity; perfetto_gc_state gc; double sampled_allocation_bytes; pf_stack *stacks; uint32_t stack_count,stack_capacity; } pf_export;
 static uint64_t pf_time( pf_export *pf,double seconds ){uint64_t ns=seconds>0?(uint64_t)(seconds*1e9+0.5):1;if(ns>pf->last_ns)pf->last_ns=ns;return ns;}
 static char *pf_text( const unsigned char *data,uint32_t size ){char *text=(char*)malloc((size_t)size+1);if(text){memcpy(text,data,size);text[size]=0;}return text;}
@@ -262,6 +262,8 @@ static void pf_stack_truncate( pf_stack *st,uint32_t depth ) {
 static int pf_stack_sample( pf_export *pf,symbols *s,double time,uint32_t tid,const unsigned char *leaf_first,uint32_t frames ) {
 	double interval=pf->weight_ns/1e9;uint32_t shared=0,base;pf_stack *st=pf_stack_of(pf,tid);
 	if(!st)return 0;
+	/* A thread with instrumented calls shows them exactly; its samples stay in the aggregate flame graph only. */
+	if(st->instrumented)return 1;
 	base=st->root?1:0;
 	if(st->depth&&time-st->last>interval*3){pf_stack_cut(pf,st,base,st->last+interval);pf_stack_truncate(st,0);}
 	while(shared<st->depth&&shared<frames&&!strcmp(st->names[shared],pf_function(s,u64(leaf_first+(frames-1-shared)*8))))shared++;
@@ -271,6 +273,20 @@ static int pf_stack_sample( pf_export *pf,symbols *s,double time,uint32_t tid,co
 		if(!(st->names[i]=(char*)malloc(n+1)))return 0;memcpy(st->names[i],name,n+1);st->depth=i+1;
 		pftrace_stack_begin(pf->trace,pf_time(pf,time),tid,name);st->emitted++;}
 	st->last=time;
+	return 1;
+}
+/* An instrumented call begins or ends on the thread. The first one replaces the stack the thread's samples built. */
+static int pf_stack_call( pf_export *pf,double time,uint32_t tid,const unsigned char *name,uint32_t size,int begin ) {
+	pf_stack *st=pf_stack_of(pf,tid);uint32_t base;
+	if(!st)return 0;
+	base=st->root?1:0;
+	if(!st->instrumented){st->instrumented=1;pf_stack_cut(pf,st,base,time);pf_stack_truncate(st,0);}
+	if(!begin){if(st->depth){pf_stack_cut(pf,st,base+st->depth-1,time);pf_stack_truncate(st,st->depth-1);}st->last=time;return 1;}
+	if(st->depth==st->capacity){uint32_t capacity=st->capacity?st->capacity*2:64;char **next=(char**)realloc(st->names,sizeof(char*)*capacity);if(!next)return 0;st->names=next;st->capacity=capacity;}
+	if(!(st->names[st->depth]=(char*)malloc((size_t)size+1)))return 0;
+	memcpy(st->names[st->depth],name,size);st->names[st->depth][size]=0;
+	pftrace_stack_begin(pf->trace,pf_time(pf,time),tid,st->names[st->depth]);
+	st->depth++;st->emitted++;st->last=time;
 	return 1;
 }
 /* A frame boundary on the thread: ends everything and reopens the stack under the new root ("Frame N" or "Idle"). */
@@ -300,8 +316,9 @@ static int pf_event( pf_export *pf,double time,uint32_t tid,uint32_t event_id,co
 	switch(event_id){
 	case PROFILE_EVENT_SPAN_BEGIN:if(!(text=pf_text(payload,size)))return 0;pftrace_slice_begin(pf->trace,ts,tid,text,"hl.span");free(text);break;
 	case PROFILE_EVENT_SPAN_END:pftrace_slice_end(pf->trace,ts,tid);break;
-	case 0x484C2001U:if(!(text=pf_text(payload,size)))return 0;pftrace_slice_begin(pf->trace,ts,tid,text,"hl.call");free(text);break;
-	case 0x484C2002U:pftrace_slice_end(pf->trace,ts,tid);break;
+	/* Instrumented calls go on the thread's call-stack track, cut into frames like sampled stacks. */
+	case 0x484C2001U:if(!pf_stack_call(pf,time,tid,payload,size,1))return 0;break;
+	case 0x484C2002U:if(!pf_stack_call(pf,time,tid,NULL,0,0))return 0;break;
 	case 0x484C2004U:if(!(text=pf_text(payload,size)))return 0;{int ok=pf_stack_frame(pf,time,tid,text);free(text);if(!ok)return 0;}break;
 	case 0x484C2005U:if(!pf_stack_frame(pf,time,tid,"Idle"))return 0;break;
 	case 0x484C2003U:if(size==8){double end;memcpy(&end,payload,8);pftrace_slice_begin(pf->trace,ts,tid,"profiler stall","hl.profiler");pftrace_slice_end(pf->trace,pf_time(pf,end),tid);}break;
@@ -566,7 +583,7 @@ static int decode_records( byte_buffer *o,symbols *s,tick_clock *c,uint32_t tid,
 		switch(kind){
 		case R_ENTER:{if(pos+16>length)goto bad;uint32_t n=call_name(s,u64(p+pos+8),name,sizeof(name));if(!stack_push(st,1)||!synth_event(o,time,tid,EXPORT_CALL_BEGIN,name,n))return 0;size=16;break;}
 		case R_EXIT:if(st->calls&&!close_slices(o,st,time,tid,st->calls-1,0))return 0;break;
-		case R_UNWIND:if(pos+16>length)goto bad;{uint64_t depth=u64(p+pos+8);if(depth<st->calls&&!close_slices(o,st,time,tid,(uint32_t)depth,0))return 0;}size=16;break;
+		case R_UNWIND:if(pos+16>length)goto bad;{uint64_t skipped=u64(p+pos+8);if(!close_slices(o,st,time,tid,skipped<st->calls?st->calls-(uint32_t)skipped:0,0))return 0;}size=16;break;
 		case R_SPAN_BEGIN:{if(pos+16>length)goto bad;uint32_t units=u32(p+pos+8),encoding=u32(p+pos+12),bytes=units*(encoding==1?1:2);if(pos+16+((bytes+7)&~7u)>length)goto bad;
 			uint32_t n=record_name(p+pos+16,units,encoding,name,sizeof(name));if(!stack_push(st,2)||!synth_event(o,time,tid,PROFILE_EVENT_SPAN_BEGIN,name,n))return 0;size=16+((bytes+7)&~7u);break;}
 		case R_SPAN_END:{int has_span=0;for(uint32_t i=0;i<st->count;i++)if(st->kinds[i]==2)has_span=1;if(has_span&&!close_slices(o,st,time,tid,0,1))return 0;break;}

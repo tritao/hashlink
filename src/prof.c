@@ -280,6 +280,9 @@ struct prof_thread {
 	unsigned int tid;
 	volatile int first_chunk;   // the session's first chunk, published before pos moves into it
 	volatile int exited;
+	/* ENTER records minus EXIT records over the thread's life, across sessions, so a depth saved by a try before
+	   recording started still measures what a throw skipped after it started. */
+	int depth;
 	char producer_padding[64];
 	/* Written by the consumer. */
 	int read_chunk;
@@ -409,6 +412,7 @@ HL_PRIM void hl_prof_enter( unsigned long long key ) {
 	if( !hl_prof_on || (p = reserve(&t,16)) == NULL ) return;
 	((unsigned long long*)p)[0] = head(HL_PROF_ENTER);
 	((unsigned long long*)p)[1] = key;
+	t->depth++;
 	COMMIT(t,p,16);
 }
 
@@ -417,17 +421,56 @@ HL_PRIM void hl_prof_exit( void ) {
 	unsigned char *p;
 	if( !hl_prof_on || (p = reserve(&t,8)) == NULL ) return;
 	((unsigned long long*)p)[0] = head(HL_PROF_EXIT);
+	t->depth--;
 	COMMIT(t,p,8);
 }
 
-HL_PRIM void hl_prof_unwind( unsigned long long depth ) {
-	prof_thread *t;
+HL_PRIM int hl_prof_depth( void ) {
+	prof_thread *t = prof_current;
+	return t ? t->depth : 0;
+}
+
+HL_PRIM void hl_prof_unwind( int depth ) {
+	prof_thread *t = prof_current;
 	unsigned char *p;
+	int skipped;
+	if( t == NULL || t->depth <= depth ) return;
+	skipped = t->depth - depth;
+	t->depth = depth;
 	if( !hl_prof_on || (p = reserve(&t,16)) == NULL ) return;
 	((unsigned long long*)p)[0] = head(HL_PROF_UNWIND);
-	((unsigned long long*)p)[1] = depth;
+	((unsigned long long*)p)[1] = (unsigned long long)skipped;
 	COMMIT(t,p,16);
 }
+
+/* Probes the compiler inserts into instrumented Haxe functions. The key is the probe's return address: it lies in the
+   calling function's code, which the symbol metadata names, and each live revision has code of its own. */
+#if defined(_MSC_VER)
+#	define PROF_RETURN_ADDRESS() _ReturnAddress()
+#else
+#	define PROF_RETURN_ADDRESS() __builtin_return_address(0)
+#endif
+
+HL_PRIM void hl_prof_call_enter( void ) {
+	if( hl_prof_on ) hl_prof_enter((unsigned long long)(uintptr_t)PROF_RETURN_ADDRESS());
+}
+
+HL_PRIM void hl_prof_call_exit( void ) {
+	if( hl_prof_on ) hl_prof_exit();
+}
+
+HL_PRIM int hl_prof_call_depth( void ) {
+	return hl_prof_depth();
+}
+
+HL_PRIM void hl_prof_call_unwind( int depth ) {
+	hl_prof_unwind(depth);
+}
+
+DEFINE_PRIM(_VOID, prof_call_enter, _NO_ARG);
+DEFINE_PRIM(_VOID, prof_call_exit, _NO_ARG);
+DEFINE_PRIM(_I32, prof_call_depth, _NO_ARG);
+DEFINE_PRIM(_VOID, prof_call_unwind, _I32);
 
 #define PAD8(n) (((n) + 7u) & ~7u)
 #define MAX_NAME_UNITS 1024
