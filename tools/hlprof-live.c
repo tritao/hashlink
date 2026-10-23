@@ -606,6 +606,28 @@ bad:
 	(*malformed)++;return 1;
 }
 
+/* Registers the native symbols one thread's records name. Natively instrumented calls are named by their key when they
+   are decoded, and the runtime names a key on its consumer thread after the call, so pass 1 collects every name first. */
+static int scan_native_symbols( const unsigned char *p,uint32_t length ) {
+	uint32_t pos=0;
+	while(pos+8<=length){
+		uint32_t kind=(uint32_t)(u64(p+pos)>>56),size=8;
+		if(kind==R_EXIT||kind==R_SPAN_END){pos+=8;continue;}
+		if(pos+16>length)return 1;
+		switch(kind){
+		case R_ENTER:case R_UNWIND:case R_FRAME_MARK:case R_FRAME_IDLE:case R_STALL:size=16;break;
+		case R_SPAN_BEGIN:{uint32_t bytes=u32(p+pos+8)*(u32(p+pos+12)==1?1:2);size=16+((bytes+7)&~7u);break;}
+		case R_COUNTER:{if(pos+24>length)return 1;uint32_t bytes=u32(p+pos+16)*(u32(p+pos+20)==1?1:2);size=24+((bytes+7)&~7u);break;}
+		case R_SAMPLE:size=16+(uint32_t)((u64(p+pos+8)>>32)&0xFFFF)*8;break;
+		case R_EVENT:{uint32_t id=u32(p+pos+8),n=u32(p+pos+12);const unsigned char *payload=p+pos+16;size=16+((n+7)&~7u);
+			if(pos+size>length)return 1;
+			if(id==PROFILE_EVENT_NATIVE_SYMBOL&&n>=24){uint32_t module_len=u32(payload+16),name_len=u32(payload+20);if(module_len+name_len==n-24&&!add_native(u64(payload),u64(payload+8),payload+24,module_len,payload+24+module_len,name_len))return 0;}
+			break;}
+		default:return 1;}
+		pos+=size;}
+	return 1;
+}
+
 /* Reads a v2 capture (positioned after its header) into consume(): metadata, clock pairs and thread names first, then
    every thread's records. */
 static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,uint64_t *samples,uint64_t *unresolved,folded_table *folded_stacks,int show_lines,int raw_leaf,FILE *perfetto,int *perfetto_first,double *time_origin,uint32_t pid,pf_export *pf,int *complete ) {
@@ -622,6 +644,11 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 		else if(type==PUSH_CLOCK&&size>=16){if(!clock.count)clock.origin_ns=u64(payload+8);if(!clock_add(&clock,u64(payload),u64(payload+8)))goto done;}
 		else if(type==PUSH_THREADS){free(names);names=(unsigned char*)malloc(size?size:1);if(!names)goto done;memcpy(names,payload,size);names_size=size;}
 		else if(type==CAPTURE_COMPLETE)*complete=1;
+		else if(type==PUSH_DATA&&size>=16){uint32_t flags=u32(payload+4),raw_size=u32(payload+8);const unsigned char *records=payload+16;
+			if(flags&1){if(raw_size>raw_cap){unsigned char *r=(unsigned char*)realloc(raw,raw_size);if(!r)goto done;raw=r;raw_cap=raw_size;}
+				if(LZ4_decompress_safe((const char*)payload+16,(char*)raw,(int)(size-16),(int)raw_size)!=(int)raw_size)continue;records=raw;}
+			else raw_size=size-16;
+			if(!scan_native_symbols(records,raw_size))goto done;}
 	}
 	if(!have_metadata){fprintf(stderr,"The capture holds no symbol metadata\n");goto done;}
 	/* thread names, then the frame track names */

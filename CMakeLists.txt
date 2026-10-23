@@ -337,6 +337,14 @@ if (WITH_VM)
     endif()
 endif()
 
+# The /Gh /GH hooks linked into natively instrumented modules (see src/prof_penter.c). They use no C runtime, so
+# modules built with either CRT link them.
+if(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
+    enable_language(ASM_MASM)
+    add_library(hlprof_penter STATIC src/prof_penter.c src/prof_penter_x64.asm)
+    target_compile_options(hlprof_penter PRIVATE $<$<COMPILE_LANGUAGE:C>:/Zl /GS->)
+endif()
+
 # Measures the profiler recorder's cost per record (see tools/hlprof-bench.c).
 add_executable(hlprof-bench tools/hlprof-bench.c)
 target_link_libraries(hlprof-bench PRIVATE libhl)

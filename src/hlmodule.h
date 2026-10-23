@@ -401,6 +401,8 @@ void hl_diagnostics_finish( void );
 /** Starts the sampler and allocation sampling a session asks for (HL_PROF_SOURCE_*), and releases --diagnostics-wait. */
 bool hl_profile_session_start( int sources, int sample_rate, int allocation_interval );
 void hl_profile_session_stop( void );
+/** Consumer: streams the names of native call keys first recorded since the last call (see hl_prof_enter_native). */
+void hl_profile_name_native_keys( void );
 /** True once a module load or patch changed the symbol metadata since the last call. */
 bool hl_profile_metadata_changed( void );
 void hl_profile_stream_notify_revision( unsigned long long module_id, int revision );

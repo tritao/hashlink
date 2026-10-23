@@ -454,6 +454,7 @@ static void session_end( hl_socket *socket ) {
 	if( !session.active ) return;
 	hl_profile_session_stop();
 	record_gc_stats();
+	hl_profile_name_native_keys();
 	hl_prof_stop();
 	hl_blocking(true);
 	hl_prof_drain(push_data,socket);
@@ -478,6 +479,7 @@ static unsigned long long session_pump( hl_socket *socket ) {
 	}
 	/* Blocking for the GC: this thread touches no GC memory while it drains and pushes, and a collection must not wait
 	   for it. Metadata is built outside, as it converts names through the GC. */
+	hl_profile_name_native_keys();
 	hl_blocking(true);
 	drained = hl_prof_drain(push_data,socket);
 	now = hl_sys_time();

@@ -872,8 +872,11 @@ static bool configure_allocations( int interval ) {
 	return true;
 }
 
+static void native_keys_reset( void );
+
 bool hl_profile_session_start( int sources, int sample_rate, int allocation_interval ) {
 	bool sampling = (sources & HL_PROF_SOURCE_SAMPLING) != 0;
+	native_keys_reset();
 	if( sampling && (sample_rate <= 0 || sample_rate > 100000) ) return false;
 	if( !configure_allocations((sources & HL_PROF_SOURCE_ALLOC) ? allocation_interval : 0) ) return false;
 	if( sampling ) {
@@ -898,6 +901,23 @@ bool hl_profile_session_start( int sources, int sample_rate, int allocation_inte
 void hl_profile_session_stop( void ) {
 	configure_allocations(0);
 	if( data.sample_count ) profile_pause_remote();
+}
+
+/* Names the native call keys natively instrumented code recorded first since the last call (see hl_prof_enter_native).
+   Consumer only: naming takes DbgHelp, which the hooked call must not, as it may hold the locks DbgHelp needs. */
+void hl_profile_name_native_keys( void ) {
+	unsigned long long keys[256];
+	int count, tid = hl_profile_main_thread();
+	while( (count = hl_prof_native_keys_take(keys,256)) > 0 )
+		for(int i=0;i<count;i++) stream_native_symbol((void*)(uintptr_t)keys[i],hl_sys_time(),tid);
+}
+
+/* A new session names every native pc again: its capture holds only what it streams. */
+static void native_keys_reset( void ) {
+	hl_prof_native_keys_reset();
+	if( native_lock ) hl_mutex_acquire(native_lock);
+	memset(native_seen,0,sizeof(native_seen));
+	if( native_lock ) hl_mutex_release(native_lock);
 }
 
 bool hl_profile_metadata_changed( void ) {

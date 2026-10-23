@@ -425,6 +425,61 @@ HL_PRIM void hl_prof_exit( void ) {
 	COMMIT(t,p,8);
 }
 
+/* ---- native call keys ----------------------------------------------------------------------------------------------
+   The first time a session sees a native key it is queued, for the consumer to name (hl_profile_name_native_keys). */
+
+#define NATIVE_KEYS (1 << 16)
+#define NATIVE_PROBES 32
+static volatile unsigned long long native_keys[NATIVE_KEYS];
+static volatile unsigned long long native_queue[NATIVE_KEYS];
+static volatile long long native_queue_head;
+static long long native_queue_tail;
+
+static void native_key_seen( unsigned long long key ) {
+	unsigned int slot = (unsigned int)((key * 0x9E3779B97F4A7C15ULL) >> 48);
+	for(int probe=0;probe<NATIVE_PROBES;probe++) {
+		volatile unsigned long long *entry = &native_keys[(slot + probe) & (NATIVE_KEYS - 1)];
+		unsigned long long current = *entry;
+		if( current == key ) return;
+		if( current == 0 ) {
+			if( CAS64(entry,0ULL,key) ) {
+				long long index = (long long)FETCH_ADD64(&native_queue_head,1);
+				/* A full queue loses the key's name, not the call: the consumer is far behind. */
+				if( index - native_queue_tail < NATIVE_KEYS ) native_queue[index & (NATIVE_KEYS - 1)] = key;
+				return;
+			}
+			if( *entry == key ) return;
+		}
+	}
+	/* The set is full around this slot: the key stays unnamed. */
+}
+
+HL_PRIM void hl_prof_enter_native( unsigned long long key ) {
+	if( !hl_prof_on ) return;
+	native_key_seen(key);
+	hl_prof_enter(key);
+}
+
+HL_PRIM int hl_prof_native_keys_take( unsigned long long *keys, int max ) {
+	int count = 0;
+	while( count < max && native_queue_tail < native_queue_head ) {
+		volatile unsigned long long *entry = &native_queue[native_queue_tail & (NATIVE_KEYS - 1)];
+		unsigned long long key = *entry;
+		/* Claimed but not stored yet. */
+		if( key == 0 ) break;
+		*entry = 0;
+		native_queue_tail++;
+		keys[count++] = key;
+	}
+	return count;
+}
+
+HL_PRIM void hl_prof_native_keys_reset( void ) {
+	memset((void*)native_keys,0,sizeof(native_keys));
+	memset((void*)native_queue,0,sizeof(native_queue));
+	native_queue_head = native_queue_tail = 0;
+}
+
 HL_PRIM int hl_prof_depth( void ) {
 	prof_thread *t = prof_current;
 	return t ? t->depth : 0;

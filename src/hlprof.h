@@ -75,6 +75,13 @@ HL_API void hl_prof_thread_exit( void );
 /* Writers. Each records on the calling thread and does nothing while no session records. */
 HL_API void hl_prof_enter( unsigned long long key );
 HL_API void hl_prof_exit( void );
+/* hl_prof_enter for natively instrumented code: key is a pc inside the function, which the runtime names on its first use
+   in a session. */
+HL_API void hl_prof_enter_native( unsigned long long key );
+/* Consumer: moves up to max of the native keys first seen since the last call into keys, returning how many. */
+HL_API int hl_prof_native_keys_take( unsigned long long *keys, int max );
+/* Forgets the native keys seen so far, at the start of a session. */
+HL_API void hl_prof_native_keys_reset( void );
 /* The calling thread's instrumentation depth (ENTER minus EXIT records over its life). A try saves it; when a throw lands
    in the catch, hl_prof_unwind writes one UNWIND record closing the calls the throw skipped (the depth beyond the saved
    one) and restores the depth. */
