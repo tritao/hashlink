@@ -556,10 +556,13 @@ static int synth_event( byte_buffer *o,double time,uint32_t tid,uint32_t id,cons
    roughly in time: a sample can arrive before the frame mark that precedes it. The reorder window holds synthesized
    records and releases them in time order once they are REORDER_WINDOW seconds older than the newest record seen.
    Symbol and thread-name events are released first, so the samples that use them resolve. A record arriving after
-   later records were released keeps its order by taking the last released time. */
+   later records were released keeps its order by taking the last released time. A release sorts and compacts every
+   record held, so it waits for REORDER_STEP seconds of new records; releasing after each data frame made an export
+   quadratic in the records per window. */
 #define REORDER_WINDOW 2.0
+#define REORDER_STEP 0.5
 typedef struct { double time; uint64_t seq; size_t offset; uint32_t length; } ordered_record;
-typedef struct { byte_buffer data; ordered_record *index; size_t count,capacity; uint64_t seq,late; double newest,released; } reorder_buffer;
+typedef struct { byte_buffer data; ordered_record *index; size_t count,capacity; uint64_t seq,late; double newest,released,released_until; } reorder_buffer;
 static int ordered_compare( const void *a,const void *b ) {
 	const ordered_record *x=(const ordered_record*)a,*y=(const ordered_record*)b;
 	if(x->time!=y->time)return x->time<y->time?-1:1;
@@ -732,7 +735,7 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 			else raw_size=size-16;
 			if(!decode_records(&fresh,table,&clock,tid,records,raw_size,&malformed)||!reorder_add(&order,fresh.data,fresh.length))goto done;
 			fresh.length=0;}
-		if(!reorder_release(&order,order.newest-REORDER_WINDOW,&out))goto done;
+		if(order.newest-REORDER_WINDOW>=order.released_until+REORDER_STEP){order.released_until=order.newest-REORDER_WINDOW;if(!reorder_release(&order,order.released_until,&out))goto done;}
 		if(out.length>(8U<<20)&&!consume(table,out.data,&out.length,samples,unresolved,folded_stacks,show_lines,raw_leaf,NULL,perfetto,perfetto_first,time_origin,pid,pf))goto malformed_stream;
 	}
 	/* close what is still open when the capture ends */
