@@ -389,6 +389,8 @@ enum { PUSH_METADATA=4, PUSH_SESSION=16, PUSH_DATA=17, PUSH_CLOCK=18, PUSH_THREA
    and resumes recording. */
 static int start_paused;
 static uint64_t max_bytes;
+/* The session drops calls shorter than this as they exit (0 keeps every call). */
+static uint32_t min_call_ns;
 
 static int console_toggle_available( void ) {
 #ifdef _WIN32
@@ -437,7 +439,7 @@ static int parse_sources( const char *list ) {
 /* Writes the pushed frames of one session to path until the runtime ends it, the program exits, or the recorder is
    interrupted or reaches its duration. */
 static int record_session( socket_t sock,const char *output_path,uint32_t pid,int sources,int rate,int allocation_interval,int pool_mib,int duration,int interval ) {
-	unsigned char start[20],header[16],*payload=NULL,record[16];uint32_t id=1,payload_cap=0,stop_id=0;int code=1,ended=0,stop_sent=0;
+	unsigned char start[24],header[16],*payload=NULL,record[16];uint32_t id=1,payload_cap=0,stop_id=0;int code=1,ended=0,stop_sent=0;
 	uint64_t frames=0,bytes=0,raw=0,last_raw=0;double started=monotime(),next_report=started+interval/1000.0,stop_deadline=0,last_report=started;
 	/* Duration counts recorded time: a paused session's clock stands still. */
 	int recording=1;double recording_since=started,recorded_seconds=0;uint64_t dropped=0;
@@ -445,10 +447,10 @@ static int record_session( socket_t sock,const char *output_path,uint32_t pid,in
 	if(output_path){out=fopen(output_path,"wb");if(!out){fprintf(stderr,"Could not open capture file %s\n",output_path);return 1;}setvbuf(out,NULL,_IOFBF,1<<20);
 		memcpy(file_header,"HLPC",4);file_header[4]=2;file_header[5]=0;file_header[6]=24;file_header[7]=0;put32(file_header+8,0);put32(file_header+12,pid);put32(file_header+16,(uint32_t)rate);put32(file_header+20,(uint32_t)sources);
 		if(fwrite(file_header,1,24,out)!=24)goto done;}
-	put32(start,(uint32_t)sources);put32(start+4,(uint32_t)rate);put32(start+8,(uint32_t)allocation_interval);put32(start+12,(uint32_t)pool_mib);put32(start+16,start_paused?1:0);
-	{unsigned char h[16];uint32_t length=start_paused?20:16;h[0]=SVC_PROFILE;h[1]=P_START;h[2]=h[3]=0;put32(h+4,id++);put32(h+8,length);put32(h+12,0);if(!send_all(sock,h,16)||!send_all(sock,start,length)){fprintf(stderr,"Could not start the session\n");goto done;}}
+	put32(start,(uint32_t)sources);put32(start+4,(uint32_t)rate);put32(start+8,(uint32_t)allocation_interval);put32(start+12,(uint32_t)pool_mib);put32(start+16,start_paused?1:0);put32(start+20,min_call_ns);
+	{unsigned char h[16];uint32_t length=min_call_ns?24:start_paused?20:16;h[0]=SVC_PROFILE;h[1]=P_START;h[2]=h[3]=0;put32(h+4,id++);put32(h+8,length);put32(h+12,0);if(!send_all(sock,h,16)||!send_all(sock,start,length)){fprintf(stderr,"Could not start the session\n");goto done;}}
 	recording=!start_paused;recording_since=started;
-	printf("%s HashLink process %u (sources 0x%x)\n",start_paused?"Connected to":"Recording",pid,sources);
+	printf("%s HashLink process %u (sources 0x%x)\n",start_paused?"Connected to":"Recording",pid,sources);if(min_call_ns)printf("dropping calls shorter than %.3g us\n",min_call_ns/1000.0);
 	if(start_paused)printf("recording paused until the program starts it (haxeon.ProfileRecording)%s\n",console_toggle_available()?" or Enter is pressed":"");
 	fflush(stdout);
 	signal(SIGINT,stop_signal);
@@ -621,6 +623,34 @@ static uint32_t call_name( symbols *s,uint64_t key,char *out,uint32_t capacity )
 	return written<0?0:(uint32_t)written>=capacity?capacity-1:(uint32_t)written;
 }
 
+/* Calls the recorder dropped for being short (PROFILE_EVENT_DROPPED_CALLS), counted per call key over the window. */
+typedef struct { uint64_t key,count; } short_call;
+static short_call *short_calls;static size_t short_call_count,short_call_capacity;static uint64_t short_call_total;
+static size_t short_call_slot( uint64_t key,size_t capacity ){return (size_t)((key*0x9E3779B97F4A7C15ULL)>>32)&(capacity-1);}
+static int short_calls_add( uint64_t key,uint64_t count ) {
+	size_t slot;
+	if(!key||!count)return 1;
+	if(short_call_count*2>=short_call_capacity){size_t cap=short_call_capacity?short_call_capacity*2:1024;short_call *next=(short_call*)calloc(cap,sizeof(short_call));if(!next)return 0;
+		for(size_t i=0;i<short_call_capacity;i++)if(short_calls[i].key){size_t j=short_call_slot(short_calls[i].key,cap);while(next[j].key)j=(j+1)&(cap-1);next[j]=short_calls[i];}
+		free(short_calls);short_calls=next;short_call_capacity=cap;}
+	slot=short_call_slot(key,short_call_capacity);
+	while(short_calls[slot].key&&short_calls[slot].key!=key)slot=(slot+1)&(short_call_capacity-1);
+	if(!short_calls[slot].key){short_calls[slot].key=key;short_call_count++;}
+	short_calls[slot].count+=count;short_call_total+=count;
+	return 1;
+}
+static int short_call_compare( const void *a,const void *b ){uint64_t x=((const short_call*)a)->count,y=((const short_call*)b)->count;return x<y?1:x>y?-1:0;}
+/* Prints the functions whose short calls were dropped most often. Ends the table's use. */
+static void short_calls_report( symbols *s,int top ) {
+	char name[256];size_t n=0;
+	if(!short_call_total)return;
+	for(size_t i=0;i<short_call_capacity;i++)if(short_calls[i].key)short_calls[n++]=short_calls[i];
+	qsort(short_calls,n,sizeof(short_call),short_call_compare);
+	printf("dropped %llu short calls to %zu functions; most often:\n",(unsigned long long)short_call_total,n);
+	for(size_t i=0;i<n&&(int)i<top;i++){call_name(s,short_calls[i].key,name,sizeof(name));printf("%14llu  %s\n",(unsigned long long)short_calls[i].count,name);}
+	free(short_calls);short_calls=NULL;short_call_count=short_call_capacity=0;short_call_total=0;
+}
+
 typedef struct { int open; uint64_t number; uint32_t tid; } frame_set_state;
 static frame_set_state frame_sets[16];
 
@@ -657,7 +687,7 @@ static int decode_records( byte_buffer *o,symbols *s,tick_clock *c,uint32_t tid,
 				if(set==0&&!synth_event(o,time,tid,EXPORT_FRAME_BEGIN,name,(uint32_t)n))return 0;}
 			else if(set==0&&!synth_event(o,time,tid,EXPORT_FRAME_IDLE,NULL,0))return 0;
 			break;}
-		case R_EVENT:{if(pos+16>length)goto bad;uint32_t id=u32(p+pos+8),n=u32(p+pos+12);if(pos+16+((n+7)&~7u)>length)goto bad;if(!synth_event(o,time,tid,id,p+pos+16,n))return 0;size=16+((n+7)&~7u);break;}
+		case R_EVENT:{if(pos+16>length)goto bad;uint32_t id=u32(p+pos+8),n=u32(p+pos+12);if(pos+16+((n+7)&~7u)>length)goto bad;if(id==PROFILE_EVENT_DROPPED_CALLS){for(uint32_t i=0;i+16<=n;i+=16)if(!short_calls_add(u64(p+pos+16+i),u32(p+pos+24+i)))return 0;}else if(!synth_event(o,time,tid,id,p+pos+16,n))return 0;size=16+((n+7)&~7u);break;}
 		case R_COUNTER:{if(pos+24>length)goto bad;uint32_t units=u32(p+pos+16),encoding=u32(p+pos+20),bytes=units*(encoding==1?1:2);if(pos+24+((bytes+7)&~7u)>length)goto bad;
 			uint32_t n=record_name(p+pos+24,units,encoding,name,sizeof(name));if(!synth(o,2,0,time,tid,PROFILE_EVENT_COUNTER,p+pos+8,8,name,n))return 0;size=24+((bytes+7)&~7u);break;}
 		case R_SAMPLE:{if(pos+16>length)goto bad;uint64_t w1=u64(p+pos+8);uint32_t sample_tid=(uint32_t)w1,frames=(uint32_t)((w1>>32)&0xFFFF),flags=(uint32_t)((w1>>48)&0xFF);if(pos+16+frames*8>length)goto bad;
@@ -755,7 +785,7 @@ done:
 	return code;
 }
 
-static void usage( const char *p ){fprintf(stderr,"Usage:\n  %s [--host HOST] [--sources LIST] [--rate HZ] [--alloc-interval N] [--pool MIB] [--interval MS] [--duration SEC] [--max-size MIB] [--paused] [--connect-timeout SEC] [--output FILE] PORT\n  %s report [--top N] [--lines] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format folded [--lines] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format perfetto [--lines] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n  %s export --format pftrace [--process-name NAME] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n",p,p,p,p,p);}
+static void usage( const char *p ){fprintf(stderr,"Usage:\n  %s [--host HOST] [--sources LIST] [--rate HZ] [--alloc-interval N] [--pool MIB] [--interval MS] [--duration SEC] [--max-size MIB] [--paused] [--min-call-us US] [--connect-timeout SEC] [--output FILE] PORT\n  %s report [--top N] [--lines] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format folded [--lines] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format perfetto [--lines] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n  %s export --format pftrace [--process-name NAME] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n",p,p,p,p,p);}
 
 static int offline( int argc,char **argv,int exporting ) {
 	const char *path=NULL,*output_path=NULL;int top=15,code=1,complete=0,format=0,show_lines=0,raw_leaf=0,perfetto_first=1,metadata_dirty=0;FILE *file=NULL,*perfetto=NULL;symbols table={0};folded_table folded_stacks={0};unsigned char header[24],record_header[16],*payload=NULL,*pending=NULL;size_t pending_len=0,pending_cap=512*1024;uint64_t samples=0,unresolved=0,dropped=0,cursor=0,last_time=0,reported_dropped=0,start_ns=0,end_ns=UINT64_MAX;int have_cursor=0;double time_origin=-1;const char *process_name="HashLink";pf_export pf={0};
@@ -780,6 +810,7 @@ static int offline( int argc,char **argv,int exporting ) {
 	if(u16(header+4)==2){
 		if(!read_v2(file,&table,start_ns,end_ns,&samples,&unresolved,format==1?&folded_stacks:NULL,show_lines,raw_leaf,perfetto,&perfetto_first,&time_origin,u32(header+12),pf.trace?&pf:NULL,&complete))goto done;
 		if(!complete)fprintf(stderr,"warning: partial capture; reporting complete records only\n");
+		if(format!=1)short_calls_report(&table,format?10:top);
 		if(format==1)folded_write(&folded_stacks);else if(!format)report(&table,samples,unresolved,dropped,top,show_lines);
 		code=0;goto done;
 	}
@@ -812,7 +843,7 @@ int main( int argc,char **argv ) {
 	unsigned char hello[16],*reply=NULL;uint32_t reply_size;
 	if(argc>1&&!strcmp(argv[1],"report"))return offline(argc,argv,0);
 	if(argc>1&&!strcmp(argv[1],"export"))return offline(argc,argv,1);
-	for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")){usage(argv[0]);return 0;}else if(!strcmp(argv[i],"--host")&&++i<argc)host=argv[i];else if(!strcmp(argv[i],"--sources")&&++i<argc)source_list=argv[i];else if(!strcmp(argv[i],"--rate")&&++i<argc)rate=atoi(argv[i]);else if(!strcmp(argv[i],"--alloc-interval")&&++i<argc)allocation_interval=atoi(argv[i]);else if(!strcmp(argv[i],"--pool")&&++i<argc)pool_mib=atoi(argv[i]);else if(!strcmp(argv[i],"--interval")&&++i<argc)interval=atoi(argv[i]);else if(!strcmp(argv[i],"--duration")&&++i<argc)duration=atoi(argv[i]);else if(!strcmp(argv[i],"--max-size")&&++i<argc)max_bytes=(uint64_t)strtoull(argv[i],NULL,10)<<20;else if(!strcmp(argv[i],"--paused"))start_paused=1;else if(!strcmp(argv[i],"--connect-timeout")&&++i<argc)connect_timeout=atoi(argv[i]);else if(!strcmp(argv[i],"--output")&&++i<argc)output_path=argv[i];else if(argv[i][0]=='-'||port){usage(argv[0]);return 2;}else port=argv[i];}
+	for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")){usage(argv[0]);return 0;}else if(!strcmp(argv[i],"--host")&&++i<argc)host=argv[i];else if(!strcmp(argv[i],"--sources")&&++i<argc)source_list=argv[i];else if(!strcmp(argv[i],"--rate")&&++i<argc)rate=atoi(argv[i]);else if(!strcmp(argv[i],"--alloc-interval")&&++i<argc)allocation_interval=atoi(argv[i]);else if(!strcmp(argv[i],"--pool")&&++i<argc)pool_mib=atoi(argv[i]);else if(!strcmp(argv[i],"--interval")&&++i<argc)interval=atoi(argv[i]);else if(!strcmp(argv[i],"--duration")&&++i<argc)duration=atoi(argv[i]);else if(!strcmp(argv[i],"--max-size")&&++i<argc)max_bytes=(uint64_t)strtoull(argv[i],NULL,10)<<20;else if(!strcmp(argv[i],"--paused"))start_paused=1;else if(!strcmp(argv[i],"--min-call-us")&&++i<argc){double us=atof(argv[i]);if(us<0||us>4000000){usage(argv[0]);return 2;}min_call_ns=(uint32_t)(us*1000.0+0.5);}else if(!strcmp(argv[i],"--connect-timeout")&&++i<argc)connect_timeout=atoi(argv[i]);else if(!strcmp(argv[i],"--output")&&++i<argc)output_path=argv[i];else if(argv[i][0]=='-'||port){usage(argv[0]);return 2;}else port=argv[i];}
 	sources=parse_sources(source_list);
 	if(!port||sources<0||rate<=0||allocation_interval<0||pool_mib<=0||interval<0||duration<0||connect_timeout<0){usage(argv[0]);return 2;}
 	/* An allocation interval asks for allocation samples even when the source list leaves them out. */

@@ -271,10 +271,23 @@ static bool pool_allocate( unsigned int pool_mib ) {
 
 /* ---- thread states ---------------------------------------------------------------------------------------------- */
 
+/* Calls dropped for being short, counted per key until the thread writes them as a PROFILE_EVENT_DROPPED_CALLS event. */
+#define DROPPED_SLOTS 256
+#define DROPPED_PROBES 8
+typedef struct {
+	unsigned long long key;
+	unsigned int count;
+} prof_dropped;
+
 typedef struct prof_thread prof_thread;
 struct prof_thread {
-	/* Written by the producer. pos is published with release; the rest is the producer's own. */
+	/* Written by the producer. pos is published with release; the rest is the producer's own. Records are written at cur.
+	   pos lags it over held, the run of ENTER records at the end that a short exit may still take back, and catches up
+	   when anything after them is kept. */
 	unsigned char *volatile pos;
+	unsigned char *cur;
+	unsigned char *held;
+	int held_recording;         // recording_changes when the held run began: a pause in between keeps it
 	unsigned char *end;
 	int chunk;
 	unsigned int session;
@@ -284,6 +297,8 @@ struct prof_thread {
 	/* ENTER records minus EXIT records over the thread's life, across sessions, so a depth saved by a try before
 	   recording started still measures what a throw skipped after it started. */
 	int depth;
+	int dropped_used;
+	prof_dropped dropped[DROPPED_SLOTS];
 	char producer_padding[64];
 	/* Written by the consumer. */
 	int read_chunk;
@@ -297,6 +312,10 @@ static unsigned int session_id;
 static volatile unsigned long long stall_count;
 static volatile unsigned long long stall_ticks;
 static unsigned long long drained_bytes;
+/* Calls shorter than this are dropped as they exit (0 keeps every call). Set from min_call_ns when a session starts. */
+static unsigned int min_call_ns;
+static unsigned long long min_call_ticks;
+static volatile int recording_changes;
 
 HL_PRIM volatile int hl_prof_on = 0;
 
@@ -312,7 +331,11 @@ static pthread_mutex_t registry_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void thread_reset( prof_thread *t ) {
 	t->pos = NULL;
+	t->cur = NULL;
+	t->held = NULL;
 	t->end = NULL;
+	t->dropped_used = 0;
+	memset(t->dropped,0,sizeof(t->dropped));
 	t->chunk = -1;
 	t->first_chunk = -1;
 	t->read_chunk = -1;
@@ -360,9 +383,11 @@ static unsigned char *next_chunk( prof_thread *t, unsigned int bytes ) {
 		yield_thread();
 		index = pool_pop();
 	}
+	/* The finished chunk keeps any held ENTER records: they can no longer be taken back. */
+	t->held = NULL;
 	if( t->chunk >= 0 ) {
 		prof_chunk *old = chunks + t->chunk;
-		old->size = (unsigned int)(t->pos - chunk_data(t->chunk));
+		old->size = (unsigned int)(t->cur - chunk_data(t->chunk));
 		old->next = index;
 		STORE_RELEASE_INT(&old->finished,1);
 	} else
@@ -379,6 +404,7 @@ static unsigned char *next_chunk( prof_thread *t, unsigned int bytes ) {
 		FETCH_ADD64(&stall_count,1);
 		FETCH_ADD64(&stall_ticks,ended - stall_started);
 	}
+	t->cur = p;
 	STORE_RELEASE_PTR(&t->pos,p);
 	return p;
 }
@@ -391,7 +417,7 @@ static FORCE_INLINE unsigned char *reserve( prof_thread **out, unsigned int byte
 		t = thread_state();
 		if( t == NULL ) return NULL;
 	}
-	p = t->pos;
+	p = t->cur;
 	/* A chunk is never filled to its last byte, so a published position always lies inside its own chunk; a position at
 	   the end would equal the start of the chunk after it in the pool. */
 	if( p == NULL || (size_t)(t->end - p) <= bytes ) p = next_chunk(t,bytes);
@@ -403,7 +429,63 @@ static FORCE_INLINE unsigned long long head( int kind ) {
 	return ((unsigned long long)kind << 56) | ((now_ticks() - base_ticks) & HL_PROF_TICK_MASK);
 }
 
-#define COMMIT(t,p,bytes) STORE_RELEASE_PTR(&(t)->pos,(p) + (bytes))
+/* Keeps the record at p, and with it every ENTER record held before it. */
+#define COMMIT(t,p,bytes) do { (t)->cur = (p) + (bytes); (t)->held = NULL; STORE_RELEASE_PTR(&(t)->pos,(t)->cur); } while(0)
+
+/* ---- dropped calls ---------------------------------------------------------------------------------------------- */
+
+/* Writes the thread's dropped-call counts as one PROFILE_EVENT_DROPPED_CALLS event (entries of u64 key, u32 count, u32 0)
+   and clears them. The producer calls it, or the consumer once the producer can no longer write (stop, thread exit). */
+static void write_dropped( prof_thread *t ) {
+	unsigned int length = (unsigned int)t->dropped_used * 16, bytes = 16 + length, n = 0;
+	unsigned char *p;
+	if( !t->dropped_used ) return;
+	p = t->cur;
+	if( p == NULL || (size_t)(t->end - p) <= bytes ) p = next_chunk(t,bytes);
+	if( p != NULL ) {
+		((unsigned long long*)p)[0] = head(HL_PROF_EVENT);
+		((unsigned long long*)p)[1] = (unsigned long long)PROFILE_EVENT_DROPPED_CALLS | ((unsigned long long)length << 32);
+		for(int i=0;i<DROPPED_SLOTS;i++) {
+			prof_dropped *d = t->dropped + i;
+			if( !d->key ) continue;
+			((unsigned long long*)(p + 16))[n * 2] = d->key;
+			((unsigned long long*)(p + 16))[n * 2 + 1] = d->count;
+			n++;
+		}
+		COMMIT(t,p,bytes);
+	}
+	memset(t->dropped,0,sizeof(t->dropped));
+	t->dropped_used = 0;
+}
+
+static void count_dropped( prof_thread *t, unsigned long long key ) {
+	unsigned int slot = (unsigned int)((key * 0x9E3779B97F4A7C15ULL) >> 56);
+	prof_dropped *free_slot = NULL;
+	for(int probe=0;probe<DROPPED_PROBES;probe++) {
+		prof_dropped *d = t->dropped + ((slot + probe) & (DROPPED_SLOTS - 1));
+		if( d->key == key ) {
+			if( ++d->count == 0xFFFFFFFFu ) write_dropped(t);
+			return;
+		}
+		if( d->key == 0 ) { free_slot = d; break; }
+	}
+	if( free_slot == NULL ) {
+		write_dropped(t);
+		free_slot = t->dropped + slot;
+	}
+	free_slot->key = key;
+	free_slot->count = 1;
+	t->dropped_used++;
+}
+
+/* Publishes what the thread holds back and writes its dropped-call counts, once it no longer records. */
+static void release_thread( prof_thread *t ) {
+	write_dropped(t);
+	if( t->held ) {
+		t->held = NULL;
+		STORE_RELEASE_PTR(&t->pos,t->cur);
+	}
+}
 
 /* ---- writers ---------------------------------------------------------------------------------------------------- */
 
@@ -414,14 +496,37 @@ HL_PRIM void hl_prof_enter( unsigned long long key ) {
 	((unsigned long long*)p)[0] = head(HL_PROF_ENTER);
 	((unsigned long long*)p)[1] = key;
 	t->depth++;
-	COMMIT(t,p,16);
+	if( min_call_ticks ) {
+		/* Held back: if the call turns out short, its exit takes this record back. */
+		if( t->held == NULL ) {
+			t->held = p;
+			t->held_recording = recording_changes;
+		}
+		t->cur = p + 16;
+	} else
+		COMMIT(t,p,16);
 }
 
 HL_PRIM void hl_prof_exit( void ) {
-	prof_thread *t;
+	prof_thread *t = prof_current;
 	unsigned char *p;
-	if( !hl_prof_on || (p = reserve(&t,8)) == NULL ) return;
-	((unsigned long long*)p)[0] = head(HL_PROF_EXIT);
+	unsigned long long now;
+	if( !hl_prof_on ) return;
+	now = now_ticks();
+	/* With a run held, the innermost open call's ENTER is its last record. A short call is dropped by taking it back. */
+	if( t != NULL && t->held != NULL && t->session == session_id && t->held_recording == recording_changes ) {
+		unsigned long long *enter = (unsigned long long*)(t->cur - 16);
+		if( (((now - base_ticks) & HL_PROF_TICK_MASK) - (enter[0] & HL_PROF_TICK_MASK)) < min_call_ticks ) {
+			unsigned long long key = enter[1];
+			t->cur -= 16;
+			if( t->cur == t->held ) t->held = NULL;
+			t->depth--;
+			count_dropped(t,key);
+			return;
+		}
+	}
+	if( (p = reserve(&t,8)) == NULL ) return;
+	((unsigned long long*)p)[0] = ((unsigned long long)HL_PROF_EXIT << 56) | ((now - base_ticks) & HL_PROF_TICK_MASK);
 	t->depth--;
 	COMMIT(t,p,8);
 }
@@ -568,6 +673,8 @@ HL_PRIM void hl_prof_frame( int kind, unsigned int frame_set ) {
 	((unsigned long long*)p)[0] = head(kind ? HL_PROF_FRAME_IDLE : HL_PROF_FRAME_MARK);
 	((unsigned long long*)p)[1] = frame_set;
 	COMMIT(t,p,16);
+	/* A frame's dropped calls are counted within it. */
+	write_dropped(t);
 }
 
 HL_PRIM void hl_prof_counter( const void *name, int units, int encoding, double value ) {
@@ -607,11 +714,19 @@ HL_PRIM void hl_prof_sample( unsigned int tid, int flags, void **frames, int cou
 /* A session is open from hl_prof_start to hl_prof_stop; it records while hl_prof_on is set, which pausing clears. */
 static volatile int session_open;
 static volatile long recording_toggle;
-static volatile int recording_changes;
+
+HL_PRIM void hl_prof_set_min_call_ns( unsigned int ns ) {
+	min_call_ns = ns;
+}
 
 HL_PRIM bool hl_prof_start( unsigned int pool_mib ) {
 	if( session_open ) return false;
 	clock_init();
+	min_call_ticks = 0;
+	if( min_call_ns ) {
+		min_call_ticks = (unsigned long long)((double)min_call_ns * (double)nominal_hz / 1e9);
+		if( min_call_ticks == 0 ) min_call_ticks = 1;
+	}
 	if( pool_mib == 0 ) pool_mib = 64;
 	if( !pool_allocate(pool_mib) ) return false;
 	REGISTRY_LOCK();
@@ -673,16 +788,24 @@ DEFINE_PRIM(_BOOL, prof_recording_set, _BOOL);
 DEFINE_PRIM(_BOOL, prof_recording_get, _NO_ARG);
 
 HL_PRIM void hl_prof_stop( void ) {
+	prof_thread *t;
 	if( !session_open ) return;
 	session_open = 0;
-	if( !hl_prof_on ) return;
-	STORE_RELEASE_INT(&hl_prof_on,0);
-	/* A producer that saw recording on may still be writing its record: give it time to publish before the final drain. */
+	if( hl_prof_on ) {
+		STORE_RELEASE_INT(&hl_prof_on,0);
+		/* A producer that saw recording on may still be writing its record: give it time to publish before the final
+		   drain. */
 #ifdef HL_WIN
-	Sleep(2);
+		Sleep(2);
 #else
-	{ struct timespec wait = { 0, 2000000 }; nanosleep(&wait,NULL); }
+		{ struct timespec wait = { 0, 2000000 }; nanosleep(&wait,NULL); }
 #endif
+	}
+	/* The producers no longer write: publish what they hold back, for the final drain. */
+	REGISTRY_LOCK();
+	for(t=threads;t;t=t->next)
+		if( t->session == session_id && !t->exited ) release_thread(t);
+	REGISTRY_UNLOCK();
 }
 
 /* Hands a thread's new records to fn. Consumer only, with the registry locked. */
@@ -759,6 +882,7 @@ HL_PRIM void hl_prof_thread_exit( void ) {
 	REGISTRY_LOCK();
 	if( hl_prof_on && t->session == session_id ) {
 		/* The consumer drains what is left, then frees it. */
+		release_thread(t);
 		STORE_RELEASE_INT(&t->exited,1);
 	} else {
 		prof_thread **link = &threads;

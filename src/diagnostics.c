@@ -31,7 +31,8 @@ enum { DIAG_SERVICE_CONTROL = 0, DIAG_SERVICE_PROFILER = 2 };
 enum { DIAG_CONTROL_CAPABILITIES = 1, DIAG_CONTROL_AUTHENTICATE = 2 };
 enum { DIAG_PROFILE_STATUS = 1, DIAG_PROFILE_METADATA = 4, DIAG_PROFILE_START = 16, DIAG_PROFILE_STOP = 17, DIAG_PROFILE_PAUSE = 18,
 	DIAG_PROFILE_RESUME = 19 };
-/* Flags of a start request's optional fifth word. */
+/* Flags of a start request's optional fifth word. An optional sixth word is the minimum call duration in nanoseconds
+   (see hl_prof_set_min_call_ns); without it every call is kept. */
 #define DIAG_START_PAUSED 1
 /* Frames the runtime pushes during a session. Metadata is pushed with the type of its request. */
 enum { DIAG_PUSH_SESSION = 16, DIAG_PUSH_DATA = 17, DIAG_PUSH_CLOCK = 18, DIAG_PUSH_THREADS = 19, DIAG_PUSH_END = 20, DIAG_PUSH_STATS = 21,
@@ -512,8 +513,11 @@ static bool session_start( hl_socket *socket, const unsigned char *payload, unsi
 	unsigned char frame[32];
 	int sources = (int)read_u32(payload), rate = (int)read_u32(payload + 4), interval = (int)read_u32(payload + 8);
 	unsigned int pool_mib = read_u32(payload + 12), flags = length >= 20 ? read_u32(payload + 16) : 0;
+	unsigned int min_call_ns = length >= 24 ? read_u32(payload + 20) : 0;
 	double now;
-	if( session.active || !hl_prof_start(pool_mib) ) return false;
+	if( session.active ) return false;
+	hl_prof_set_min_call_ns(min_call_ns);
+	if( !hl_prof_start(pool_mib) ) return false;
 	/* A paused session records nothing until the client or the program resumes it. */
 	if( flags & DIAG_START_PAUSED ) hl_prof_set_recording(false);
 	session.active = true;
@@ -622,7 +626,7 @@ static void handle_client( hl_socket *socket ) {
 			ok = send_frame(socket,header.service,header.type,DIAG_RESPONSE,header.request_id,caps,sizeof(caps));
 		} else if( header.service == DIAG_SERVICE_PROFILER && header.type == DIAG_PROFILE_STATUS && header.length == 0 ) {
 			ok = send_status(socket,header.type,header.request_id);
-		} else if( header.service == DIAG_SERVICE_PROFILER && header.type == DIAG_PROFILE_START && (header.length == 16 || header.length == 20) ) {
+		} else if( header.service == DIAG_SERVICE_PROFILER && header.type == DIAG_PROFILE_START && (header.length == 16 || header.length == 20 || header.length == 24) ) {
 			ok = session_start(socket,payload,header.length,header.request_id);
 		} else if( header.service == DIAG_SERVICE_PROFILER && (header.type == DIAG_PROFILE_PAUSE || header.type == DIAG_PROFILE_RESUME) && header.length == 0 ) {
 			ok = session.active && hl_prof_set_recording(header.type == DIAG_PROFILE_RESUME) && send_status(socket,header.type,header.request_id);

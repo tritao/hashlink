@@ -61,6 +61,9 @@ HL_API unsigned long long hl_prof_monotonic_ns( void );
 /* Session control, for the consumer. start allocates the pool on first use and begins recording; stop ends recording and
    waits for records in flight, after which a final drain returns everything recorded. */
 HL_API bool hl_prof_start( unsigned int pool_mib );
+/* Sessions started from now on drop calls shorter than ns as they exit, unless a call inside them was kept, and count
+   what they drop in PROFILE_EVENT_DROPPED_CALLS events. 0 keeps every call. A dropped call's time stays in its caller. */
+HL_API void hl_prof_set_min_call_ns( unsigned int ns );
 HL_API void hl_prof_stop( void );
 /* Pauses (false) or resumes (true) recording within the open session, writing a PROFILE_EVENT_RECORDING event. Returns
    false when no session is open. Any thread. */
