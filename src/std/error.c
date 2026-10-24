@@ -29,13 +29,24 @@
 #include <posix/posix.h>
 #endif
 
+#ifdef HL_WIN_DESKTOP
+// A dialog is the only way to report a fatal error that nobody would otherwise see: a GUI launch with no standard
+// output, or a console this process alone owns, which closes when it exits. Output to a pipe, a file or a shared
+// console has a reader, and a dialog there would only block an unattended run until someone dismisses it.
+static bool fatal_error_needs_dialog() {
+	HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+	DWORD type = out == NULL || out == INVALID_HANDLE_VALUE ? FILE_TYPE_UNKNOWN : GetFileType(out);
+	DWORD processes[2];
+	if( type == FILE_TYPE_DISK || type == FILE_TYPE_PIPE ) return false;
+	if( type == FILE_TYPE_CHAR ) return GetConsoleProcessList(processes,2) <= 1;
+	return true;
+}
+#endif
+
 HL_PRIM void *hl_fatal_error( const char *msg, const char *file, int line ) {
 	hl_blocking(true);
 #	ifdef HL_WIN_DESKTOP
-    HWND consoleWnd = GetConsoleWindow();
-    DWORD pid;
-    GetWindowThreadProcessId(consoleWnd, &pid);
-    if( consoleWnd == NULL || GetActiveWindow() != NULL || GetCurrentProcessId() == pid ) {
+	if( fatal_error_needs_dialog() ) {
 		char buf[256];
 		sprintf(buf,"%s\n\n%s(%d)",msg,file,line);
 		MessageBoxA(NULL,buf,"Fatal Error", MB_OK | MB_ICONERROR);
