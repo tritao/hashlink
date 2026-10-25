@@ -54,7 +54,7 @@ int hl_prof_boundary_enter( boundary_desc *d ) {
 	if( !hl_prof_on || boundary_busy ) return 0;
 	/* The recorder may wait for the consumer through a hooked call: that wait is not recorded. */
 	boundary_busy = 1;
-	hl_prof_enter_native((unsigned long long)(uintptr_t)(stubs + (d - descs) * STUB_SIZE));
+	hl_prof_enter_blocking((unsigned long long)(uintptr_t)(stubs + (d - descs) * STUB_SIZE));
 	boundary_busy = 0;
 	return 1;
 }

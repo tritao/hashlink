@@ -99,6 +99,9 @@ HL_API void hl_prof_exit( void );
 /* hl_prof_enter for natively instrumented code: key is a pc inside the function, which the runtime names on its first use
    in a session. */
 HL_API void hl_prof_enter_native( unsigned long long key );
+/* hl_prof_enter_native for a call that may block (a boundary hook): it is never dropped as short, and it publishes the
+   calls held before it, so the consumer sees a waiting thread's open calls while it waits. */
+HL_API void hl_prof_enter_blocking( unsigned long long key );
 /* Consumer: moves up to max of the native keys first seen since the last call into keys, returning how many. */
 HL_API int hl_prof_native_keys_take( unsigned long long *keys, int max );
 /* Forgets the native keys seen so far, at the start of a session. */

@@ -517,14 +517,17 @@ static void release_thread( prof_thread *t ) {
 
 /* ---- writers ---------------------------------------------------------------------------------------------------- */
 
-HL_PRIM void hl_prof_enter( unsigned long long key ) {
+/* An ENTER record. With a minimum call duration it is held back, unless keep: a call that may block keeps it, and
+   publishes the run held before it, so a thread waiting there shows its open calls while it waits rather than when it
+   next records. */
+static FORCE_INLINE void write_enter( unsigned long long key, bool keep ) {
 	prof_thread *t;
 	unsigned char *p;
 	if( !hl_prof_on || (p = reserve(&t,16)) == NULL ) return;
 	((unsigned long long*)p)[0] = head(HL_PROF_ENTER);
 	((unsigned long long*)p)[1] = key;
 	t->depth++;
-	if( min_call_ticks ) {
+	if( min_call_ticks && !keep ) {
 		/* Held back: if the call turns out short, its exit takes this record back. */
 		if( t->held == NULL ) {
 			t->held = p;
@@ -533,6 +536,10 @@ HL_PRIM void hl_prof_enter( unsigned long long key ) {
 		t->cur = p + 16;
 	} else
 		COMMIT(t,p,16);
+}
+
+HL_PRIM void hl_prof_enter( unsigned long long key ) {
+	write_enter(key,false);
 }
 
 HL_PRIM void hl_prof_exit( void ) {
@@ -591,7 +598,13 @@ static void native_key_seen( unsigned long long key ) {
 HL_PRIM void hl_prof_enter_native( unsigned long long key ) {
 	if( !hl_prof_on ) return;
 	native_key_seen(key);
-	hl_prof_enter(key);
+	write_enter(key,false);
+}
+
+HL_PRIM void hl_prof_enter_blocking( unsigned long long key ) {
+	if( !hl_prof_on ) return;
+	native_key_seen(key);
+	write_enter(key,true);
 }
 
 HL_PRIM int hl_prof_native_keys_take( unsigned long long *keys, int max ) {
