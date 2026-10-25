@@ -594,6 +594,14 @@ static bool valid_function_target( hl_module *m, patch_layout *layout, int index
 	return valid_call_target(m,layout,index) && layout_function(layout,index) != NULL;
 }
 
+/* A static closure may also wrap a native, which the layout places after the functions. */
+static bool valid_closure_target( hl_module *m, patch_layout *layout, int index ) {
+	int native;
+	if( !valid_call_target(m,layout,index) ) return false;
+	native = layout->indexes[index] - layout->count;
+	return layout_function(layout,index) != NULL || (native >= 0 && native < m->code->nnatives);
+}
+
 // The JIT keeps at most this many try regions open (jit_emit.c MAX_TRAPS).
 #define PATCH_MAX_TRAPS 32
 
@@ -683,7 +691,7 @@ static bool validate_function( hl_module *m, hl_patch *patch, patch_layout *layo
 			for(int k=3;k<op->operand_count;k++) if(!valid_reg(f,p[k])){*error="Invalid call argument";return false;}
 			break;
 		case OStaticClosure:
-			if(!valid_reg(f,p[0])||!valid_function_target(m,layout,p[1])){*error="Invalid static closure";return false;}
+			if(!valid_reg(f,p[0])||!valid_closure_target(m,layout,p[1])){*error="Invalid static closure";return false;}
 			break;
 		case OInstanceClosure:
 			if(!valid_reg(f,p[0])||!valid_function_target(m,layout,p[1])||!valid_reg(f,p[2])){*error="Invalid instance closure";return false;}
