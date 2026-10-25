@@ -416,7 +416,10 @@ static bool system_thread_name( unsigned int tid, char *out, int capacity ) {
 	int n = 0;
 	if( h == NULL ) return false;
 	if( SUCCEEDED(GetThreadDescription(h,&wide)) && wide != NULL ) {
-		if( *wide ) n = WideCharToMultiByte(CP_UTF8,0,wide,-1,out,capacity,NULL,NULL);
+		/* A name too long for out is cut at a whole character, not dropped. */
+		int units = (int)wcslen(wide);
+		while( units > 0 && (n = WideCharToMultiByte(CP_UTF8,0,wide,units,out,capacity - 1,NULL,NULL)) == 0 ) units -= units > 64 ? units / 4 : 1;
+		if( units > 0 && n > 0 ) out[n++] = 0;
 		LocalFree(wide);
 	}
 	CloseHandle(h);
