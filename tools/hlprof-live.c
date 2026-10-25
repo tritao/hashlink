@@ -579,6 +579,8 @@ static double frame_drops_at( uint64_t ticks ) {
 	return frame_drop_cursor<frame_drop_count&&frame_drop_starts[frame_drop_cursor]==ticks?(double)frame_drops[frame_drop_cursor]:-1;
 }
 static unsigned char *startup;static uint32_t startup_size;
+/* Whether a thread's first call is its entry function, so it can name the thread: see decode_records. */
+static int entry_names;
 static int add_pause( uint64_t ticks,uint32_t tid ) {
 	if(pause_count==pause_capacity){uint32_t cap=pause_capacity?pause_capacity*2:16;recording_pause *p=(recording_pause*)realloc(pauses,cap*sizeof(*p));if(!p)return 0;pauses=p;pause_capacity=cap;}
 	pauses[pause_count].ticks=ticks;pauses[pause_count].tid=tid;pause_count++;return 1;
@@ -700,6 +702,8 @@ static void short_calls_report( symbols *s,int top ) {
 
 typedef struct { int open; uint64_t number; uint32_t tid; } frame_set_state;
 static frame_set_state frame_sets[16];
+/* Frames marked before the exported window, counted in pass 1, so a window's frames keep their numbers. */
+static uint64_t frames_before_window[16];
 
 /* Closes slices on a thread's track down to `calls` open calls (or every span when spans_only). */
 static int close_slices( byte_buffer *o,open_stack *st,double time,uint32_t tid,uint32_t calls,int until_span ) {
@@ -742,10 +746,10 @@ static int decode_records( byte_buffer *o,symbols *s,tick_clock *c,uint32_t tid,
 		switch(kind){
 		case R_ENTER:{if(pos+16>length)goto bad;uint32_t n=call_name(s,u64(p+pos+8),name,sizeof(name));size=16;
 			/* A thread's entry function names it if the runtime did not; a thread-start wrapper around it is hidden. The thread
-			   must have started while recording: when the session began before the program and no pause came first. A thread
-			   recording only from a later point would be named after whatever it called first. */
+			   must have started while recording: when the session began before the program, the export starts with the capture
+			   and no pause came first. A thread recording only from a later point would be named after whatever it called first. */
 			if(!st->count&&thread_wrapper(name)){if(!stack_push(st,3))return 0;break;}
-			if(!st->named&&(!st->count||(st->count==1&&st->kinds[0]==3))){st->named=1;if(startup&&!st->pause&&!name_thread(o,tid,name))return 0;}
+			if(!st->named&&(!st->count||(st->count==1&&st->kinds[0]==3))){st->named=1;if(entry_names&&!st->pause&&!name_thread(o,tid,name))return 0;}
 			if(!stack_push(st,1)||!synth_event(o,time,tid,EXPORT_CALL_BEGIN,name,n))return 0;break;}
 		case R_EXIT:if(st->calls&&!close_slices(o,st,time,tid,st->calls-1,0))return 0;break;
 		case R_UNWIND:if(pos+16>length)goto bad;{uint64_t skipped=u64(p+pos+8);if(!close_slices(o,st,time,tid,skipped<st->calls?st->calls-(uint32_t)skipped:0,0))return 0;}size=16;break;
@@ -781,7 +785,7 @@ bad:
    thread and the startup phases. Natively
    instrumented calls are named by their key when they are decoded, and the runtime names a key on its consumer thread
    after the call, so every name is collected first; a pause applies to every thread, whichever recorded it. */
-static int scan_pass1( const unsigned char *p,uint32_t length,uint32_t tid ) {
+static int scan_pass1( const unsigned char *p,uint32_t length,uint32_t tid,int before_window ) {
 	uint32_t pos=0;
 	while(pos+8<=length){
 		uint32_t kind=(uint32_t)(u64(p+pos)>>56);uint64_t size=8;int follows=0;
@@ -789,6 +793,7 @@ static int scan_pass1( const unsigned char *p,uint32_t length,uint32_t tid ) {
 		if(kind==R_EXIT||kind==R_SPAN_END){pos+=8;continue;}
 		if(pos+16>length)return 1;
 		if(kind==R_FRAME_MARK&&!frame_thread&&u64(p+pos+8)==0){thread_drops *d=early_drops_of(tid);frame_thread=tid;frame_drop_running=d?d->total:0;}
+		if(kind==R_FRAME_MARK&&before_window&&u64(p+pos+8)<16)frames_before_window[u64(p+pos+8)]++;
 		if((kind==R_FRAME_MARK||kind==R_FRAME_IDLE)&&tid==frame_thread&&u64(p+pos+8)==0){if(!frame_drops_close(u64(p+pos)&TICK_MASK))return 0;frame_drop_follows=1;}
 		switch(kind){
 		case R_ENTER:case R_UNWIND:case R_FRAME_MARK:case R_FRAME_IDLE:case R_STALL:size=16;break;
@@ -823,6 +828,7 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 	unsigned char record_header[16],*payload=NULL,*raw=NULL;uint32_t raw_cap=0,payload_cap=0;long data_start=ftell(file);tick_clock clock={0};byte_buffer out={0},fresh={0};reorder_buffer order={0};int code=0,have_metadata=0;uint64_t malformed=0;
 	unsigned char *names=NULL;uint32_t names_size=0;
 	memset(frame_sets,0,sizeof(frame_sets));
+	memset(frames_before_window,0,sizeof(frames_before_window));
 	pause_count=0;frame_thread=0;free(startup);startup=NULL;startup_size=0;free(frame_drops);free(frame_drop_starts);frame_drops=frame_drop_starts=NULL;frame_drop_count=frame_drop_capacity=frame_drop_cursor=0;frame_drop_running=frame_drop_start=0;frame_drop_follows=0;memset(early_drops,0,sizeof(early_drops));
 	/* pass 1: the last metadata snapshot (it lists retired regions too), clock pairs, session and thread names */
 	while(fread(record_header,1,16,file)==16){
@@ -840,10 +846,12 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 			if(flags&1){if(raw_size>MAX_RECORD)continue;if(!grow(&raw,&raw_cap,raw_size))goto done;
 				if(LZ4_decompress_safe((const char*)payload+16,(char*)raw,(int)(size-16),(int)raw_size)!=(int)raw_size)continue;records=raw;}
 			else raw_size=size-16;
-			if(!scan_pass1(records,raw_size,u32(payload)))goto done;}
+			if(!scan_pass1(records,raw_size,u32(payload),u64(record_header+8)<start_ns))goto done;}
 	}
 	if(!have_metadata){fprintf(stderr,"The capture holds no symbol metadata\n");goto done;}
 	if(frame_thread&&!frame_drops_close(0))goto done;
+	for(int i=0;i<16;i++)frame_sets[i].number=frames_before_window[i];
+	entry_names=startup!=NULL&&start_ns==0;
 	if(pause_count)qsort(pauses,pause_count,sizeof(recording_pause),pause_compare);
 	/* Time 0 is the session's base tick, which a session started during the runtime's startup puts at its first phase,
 	   before the first clock pair. */
@@ -853,8 +861,9 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 	if(!synth_event(&out,0,FRAME_TRACK_TID,EXPORT_PROCESS_TRACK,"Frames",6))goto done;
 	/* The runtime's startup: its phases on the thread that ran them, and a "Startup" frame from the start of the session to
 	   the first frame, so the program's own startup (its entry point until the first frame) is a frame too. Only
-	   the Perfetto trace shows them: the other exports read spans and calls as the program's own. */
-	if(startup&&pf){uint32_t tid=u32(startup),count=u32(startup+4),pos=8,frames_tid=frame_thread?frame_thread:tid;
+	   the Perfetto trace shows them, the other exports reading spans and calls as the program's own, and only from the
+	   capture's start: a window from later on would show one frame from 0 to its first. */
+	if(startup&&pf&&start_ns==0){uint32_t tid=u32(startup),count=u32(startup+4),pos=8,frames_tid=frame_thread?frame_thread:tid;
 		if(!synth_event(&out,0,FRAME_TRACK_TID,PROFILE_EVENT_SPAN_BEGIN,"Startup",7)||!synth_event(&out,0,frames_tid,EXPORT_FRAME_BEGIN,"Startup",7))goto done;
 		frame_sets[0].open=1;frame_sets[0].tid=frames_tid;
 		if(frame_drop_count&&frame_drop_starts[0]==0&&!synth_counter(&out,0,frames_tid,"Short calls dropped per frame",(double)frame_drops[0]))goto done;
