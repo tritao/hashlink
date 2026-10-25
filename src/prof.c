@@ -140,8 +140,7 @@ static bool invariant_tsc( void ) {
 	return (info[3] & (1 << 8)) != 0;
 #elif defined(PROF_X86)
 	unsigned int a, b, c, d;
-	if( __get_cpuid_max(0x80000000,NULL) < 0x80000007 ) return false;
-	__get_cpuid(0x80000007,&a,&b,&c,&d);
+	if( __get_cpuid_max(0x80000000,NULL) < 0x80000007 || !__get_cpuid(0x80000007,&a,&b,&c,&d) ) return false;
 	return (d & (1 << 8)) != 0;
 #else
 	return false;
