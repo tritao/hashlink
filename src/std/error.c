@@ -38,7 +38,8 @@ static bool fatal_error_needs_dialog() {
 	DWORD type = out == NULL || out == INVALID_HANDLE_VALUE ? FILE_TYPE_UNKNOWN : GetFileType(out);
 	DWORD processes[2];
 	if( type == FILE_TYPE_DISK || type == FILE_TYPE_PIPE ) return false;
-	if( type == FILE_TYPE_CHAR ) return GetConsoleProcessList(processes,2) <= 1;
+	// 0 processes: a character device that is no console, such as NUL, which an unattended run redirects to.
+	if( type == FILE_TYPE_CHAR ) return GetConsoleProcessList(processes,2) == 1;
 	return true;
 }
 #endif
