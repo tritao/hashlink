@@ -993,8 +993,20 @@ HL_PRIM void hl_thread_set_name( hl_thread *t, const char *name ) {
 	SetThreadName((DWORD)(int_val)t,name);
 #elif defined(HL_MAC) || defined(HL_IOS)
 	// pthread_setname_np only possible for current thread
+	if( t == hl_thread_current() ) pthread_setname_np(name);
 #else
-	pthread_setname_np((pthread_t)t,name);
+	{
+		// Linux refuses a name over 15 bytes, rather than shortening it: keep its first 15, on a UTF-8 boundary.
+		char shortened[16];
+		int n = (int)strlen(name);
+		if( n > 15 ) {
+			n = 15;
+			while( n > 0 && ((unsigned char)name[n] & 0xC0) == 0x80 ) n--;
+		}
+		memcpy(shortened,name,n);
+		shortened[n] = 0;
+		pthread_setname_np((pthread_t)t,shortened);
+	}
 #endif
 #ifdef HL_THREADS
 	hl_threads_info *threads = hl_gc_threads_info();
