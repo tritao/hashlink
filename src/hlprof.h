@@ -65,6 +65,9 @@ HL_API bool hl_prof_start( unsigned int pool_mib );
    what they drop in PROFILE_EVENT_DROPPED_CALLS events. 0 keeps every call. A dropped call's time stays in its caller. */
 HL_API void hl_prof_set_min_call_ns( unsigned int ns );
 HL_API void hl_prof_stop( void );
+/* Marks the start of a runtime startup phase on the calling thread (the previous one ends there); NULL marks the program's
+   entry point and ends them. A session started in between records them in a PROFILE_EVENT_STARTUP event. */
+HL_API void hl_prof_startup_phase( const char *name );
 /* Pauses (false) or resumes (true) recording within the open session, writing a PROFILE_EVENT_RECORDING event. Returns
    false when no session is open. Any thread. */
 HL_API bool hl_prof_set_recording( bool on );

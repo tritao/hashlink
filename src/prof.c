@@ -719,7 +719,55 @@ HL_PRIM void hl_prof_set_min_call_ns( unsigned int ns ) {
 	min_call_ns = ns;
 }
 
+/* Startup phases: the runtime's work before the program's entry point, which a session started then replays as one
+   PROFILE_EVENT_STARTUP event. Open until the entry point closes them; the first session started meanwhile takes them
+   and begins its clock at the first phase. */
+#define STARTUP_PHASES 8
+typedef struct { const char *name; unsigned long long ticks; } startup_phase;
+static startup_phase startup_phases[STARTUP_PHASES];
+static int startup_count;
+static bool startup_closed;
+static unsigned int startup_tid;
+
+HL_PRIM void hl_prof_startup_phase( const char *name ) {
+	REGISTRY_LOCK();
+	if( name == NULL ) startup_closed = true;
+	else if( !startup_closed && startup_count < STARTUP_PHASES ) {
+		if( startup_count == 0 ) {
+			clock_init();
+			startup_tid = (unsigned int)hl_thread_id();
+		}
+		startup_phases[startup_count].name = name;
+		startup_phases[startup_count].ticks = now_ticks();
+		startup_count++;
+	}
+	REGISTRY_UNLOCK();
+}
+
+/* Writes the startup phases, each ending where the next begins and the last where the session started. */
+static void write_startup( unsigned long long started ) {
+	unsigned char payload[8 + STARTUP_PHASES * (24 + 64)];
+	unsigned int length = 8;
+	for(int i=0;i<startup_count;i++) {
+		unsigned long long begin = startup_phases[i].ticks - base_ticks;
+		unsigned long long end = (i + 1 < startup_count ? startup_phases[i + 1].ticks : started) - base_ticks;
+		unsigned int n = (unsigned int)strlen(startup_phases[i].name);
+		if( n > 64 ) n = 64;
+		memcpy(payload + length,&begin,8);
+		memcpy(payload + length + 8,&end,8);
+		memcpy(payload + length + 16,&n,4);
+		memset(payload + length + 20,0,4);
+		memcpy(payload + length + 24,startup_phases[i].name,n);
+		length += 24 + ((n + 7) & ~7u);
+	}
+	memcpy(payload,&startup_tid,4);
+	memcpy(payload + 4,&startup_count,4);
+	hl_prof_event(PROFILE_EVENT_STARTUP,payload,length);
+}
+
 HL_PRIM bool hl_prof_start( unsigned int pool_mib ) {
+	bool startup;
+	unsigned long long started = 0;
 	if( session_open ) return false;
 	clock_init();
 	min_call_ticks = 0;
@@ -736,9 +784,16 @@ HL_PRIM bool hl_prof_start( unsigned int pool_mib ) {
 	stall_ticks = 0;
 	drained_bytes = 0;
 	base_ticks = now_ticks();
+	startup = !startup_closed && startup_count > 0;
+	if( startup ) {
+		startup_closed = true;
+		started = base_ticks;
+		base_ticks = startup_phases[0].ticks;
+	}
 	REGISTRY_UNLOCK();
 	session_open = 1;
 	STORE_RELEASE_INT(&hl_prof_on,1);
+	if( startup ) write_startup(started);
 	return true;
 }
 

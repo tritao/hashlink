@@ -20,6 +20,10 @@
 /* Calls dropped for being shorter than the session's minimum call duration, counted on one thread since its last such
    event: entries of u64 call key, u32 count, u32 0. */
 #define PROFILE_EVENT_DROPPED_CALLS 0x484C0009U
+/* The runtime's startup before the program's entry point, written once when the first session starts before it: u32
+   thread, u32 count, then per phase u64 begin and u64 end ticks (relative to the session's base, which is the first
+   phase's start), u32 name length, u32 0, and the UTF-8 name padded to 8 bytes. */
+#define PROFILE_EVENT_STARTUP 0x484C000AU
 #define PROFILE_EVENT_SPAN_BEGIN 0x484C1001U
 #define PROFILE_EVENT_SPAN_END 0x484C1002U
 /* A program-defined counter sample: f64 value, then the UTF-8 counter name. Keep haxeon.ProfileCounter in sync. */

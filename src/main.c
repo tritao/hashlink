@@ -22,6 +22,7 @@
 #include <hl.h>
 #include <jit.h>
 #include "hlsystem.h"
+#include "hlprof.h"
 
 #ifdef HL_WIN
 #	include <locale.h>
@@ -428,6 +429,9 @@ int main(int argc, pchar *argv[]) {
 		fprintf(stderr,"--diagnostics-wait requires --diagnostics <port>\n");
 		return 1;
 	}
+	// A diagnostics session can show the runtime's startup: a session started before the entry point records these phases.
+#	define STARTUP_PHASE(name) if( diagnostics_port > 0 ) hl_prof_startup_phase(name)
+	STARTUP_PHASE("Initialize the runtime");
 	hl_global_init();
 	hl_setup.file_path = file;
 	hl_setup.sys_args = (pchar**)argv;
@@ -438,11 +442,13 @@ int main(int argc, pchar *argv[]) {
 	setup_handler();
 	main_ctx = &ctx;
 	ctx.file = file;
+	STARTUP_PHASE("Load bytecode");
 	ctx.code = load_code(file, &error_msg, true);
 	if( ctx.code == NULL ) {
 		if( error_msg ) printf("%s\n", error_msg);
 		return 1;
 	}
+	STARTUP_PHASE("Compile and link the module (JIT, native libraries)");
 	ctx.m = hl_module_alloc(ctx.code);
 	if( ctx.m == NULL ) {
 		hl_code_destroy(ctx.code);
@@ -474,14 +480,18 @@ int main(int argc, pchar *argv[]) {
 	cl.t = ctx.code->functions[ctx.m->functions_indexes[ctx.m->code->entrypoint]].type;
 	cl.fun = ctx.m->functions_ptrs[ctx.m->code->entrypoint];
 	cl.hasValue = 0;
+	STARTUP_PHASE("Start diagnostics");
 	hl_profile_setup(profile_count);
 	if( diagnostics_port > 0 && !hl_diagnostics_start(diagnostics_port,diagnostics_public) ) {
 		fprintf(stderr,"Could not start diagnostics on port %d\n",diagnostics_port);
 		hl_profile_end();
 		return 5;
 	}
-	if( diagnostics_wait )
+	if( diagnostics_wait ) {
+		STARTUP_PHASE("Wait for the profiler");
 		hl_profile_wait_for_start();
+	}
+	STARTUP_PHASE(NULL);
 	ctx.ret = hl_dyn_call_safe(&cl,NULL,0,&isExc);
 	fflush(stdout);
 	hl_profile_drain();
