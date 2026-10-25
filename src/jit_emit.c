@@ -1951,7 +1951,8 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 		{
 			if( m->staging_patch ) {
 				ereg args[2];
-				args[0] = LOAD_CONST_PTR(m->code->functions[m->functions_indexes[o->p2]].type);
+				int fidx = m->functions_indexes[o->p2];
+				args[0] = LOAD_CONST_PTR(fidx >= m->code->nfunctions ? m->code->natives[fidx - m->code->nfunctions].t : m->code->functions[fidx].type);
 				args[1] = LOAD_MEM_PTR(LOAD_CONST_PTR(m->functions_ptrs), o->p2 * HL_WSIZE);
 				STORE(dst, emit_native_call(ctx,hl_alloc_closure_void,args,2,dst->t));
 			} else {
