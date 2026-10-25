@@ -20,6 +20,9 @@
 #	include <time.h>
 #	include <unistd.h>
 #	include <sys/mman.h>
+#	ifdef __linux__
+#		include <sys/syscall.h>
+#	endif
 #endif
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
@@ -61,6 +64,9 @@ static __forceinline int prof_load_int( volatile int *p ) { int v = *p; _ReadWri
 #	define FETCH_ADD64(p,v) _InterlockedExchangeAdd64((volatile __int64*)(p),(__int64)(v))
 #	define EXCHANGE_INT(p,v) _InterlockedExchange((volatile long*)(p),(long)(v))
 #	define FORCE_INLINE __forceinline
+#	define NO_INLINE __declspec(noinline)
+#	define COMPILER_BARRIER() _ReadWriteBarrier()
+#	define FULL_FENCE() MemoryBarrier()
 #else
 #	define LOAD_ACQUIRE_PTR(p) __atomic_load_n((void**)(p),__ATOMIC_ACQUIRE)
 #	define STORE_RELEASE_PTR(p,v) __atomic_store_n((void**)(p),(void*)(v),__ATOMIC_RELEASE)
@@ -74,6 +80,9 @@ static inline bool prof_cas64( volatile unsigned long long *p, unsigned long lon
 #	define FETCH_ADD64(p,v) __atomic_fetch_add((p),(v),__ATOMIC_RELAXED)
 #	define EXCHANGE_INT(p,v) __atomic_exchange_n((int*)(p),(v),__ATOMIC_SEQ_CST)
 #	define FORCE_INLINE inline __attribute__((always_inline))
+#	define NO_INLINE __attribute__((noinline))
+#	define COMPILER_BARRIER() __atomic_signal_fence(__ATOMIC_SEQ_CST)
+#	define FULL_FENCE() __atomic_thread_fence(__ATOMIC_SEQ_CST)
 #endif
 
 /* ---- clock ------------------------------------------------------------------------------------------------------ */
@@ -298,6 +307,9 @@ struct prof_thread {
 	/* ENTER records minus EXIT records over the thread's life, across sessions, so a depth saved by a try before
 	   recording started still measures what a throw skipped after it started. */
 	int depth;
+	/* Nonzero while the thread writes a record, for a stop to wait on before it touches the thread's state. Only the
+	   thread changes it; a count, so a signal handler recording on the thread leaves it as it found it. */
+	volatile int writing;
 	int dropped_used;
 	prof_dropped dropped[DROPPED_SLOTS];
 	char producer_padding[64];
@@ -450,20 +462,39 @@ static unsigned char *next_chunk( prof_thread *t, unsigned int bytes, bool wait 
 	return p;
 }
 
-/* Room for a record of bytes (a multiple of 8) on the calling thread, or NULL. */
-static FORCE_INLINE unsigned char *reserve( prof_thread **out, unsigned int bytes ) {
+/* Room for a record of bytes (a multiple of 8) on t, the calling thread between writer_begin and writer_end, or NULL. */
+static FORCE_INLINE unsigned char *reserve( prof_thread *t, unsigned int bytes ) {
+	unsigned char *p = t->cur;
+	/* A chunk is never filled to its last byte, so a published position always lies inside its own chunk; a position at
+	   the end would equal the start of the chunk after it in the pool. */
+	if( p == NULL || (size_t)(t->end - p) <= bytes ) p = next_chunk(t,bytes,no_wait_depth == 0);
+	return p;
+}
+
+/* Set when the platform has no process-wide barrier (see process_barrier): each writer then fences instead. */
+static int writer_fence;
+
+/* The calling thread's state, marked as writing a record, or NULL when not recording. The mark comes before the check
+   of hl_prof_on: a stop turns recording off, makes every thread pass a barrier, then waits for the marks, so a writer
+   either sees recording off or is waited for (see hl_prof_stop). Pair with writer_end. */
+static FORCE_INLINE prof_thread *writer_begin( void ) {
 	prof_thread *t = prof_current;
-	unsigned char *p;
 	if( t == NULL || t->session != session_id ) {
 		t = thread_state();
 		if( t == NULL ) return NULL;
 	}
-	p = t->cur;
-	/* A chunk is never filled to its last byte, so a published position always lies inside its own chunk; a position at
-	   the end would equal the start of the chunk after it in the pool. */
-	if( p == NULL || (size_t)(t->end - p) <= bytes ) p = next_chunk(t,bytes,no_wait_depth == 0);
-	*out = t;
-	return p;
+	t->writing++;
+	if( writer_fence ) FULL_FENCE(); else COMPILER_BARRIER();
+	if( !hl_prof_on ) {
+		STORE_RELEASE_INT(&t->writing,t->writing - 1);
+		return NULL;
+	}
+	return t;
+}
+
+/* Publishes the end of the thread's writing with release, so a stop that sees it sees the records too. */
+static FORCE_INLINE void writer_end( prof_thread *t ) {
+	STORE_RELEASE_INT(&t->writing,t->writing - 1);
 }
 
 static FORCE_INLINE unsigned long long head( int kind ) {
@@ -538,19 +569,22 @@ static void release_thread( prof_thread *t ) {
 static FORCE_INLINE void write_enter( unsigned long long key, bool keep ) {
 	prof_thread *t;
 	unsigned char *p;
-	if( !hl_prof_on || no_wait_depth || (p = reserve(&t,16)) == NULL ) return;
-	((unsigned long long*)p)[0] = head(HL_PROF_ENTER);
-	((unsigned long long*)p)[1] = key;
-	t->depth++;
-	if( min_call_ticks && !keep ) {
-		/* Held back: if the call turns out short, its exit takes this record back. */
-		if( t->held == NULL ) {
-			t->held = p;
-			t->held_recording = recording_changes;
-		}
-		t->cur = p + 16;
-	} else
-		COMMIT(t,p,16);
+	if( !hl_prof_on || no_wait_depth || (t = writer_begin()) == NULL ) return;
+	if( (p = reserve(t,16)) != NULL ) {
+		((unsigned long long*)p)[0] = head(HL_PROF_ENTER);
+		((unsigned long long*)p)[1] = key;
+		t->depth++;
+		if( min_call_ticks && !keep ) {
+			/* Held back: if the call turns out short, its exit takes this record back. */
+			if( t->held == NULL ) {
+				t->held = p;
+				t->held_recording = recording_changes;
+			}
+			t->cur = p + 16;
+		} else
+			COMMIT(t,p,16);
+	}
+	writer_end(t);
 }
 
 HL_PRIM void hl_prof_enter( unsigned long long key ) {
@@ -558,13 +592,13 @@ HL_PRIM void hl_prof_enter( unsigned long long key ) {
 }
 
 HL_PRIM void hl_prof_exit( void ) {
-	prof_thread *t = prof_current;
+	prof_thread *t;
 	unsigned char *p;
 	unsigned long long now;
-	if( !hl_prof_on || no_wait_depth ) return;
+	if( !hl_prof_on || no_wait_depth || (t = writer_begin()) == NULL ) return;
 	now = now_ticks();
 	/* With a run held, the innermost open call's ENTER is its last record. A short call is dropped by taking it back. */
-	if( t != NULL && t->held != NULL && t->session == session_id && t->held_recording == recording_changes ) {
+	if( t->held != NULL && t->held_recording == recording_changes ) {
 		unsigned long long *enter = (unsigned long long*)(t->cur - 16);
 		if( (((now - base_ticks) & HL_PROF_TICK_MASK) - (enter[0] & HL_PROF_TICK_MASK)) < min_call_ticks ) {
 			unsigned long long key = enter[1];
@@ -572,13 +606,16 @@ HL_PRIM void hl_prof_exit( void ) {
 			if( t->cur == t->held ) t->held = NULL;
 			t->depth--;
 			count_dropped(t,key);
+			writer_end(t);
 			return;
 		}
 	}
-	if( (p = reserve(&t,8)) == NULL ) return;
-	((unsigned long long*)p)[0] = ((unsigned long long)HL_PROF_EXIT << 56) | ((now - base_ticks) & HL_PROF_TICK_MASK);
-	t->depth--;
-	COMMIT(t,p,8);
+	if( (p = reserve(t,8)) != NULL ) {
+		((unsigned long long*)p)[0] = ((unsigned long long)HL_PROF_EXIT << 56) | ((now - base_ticks) & HL_PROF_TICK_MASK);
+		t->depth--;
+		COMMIT(t,p,8);
+	}
+	writer_end(t);
 }
 
 /* ---- native call keys ----------------------------------------------------------------------------------------------
@@ -654,10 +691,13 @@ HL_PRIM void hl_prof_unwind( int depth ) {
 	if( t == NULL || t->depth <= depth ) return;
 	skipped = t->depth - depth;
 	t->depth = depth;
-	if( !hl_prof_on || (p = reserve(&t,16)) == NULL ) return;
-	((unsigned long long*)p)[0] = head(HL_PROF_UNWIND);
-	((unsigned long long*)p)[1] = (unsigned long long)skipped;
-	COMMIT(t,p,16);
+	if( !hl_prof_on || (t = writer_begin()) == NULL ) return;
+	if( (p = reserve(t,16)) != NULL ) {
+		((unsigned long long*)p)[0] = head(HL_PROF_UNWIND);
+		((unsigned long long*)p)[1] = (unsigned long long)skipped;
+		COMMIT(t,p,16);
+	}
+	writer_end(t);
 }
 
 /* Probes the compiler inserts into instrumented Haxe functions. The key is the probe's return address: it lies in the
@@ -692,7 +732,8 @@ DEFINE_PRIM(_VOID, prof_call_unwind, _I32);
 #define PAD8(n) (((n) + 7u) & ~7u)
 #define MAX_NAME_UNITS 1024
 
-static void write_named( int kind, const void *name, int units, int encoding, const double *value ) {
+/* Out of line, so the callers' check of hl_prof_on stays a load and a branch with recording off. */
+static NO_INLINE void write_named( int kind, const void *name, int units, int encoding, const double *value ) {
 	prof_thread *t;
 	unsigned char *p;
 	unsigned int size, words, bytes;
@@ -701,12 +742,15 @@ static void write_named( int kind, const void *name, int units, int encoding, co
 	size = (unsigned int)units * (encoding == HL_PROF_UTF16 ? 2u : 1u);
 	words = value ? 3 : 2;
 	bytes = words * 8 + PAD8(size);
-	if( (p = reserve(&t,bytes)) == NULL ) return;
-	((unsigned long long*)p)[0] = head(kind);
-	if( value ) memcpy(p + 8,value,8);
-	((unsigned long long*)p)[words - 1] = (unsigned long long)(unsigned int)units | ((unsigned long long)(unsigned int)encoding << 32);
-	if( size ) memcpy(p + words * 8,name,size);
-	COMMIT(t,p,bytes);
+	if( (t = writer_begin()) == NULL ) return;
+	if( (p = reserve(t,bytes)) != NULL ) {
+		((unsigned long long*)p)[0] = head(kind);
+		if( value ) memcpy(p + 8,value,8);
+		((unsigned long long*)p)[words - 1] = (unsigned long long)(unsigned int)units | ((unsigned long long)(unsigned int)encoding << 32);
+		if( size ) memcpy(p + words * 8,name,size);
+		COMMIT(t,p,bytes);
+	}
+	writer_end(t);
 }
 
 HL_PRIM void hl_prof_span_begin( const void *name, int units, int encoding ) {
@@ -717,20 +761,26 @@ HL_PRIM void hl_prof_span_begin( const void *name, int units, int encoding ) {
 HL_PRIM void hl_prof_span_end( void ) {
 	prof_thread *t;
 	unsigned char *p;
-	if( !hl_prof_on || (p = reserve(&t,8)) == NULL ) return;
-	((unsigned long long*)p)[0] = head(HL_PROF_SPAN_END);
-	COMMIT(t,p,8);
+	if( !hl_prof_on || (t = writer_begin()) == NULL ) return;
+	if( (p = reserve(t,8)) != NULL ) {
+		((unsigned long long*)p)[0] = head(HL_PROF_SPAN_END);
+		COMMIT(t,p,8);
+	}
+	writer_end(t);
 }
 
 HL_PRIM void hl_prof_frame( int kind, unsigned int frame_set ) {
 	prof_thread *t;
 	unsigned char *p;
-	if( !hl_prof_on || (p = reserve(&t,16)) == NULL ) return;
-	((unsigned long long*)p)[0] = head(kind ? HL_PROF_FRAME_IDLE : HL_PROF_FRAME_MARK);
-	((unsigned long long*)p)[1] = frame_set;
-	COMMIT(t,p,16);
-	/* A frame's dropped calls are counted within it. */
-	write_dropped(t,no_wait_depth == 0);
+	if( !hl_prof_on || (t = writer_begin()) == NULL ) return;
+	if( (p = reserve(t,16)) != NULL ) {
+		((unsigned long long*)p)[0] = head(kind ? HL_PROF_FRAME_IDLE : HL_PROF_FRAME_MARK);
+		((unsigned long long*)p)[1] = frame_set;
+		COMMIT(t,p,16);
+		/* A frame's dropped calls are counted within it. */
+		write_dropped(t,no_wait_depth == 0);
+	}
+	writer_end(t);
 }
 
 HL_PRIM void hl_prof_counter( const void *name, int units, int encoding, double value ) {
@@ -744,11 +794,14 @@ HL_PRIM void hl_prof_event( unsigned int id, const void *payload, unsigned int l
 	unsigned int bytes;
 	if( !hl_prof_on || length > HL_PROF_CHUNK_SIZE - 64 ) return;
 	bytes = 16 + PAD8(length);
-	if( (p = reserve(&t,bytes)) == NULL ) return;
-	((unsigned long long*)p)[0] = head(HL_PROF_EVENT);
-	((unsigned long long*)p)[1] = (unsigned long long)id | ((unsigned long long)length << 32);
-	if( length ) memcpy(p + 16,payload,length);
-	COMMIT(t,p,bytes);
+	if( (t = writer_begin()) == NULL ) return;
+	if( (p = reserve(t,bytes)) != NULL ) {
+		((unsigned long long*)p)[0] = head(HL_PROF_EVENT);
+		((unsigned long long*)p)[1] = (unsigned long long)id | ((unsigned long long)length << 32);
+		if( length ) memcpy(p + 16,payload,length);
+		COMMIT(t,p,bytes);
+	}
+	writer_end(t);
 }
 
 HL_PRIM void hl_prof_sample( unsigned int tid, int flags, void **frames, int count, unsigned long long ticks ) {
@@ -758,11 +811,14 @@ HL_PRIM void hl_prof_sample( unsigned int tid, int flags, void **frames, int cou
 	if( !hl_prof_on || count < 0 ) return;
 	if( count > 0xFFFF ) count = 0xFFFF;
 	bytes = 16 + (unsigned int)count * 8;
-	if( bytes > HL_PROF_CHUNK_SIZE - 64 || (p = reserve(&t,bytes)) == NULL ) return;
-	((unsigned long long*)p)[0] = ((unsigned long long)HL_PROF_SAMPLE << 56) | ((ticks - base_ticks) & HL_PROF_TICK_MASK);
-	((unsigned long long*)p)[1] = (unsigned long long)tid | ((unsigned long long)(unsigned int)count << 32) | ((unsigned long long)(flags & 0xFF) << 48);
-	for(int i=0;i<count;i++) ((unsigned long long*)p)[2 + i] = (unsigned long long)(uintptr_t)frames[i];
-	COMMIT(t,p,bytes);
+	if( bytes > HL_PROF_CHUNK_SIZE - 64 || (t = writer_begin()) == NULL ) return;
+	if( (p = reserve(t,bytes)) != NULL ) {
+		((unsigned long long*)p)[0] = ((unsigned long long)HL_PROF_SAMPLE << 56) | ((ticks - base_ticks) & HL_PROF_TICK_MASK);
+		((unsigned long long*)p)[1] = (unsigned long long)tid | ((unsigned long long)(unsigned int)count << 32) | ((unsigned long long)(flags & 0xFF) << 48);
+		for(int i=0;i<count;i++) ((unsigned long long*)p)[2 + i] = (unsigned long long)(uintptr_t)frames[i];
+		COMMIT(t,p,bytes);
+	}
+	writer_end(t);
 }
 
 /* ---- session ---------------------------------------------------------------------------------------------------- */
@@ -843,11 +899,39 @@ static void write_startup( unsigned long long started ) {
 	hl_prof_event(PROFILE_EVENT_STARTUP,payload,length);
 }
 
+/* A process-wide barrier: once it returns, every thread of the process has passed a full fence, so a writer's mark before
+   it is seen and its check of hl_prof_on after it sees recording off. Windows always has one. Linux has one from 4.14 with
+   membarrier, registered once; elsewhere, or when that fails, writers fence for themselves (writer_fence). */
+#if defined(__linux__) && defined(SYS_membarrier)
+#	define MEMBARRIER_CMD_PRIVATE_EXPEDITED_ (1 << 3)
+#	define MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_ (1 << 4)
+static int membarrier_state; // 0 untried, 1 registered, -1 unavailable
+#endif
+
+static void process_barrier_init( void ) {
+#if defined(__linux__) && defined(SYS_membarrier)
+	if( membarrier_state == 0 )
+		membarrier_state = syscall(SYS_membarrier,MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_,0) == 0 ? 1 : -1;
+	writer_fence = membarrier_state < 0;
+#elif !defined(HL_WIN)
+	writer_fence = 1;
+#endif
+}
+
+static void process_barrier( void ) {
+#ifdef HL_WIN
+	FlushProcessWriteBuffers();
+#elif defined(__linux__) && defined(SYS_membarrier)
+	if( membarrier_state > 0 ) syscall(SYS_membarrier,MEMBARRIER_CMD_PRIVATE_EXPEDITED_,0);
+#endif
+}
+
 HL_PRIM bool hl_prof_start( unsigned int pool_mib ) {
 	bool startup;
 	unsigned long long started = 0;
 	if( session_open ) return false;
 	clock_init();
+	process_barrier_init();
 	min_call_ticks = 0;
 	if( min_call_ns ) {
 		min_call_ticks = (unsigned long long)((double)min_call_ns * (double)nominal_hz / 1e9);
@@ -924,6 +1008,26 @@ HL_PRIM bool hl_prof_recording_get( void ) {
 DEFINE_PRIM(_BOOL, prof_recording_set, _BOOL);
 DEFINE_PRIM(_BOOL, prof_recording_get, _NO_ARG);
 
+/* Waits until no thread of the session is writing a record. The registry stays unlocked while it waits, as a writer may
+   need it, and the thread blocks for the GC: a writer leaving a stall waits for a collection to end. */
+static void wait_writers( void ) {
+	prof_thread *t;
+	bool busy;
+	hl_blocking(true);
+	do {
+		busy = false;
+		REGISTRY_LOCK();
+		for(t=threads;t;t=t->next)
+			if( t->session == session_id && !t->exited && LOAD_ACQUIRE_INT(&t->writing) ) {
+				busy = true;
+				break;
+			}
+		REGISTRY_UNLOCK();
+		if( busy ) yield_thread();
+	} while( busy );
+	hl_blocking(false);
+}
+
 HL_PRIM void hl_prof_stop( void ) {
 	prof_thread *t;
 	if( !session_open ) return;
@@ -934,12 +1038,10 @@ HL_PRIM void hl_prof_stop( void ) {
 	STORE_RELEASE_INT(&hl_prof_on,0);
 	toggle_lock();
 	STORE_RELEASE_INT(&hl_prof_on,0);
-	/* A producer that saw recording on may still be writing its record: give it time to publish before the final drain. */
-#ifdef HL_WIN
-	Sleep(2);
-#else
-	{ struct timespec wait = { 0, 2000000 }; nanosleep(&wait,NULL); }
-#endif
+	/* A producer that saw recording on may still be writing its record: after the barrier, every writer either sees
+	   recording off or shows its mark (writer_begin), so waiting for the marks waits for every record in flight. */
+	process_barrier();
+	wait_writers();
 	/* The producers no longer write: publish what they hold back, for the final drain. */
 	REGISTRY_LOCK();
 	for(t=threads;t;t=t->next)
