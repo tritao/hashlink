@@ -34,7 +34,7 @@ PCRE = include/pcre/pcre2_auto_possess.o include/pcre/pcre2_chartables.o include
 	include/pcre/pcre2_ucd.o include/pcre/pcre2_valid_utf.o include/pcre/pcre2_xclass.o
 endif
 
-RUNTIME = src/gc.o
+RUNTIME = src/gc.o src/prof.o
 
 STD = src/ryu/d2s.o src/ryu/f2s.o src/std/array.o src/std/buffer.o src/std/bytes.o src/std/cast.o src/std/date.o src/std/error.o src/std/debug.o \
 	src/std/file.o src/std/fun.o src/std/maps.o src/std/math.o src/std/obj.o src/std/random.o src/std/regexp.o \
@@ -51,7 +51,8 @@ else
 HL_JIT_OBJ = src/jit.o src/jit_emit.o src/jit_regs.o src/jit_x86_64.o src/jit_dump.o src/jit_gdb.o
 endif
 
-HL_OBJ = src/code.o src/hlpatch.o src/hlruntime.o $(HL_JIT_OBJ) src/main.o src/module.o src/debugger.o src/diagnostics.o src/diagnostics_transport.o src/profile.o
+HL_OBJ = src/code.o src/hlpatch.o src/hlruntime.o $(HL_JIT_OBJ) src/main.o src/module.o src/debugger.o src/diagnostics.o src/diagnostics_transport.o src/profile.o \
+	src/prof_boundary.o include/lz4/lz4.o
 HLPROF_LIVE = hlprof-live$(EXE_SUFFIX)
 ifeq ($(OS),Windows_NT)
 HLPROF_LIVE_LDLIBS = -lws2_32
@@ -287,7 +288,7 @@ $(HLC): $(BOOT) $(LIBHL)
 $(HL) $(HLC):
 	$(CC) $(LDFLAGS) $(USE_LIBHL_LDFLAGS) $^ $($@_LDLIBS) -o $@
 
-$(HLPROF_LIVE): tools/hlprof-live.c tools/pftrace.c
+$(HLPROF_LIVE): tools/hlprof-live.c tools/pftrace.c include/lz4/lz4.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $^ $(HLPROF_LIVE_LDLIBS) -o $@
 
 %.hdll: HDLL_LINK = $(CC) $(LDFLAGS)
