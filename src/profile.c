@@ -397,6 +397,30 @@ static void sigprof_handler(int sig, siginfo_t *info, void *ucontext)
 }
 #endif
 
+/**
+ * Whether the stopped thread was waiting in a system call. A signal that interrupts a system call the kernel will
+ * restart leaves the saved instruction pointer on the system call instruction; one that ends it with EINTR, or
+ * arrives as it returns, leaves it just after. Either way the thread was in the kernel, not running. Code is read only
+ * within the instruction pointer's page, which is mapped because the thread was executing it.
+ */
+static bool stopped_in_syscall( void ) {
+#if defined(HL_LINUX) && defined(__x86_64__)
+	const unsigned char *pc = (const unsigned char*)shared_context.context.uc_mcontext.gregs[REG_RIP];
+	uintptr_t offset = (uintptr_t)pc & 4095;
+	if( !pc ) return false;
+	if( offset <= 4094 && pc[0] == 0x0f && pc[1] == 0x05 ) return true;
+	return offset >= 2 && pc[-2] == 0x0f && pc[-1] == 0x05;
+#elif defined(HL_LINUX) && defined(__aarch64__)
+	const unsigned int *pc = (const unsigned int*)shared_context.context.uc_mcontext.pc;
+	uintptr_t offset = (uintptr_t)pc & 4095;
+	if( !pc || ((uintptr_t)pc & 3) ) return false;
+	if( *pc == 0xd4000001 ) return true;
+	return offset >= 4 && pc[-1] == 0xd4000001;
+#else
+	return false;
+#endif
+}
+
 /** The frame pointer the thread stopped with, or NULL when this target cannot provide it. */
 static void *get_thread_frameptr( void ) {
 #if defined(HL_LINUX) && defined(__x86_64__)
@@ -677,6 +701,7 @@ static int keep_sampled_frames( void **frames, unsigned char *kinds, int count, 
 
 static void read_thread_data( thread_handle *t ) {
 	double sample_started = hl_sys_time();
+	bool waiting = false;
 	double stopped_at;
 	if( !pause_thread(t,true) )
 		return;
@@ -692,6 +717,7 @@ static void read_thread_data( thread_handle *t ) {
 #if defined(HL_LINUX) || defined(HL_MAC)
     double capture_started = hl_sys_time();
     void *frame = get_thread_frameptr();
+    waiting = stopped_in_syscall();
     int count = frame ?
         hl_module_capture_stack_from_frame(t->inf->stack_top, stack, frame, data.stackOut, capture_kinds, MAX_STACK_COUNT) :
         hl_module_capture_stack_range(t->inf->stack_top, stack, data.stackOut, MAX_STACK_COUNT);
@@ -750,7 +776,7 @@ static void read_thread_data( thread_handle *t ) {
 	hl_threads_info *gc = hl_gc_threads_info();
 	if( gc->stopping_world ) eventId |= 0x40000000;
 	for(int i=0;i<count;i++) stream_native_symbol(data.stackOut[i],time,t->tid);
-	hl_prof_sample((unsigned int)t->tid,gc->stopping_world ? 1 : 0,data.stackOut,count,stopped_ticks);
+	hl_prof_sample((unsigned int)t->tid,(gc->stopping_world ? 1 : 0) | (waiting ? 2 : 0),data.stackOut,count,stopped_ticks);
 	record_data(&time,sizeof(double));
 	record_data(&t->tid,sizeof(int));
 	record_data(&eventId,sizeof(int));
