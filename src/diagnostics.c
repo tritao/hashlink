@@ -476,8 +476,10 @@ static void add_system_thread_names( thread_names *names ) {
 	free(tids);
 }
 
-/* Thread names, pushed whenever the set of named threads changes. */
-static void push_threads( hl_socket *socket, bool force ) {
+/* Thread names, pushed whenever the set of named threads changes. While recording, a collection holding the thread list's
+   lock may be waiting for this thread to drain, so the list is skipped for now when the lock is taken (wait: after a
+   stop, when nothing waits for the consumer). */
+static void push_threads( hl_socket *socket, bool force, bool wait ) {
 	hl_threads_info *threads = hl_gc_threads_info();
 	diag_buffer buffer = {0};
 	unsigned int signature = 2166136261U, count = 0;
@@ -485,7 +487,12 @@ static void push_threads( hl_socket *socket, bool force ) {
 	thread_names names = { &buffer, &signature, &count, NULL, 0 };
 	buffer_u32(&buffer,0);
 	/* A thread that unregisters frees its entry: the list is read under its lock. */
-	hl_gc_threads_lock(true);
+	if( wait ) hl_gc_threads_lock(true);
+	else if( !hl_gc_threads_try_lock() ) {
+		session.threads_signature = 0;
+		free(buffer.data);
+		return;
+	}
 	names.named = (unsigned int*)malloc(sizeof(unsigned int) * (threads->count + 1));
 	for(int i=0;i<threads->count;i++) {
 		hl_thread_info *t = threads->threads[i];
@@ -536,7 +543,7 @@ static void session_end( hl_socket *socket ) {
 	hl_prof_drain(push_data,socket);
 	hl_blocking(false);
 	if( hl_profile_metadata_changed() ) send_metadata(socket,0,DIAG_PUSH);
-	push_threads(socket,false);
+	push_threads(socket,false,true);
 	push_stats(socket);
 	push_clock(socket);
 	write_u64(payload,session.data_frames); write_u64(payload + 8,session.raw_bytes);
@@ -571,7 +578,7 @@ static unsigned long long session_pump( hl_socket *socket ) {
 	now = hl_sys_time();
 	if( now >= session.next_gc ) { record_gc_stats(); session.next_gc = now + 1.0; }
 	if( now >= session.next_clock ) { push_clock(socket); session.next_clock = now + 0.1; }
-	if( now >= session.next_threads ) { push_threads(socket,false); session.next_threads = now + 0.5; }
+	if( now >= session.next_threads ) { push_threads(socket,false,false); session.next_threads = now + 0.5; }
 	if( now >= session.next_stats ) { push_stats(socket); session.next_stats = now + 1.0; }
 	push_recording(socket,false);
 	hl_blocking(false);
@@ -605,7 +612,7 @@ static bool session_start( hl_socket *socket, const unsigned char *payload, unsi
 	hl_profile_metadata_changed();
 	if( !session.failed && !send_metadata(socket,0,DIAG_PUSH) ) session.failed = true;
 	push_clock(socket);
-	push_threads(socket,true);
+	push_threads(socket,true,false);
 	push_recording(socket,true);
 	now = hl_sys_time();
 	session.next_clock = now + 0.1;

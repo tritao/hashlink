@@ -535,6 +535,16 @@ HL_API void hl_gc_threads_lock( bool lock ) {
 	gc_global_lock(lock);
 }
 
+HL_API bool hl_gc_threads_try_lock( void ) {
+#	ifdef HL_THREADS
+	hl_thread_info *t = current_thread;
+	if( t == NULL ) return false;
+	if( (gc_flags & GC_NO_THREADS) == 0 && !hl_mutex_try_acquire(gc_threads.global_lock) ) return false;
+	t->gc_blocking++;
+#	endif
+	return true;
+}
+
 HL_API hl_threads_info *hl_gc_threads_info() {
 	return &gc_threads;
 }
@@ -543,6 +553,8 @@ static void gc_stop_world( bool b ) {
 #	ifdef HL_THREADS
 	if( b ) {
 		int i;
+		// The profiler's consumer can be waiting for the GC lock: a collection holding it must not wait for the consumer.
+		hl_prof_no_wait(true);
 		// the collecting thread publishes its own context here: gc_global_lock does not on the uncontended path
 		if( current_thread ) gc_save_context(current_thread,&b);
 		gc_threads.stopping_world = true;
@@ -561,6 +573,8 @@ static void gc_stop_world( bool b ) {
 	} else {
 		// releasing global lock will release all threads
 		gc_threads.stopping_world = false;
+		// The caller releases the lock right after; only GC_PROFILE output, a debug build's, can wait in between.
+		hl_prof_no_wait(false);
 	}
 #	else
 	if( b ) gc_save_context(current_thread,&b);
@@ -1625,6 +1639,8 @@ static void mark_thread_main( void *param ) {
 	char name[32];
 	snprintf(name,sizeof(name),"hl.gc.mark.%d",index);
 	hl_thread_set_name(hl_thread_current(),name);
+	// Marking runs while a collection holds the GC lock, which the profiler's consumer can be waiting for.
+	hl_prof_no_wait(true);
 	while( true ) {
 		hl_semaphore_acquire(inf->ready);
 		inf->mark_count += gc_flush_mark(&inf->stack);

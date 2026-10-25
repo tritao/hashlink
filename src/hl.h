@@ -1122,6 +1122,8 @@ HL_API hl_thread_info *hl_get_thread();
 HL_API hl_threads_info *hl_gc_threads_info();
 /* Holds the thread list still, for a registered thread to read it: threads register and unregister under this lock. */
 HL_API void hl_gc_threads_lock( bool lock );
+/* hl_gc_threads_lock(true) unless another thread holds the lock; release it with hl_gc_threads_lock(false). */
+HL_API bool hl_gc_threads_try_lock( void );
 
 #ifdef HL_TRACK_ENABLE
 
