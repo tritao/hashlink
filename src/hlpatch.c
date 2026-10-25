@@ -368,8 +368,52 @@ static unsigned int hash_string_prefix( hl_code *code, int count ) {
 	unsigned int hash=2166136261U;for(int i=0;i<count;i++){int length=code->strings_lens[i];hash=hash_i32(hash,length);hash=hash_bytes(hash,(unsigned char*)code->strings[i],length);}return hash;
 }
 
-static int hash_type_string_index( hl_code *code, const uchar *name ) {
+/* Maps string content to the first string-table index holding it. Hashing a type prefix looks up every type, field,
+   method and constructor name, and scanning the table for each made a patch of the editor take about 2 s. */
+typedef struct {
+	int *slots;
+	int *lengths;
+	int mask;
+} type_string_index;
+
+static unsigned int hash_ustring( const uchar *s, int length ) {
+	return hash_bytes(2166136261U,(const unsigned char*)s,length * (int)sizeof(uchar));
+}
+
+static void type_string_index_free( type_string_index *index ) {
+	free(index->slots);free(index->lengths);index->slots=NULL;index->lengths=NULL;
+}
+
+/* Leaves the index empty when out of memory; lookups then scan the table. */
+static void type_string_index_build( hl_code *code, type_string_index *index ) {
+	int size=16;
+	while( size < code->nstrings * 2 ) size<<=1;
+	index->slots=(int*)malloc(sizeof(int)*size);index->lengths=(int*)malloc(sizeof(int)*(code->nstrings>0?code->nstrings:1));index->mask=size-1;
+	if( !index->slots || !index->lengths ) { type_string_index_free(index); return; }
+	memset(index->slots,0xFF,sizeof(int)*size);
+	for(int i=0;i<code->nstrings;i++) {
+		const uchar *s=hl_get_ustring(code,i);int length=ustrlen(s);unsigned int slot=hash_ustring(s,length)&index->mask;
+		index->lengths[i]=length;
+		while( index->slots[slot] >= 0 ) {
+			int other=index->slots[slot];
+			if( index->lengths[other] == length && memcmp(hl_get_ustring(code,other),s,length * sizeof(uchar)) == 0 ) break;
+			slot=(slot+1)&index->mask;
+		}
+		if( index->slots[slot] < 0 ) index->slots[slot]=i;
+	}
+}
+
+static int hash_type_string_index( hl_code *code, type_string_index *index, const uchar *name ) {
 	int length = ustrlen(name);
+	if( index->slots ) {
+		unsigned int slot=hash_ustring(name,length)&index->mask;
+		while( index->slots[slot] >= 0 ) {
+			int i=index->slots[slot];
+			if( index->lengths[i] == length && memcmp(hl_get_ustring(code,i),name,length * sizeof(uchar)) == 0 ) return i;
+			slot=(slot+1)&index->mask;
+		}
+		return -1;
+	}
 	for(int i=0;i<code->nstrings;i++) {
 		const uchar *candidate = hl_get_ustring(code,i);
 		if( ustrlen(candidate) == length && memcmp(candidate,name,length * sizeof(uchar)) == 0 )
@@ -393,6 +437,8 @@ static int hash_type_global_index( hl_module *module, void **value ) {
 static unsigned int hash_type_prefix( hl_module *module, int count ) {
 	hl_code *code = module->code;
 	unsigned int hash=2166136261U;
+	type_string_index strings={0};
+	type_string_index_build(code,&strings);
 	for(int i=0;i<count;i++){
 		hl_type *type=code->types+i;
 		hash=hash_i32(hash,type->kind);
@@ -403,38 +449,39 @@ static unsigned int hash_type_prefix( hl_module *module, int count ) {
 			hash=hash_i32(hash,hash_type_index(code,type->fun->ret));
 			break;
 		case HABSTRACT:
-			hash=hash_i32(hash,hash_type_string_index(code,type->abs_name));
+			hash=hash_i32(hash,hash_type_string_index(code,&strings,type->abs_name));
 			break;
 		case HREF: case HNULL:
 			hash=hash_i32(hash,hash_type_index(code,type->tparam));
 			break;
 		case HOBJ: case HSTRUCT: {
 			hl_type_obj *obj=type->obj;
-			hash=hash_i32(hash,hash_type_string_index(code,obj->name));
+			hash=hash_i32(hash,hash_type_string_index(code,&strings,obj->name));
 			hash=hash_i32(hash,obj->super == NULL ? -1 : hash_type_index(code,obj->super));
 			hash=hash_i32(hash,hash_type_global_index(module,obj->global_value));
 			hash=hash_i32(hash,obj->nfields);
-			for(int j=0;j<obj->nfields;j++) { hash=hash_i32(hash,hash_type_string_index(code,obj->fields[j].name)); hash=hash_i32(hash,hash_type_index(code,obj->fields[j].t)); }
+			for(int j=0;j<obj->nfields;j++) { hash=hash_i32(hash,hash_type_string_index(code,&strings,obj->fields[j].name)); hash=hash_i32(hash,hash_type_index(code,obj->fields[j].t)); }
 			hash=hash_i32(hash,obj->nproto);
-			for(int j=0;j<obj->nproto;j++) { hash=hash_i32(hash,hash_type_string_index(code,obj->proto[j].name)); hash=hash_i32(hash,obj->proto[j].findex); hash=hash_i32(hash,obj->proto[j].pindex); }
+			for(int j=0;j<obj->nproto;j++) { hash=hash_i32(hash,hash_type_string_index(code,&strings,obj->proto[j].name)); hash=hash_i32(hash,obj->proto[j].findex); hash=hash_i32(hash,obj->proto[j].pindex); }
 			hash=hash_i32(hash,obj->nbindings);
 			for(int j=0;j<obj->nbindings*2;j++) hash=hash_i32(hash,obj->bindings[j]);
 			break;
 		}
 		case HVIRTUAL:
 			hash=hash_i32(hash,type->virt->nfields);
-			for(int j=0;j<type->virt->nfields;j++) { hash=hash_i32(hash,hash_type_string_index(code,type->virt->fields[j].name)); hash=hash_i32(hash,hash_type_index(code,type->virt->fields[j].t)); }
+			for(int j=0;j<type->virt->nfields;j++) { hash=hash_i32(hash,hash_type_string_index(code,&strings,type->virt->fields[j].name)); hash=hash_i32(hash,hash_type_index(code,type->virt->fields[j].t)); }
 			break;
 		case HENUM:
-			hash=hash_i32(hash,hash_type_string_index(code,type->tenum->name));
+			hash=hash_i32(hash,hash_type_string_index(code,&strings,type->tenum->name));
 			hash=hash_i32(hash,hash_type_global_index(module,type->tenum->global_value));
 			hash=hash_i32(hash,type->tenum->nconstructs);
-			for(int j=0;j<type->tenum->nconstructs;j++) { hl_enum_construct *c=type->tenum->constructs+j; hash=hash_i32(hash,hash_type_string_index(code,c->name)); hash=hash_i32(hash,c->nparams); for(int k=0;k<c->nparams;k++) hash=hash_i32(hash,hash_type_index(code,c->params[k])); }
+			for(int j=0;j<type->tenum->nconstructs;j++) { hl_enum_construct *c=type->tenum->constructs+j; hash=hash_i32(hash,hash_type_string_index(code,&strings,c->name)); hash=hash_i32(hash,c->nparams); for(int k=0;k<c->nparams;k++) hash=hash_i32(hash,hash_type_index(code,c->params[k])); }
 			break;
 		default:
 			break;
 		}
 	}
+	type_string_index_free(&strings);
 	return hash;
 }
 
@@ -775,7 +822,9 @@ static bool validate_patch_types( hl_module *m, hl_patch *patch, int string_coun
 			if(type->data.name<0||type->data.name>=string_count){*error="Invalid appended abstract name";return false;}
 		}else if(type->tag==HREF||type->tag==HNULL){
 			if(type->data.parameter<0||type->data.parameter>=total){*error="Invalid appended parameterized type reference";return false;}
-		}else if(type->tag<HVOID||type->tag>HGUID||type->tag==HOBJ||type->tag==HVIRTUAL||type->tag==HENUM||type->tag==HPACKED){
+		}else if(type->tag<HVOID||type->tag>HGUID||type->tag==HOBJ||type->tag==HVIRTUAL||type->tag==HENUM||type->tag==HPACKED||type->tag==HSTRUCT||type->tag==HMETHOD){
+			/* HLP carries no layout or signature for these, so staging would leave them half built: a struct without object
+			   data, which the next patch's type hash dereferences, or a method without a signature. */
 			*error="Unsupported HLP type";return false;
 		}
 	}
