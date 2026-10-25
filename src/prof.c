@@ -354,8 +354,15 @@ static void thread_exited( prof_thread *t );
    hl_prof_thread_exit: the system tells the profiler when it exits instead, so its state and chunk are not kept forever. */
 #ifdef HL_WIN
 static DWORD exit_slot = FLS_OUT_OF_INDEXES;
-static void WINAPI on_thread_exit( void *t ) { if( t ) thread_exited((prof_thread*)t); }
-#	define WATCH_EXIT(t) do { if( exit_slot == FLS_OUT_OF_INDEXES ) exit_slot = FlsAlloc(on_thread_exit); \
+static BOOLEAN (NTAPI *dll_shutdown_in_progress)( void );
+/* During process shutdown the consumer may have been killed holding the registry lock: the state is left, as the process
+   is going away. */
+static void WINAPI on_thread_exit( void *t ) {
+	if( t && !(dll_shutdown_in_progress && dll_shutdown_in_progress()) ) thread_exited((prof_thread*)t);
+}
+#	define WATCH_EXIT(t) do { if( exit_slot == FLS_OUT_OF_INDEXES ) { \
+			*(FARPROC*)&dll_shutdown_in_progress = GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"RtlDllShutdownInProgress"); \
+			exit_slot = FlsAlloc(on_thread_exit); } \
 		if( exit_slot != FLS_OUT_OF_INDEXES ) FlsSetValue(exit_slot,(t)); } while(0)
 #	define UNWATCH_EXIT() do { if( exit_slot != FLS_OUT_OF_INDEXES ) FlsSetValue(exit_slot,NULL); } while(0)
 #else
