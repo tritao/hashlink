@@ -37,6 +37,9 @@ static boundary_desc descs[MAX_HOOKS];
 static int desc_count;
 static unsigned char *stubs;
 static SRWLOCK hook_lock = SRWLOCK_INIT;
+/* Guards the stub table alone, and is never held across a call into the loader: a Vulkan lookup, which may run under the
+   loader lock, takes only this one, while refresh holds hook_lock across module enumeration. */
+static SRWLOCK stub_lock = SRWLOCK_INIT;
 static bool installed;
 static bool hook_imports, hook_dxgi, hook_d3d11, hook_vulkan;
 static char *extra_imports;
@@ -76,21 +79,26 @@ static bool is_stub( void *p ) {
 	return stubs && (unsigned char*)p >= stubs && (unsigned char*)p < stubs + MAX_HOOKS * STUB_SIZE;
 }
 
-/* The stub calling real through the thunk, made on first use. Takes hook_lock. */
-static void *stub_for( void *real, const char *name ) {
+static char *copy_name( const char *a, const char *b );
+
+/* The stub calling real through the thunk, made on first use and named prefix + name (name alone, not copied, when prefix
+   is NULL). */
+static void *stub_for( void *real, const char *prefix, const char *name ) {
 	unsigned char *s;
 	if( real == NULL || is_stub(real) ) return real;
+	AcquireSRWLockExclusive(&stub_lock);
 	for(int i=0;i<desc_count;i++)
-		if( descs[i].real == real ) return stubs + i * STUB_SIZE;
-	if( desc_count == MAX_HOOKS ) return real;
+		if( descs[i].real == real ) { ReleaseSRWLockExclusive(&stub_lock); return stubs + i * STUB_SIZE; }
+	if( desc_count == MAX_HOOKS ) { ReleaseSRWLockExclusive(&stub_lock); return real; }
 	descs[desc_count].real = real;
-	descs[desc_count].name = name;
+	descs[desc_count].name = prefix ? copy_name(prefix,name) : name;
 	s = stubs + desc_count * STUB_SIZE;
 	/* mov r10, desc; jmp [rip]; dq hl_prof_boundary_thunk */
 	s[0] = 0x49; s[1] = 0xBA; *(boundary_desc**)(s + 2) = descs + desc_count;
 	s[10] = 0xFF; s[11] = 0x25; *(int*)(s + 12) = 0; *(void**)(s + 16) = (void*)hl_prof_boundary_thunk;
 	FlushInstructionCache(GetCurrentProcess(),s,STUB_SIZE);
 	desc_count++;
+	ReleaseSRWLockExclusive(&stub_lock);
 	return s;
 }
 
@@ -166,7 +174,7 @@ static void hook_export( const char *module, const char *display, const char *na
 	n = dot ? (size_t)(dot - display) : strlen(display);
 	if( n > sizeof(prefix) - 2 ) n = sizeof(prefix) - 2;
 	memcpy(prefix,display,n); prefix[n] = '!'; prefix[n + 1] = 0;
-	add_import_hook(real,stub_for(real,copy_name(prefix,name)));
+	add_import_hook(real,stub_for(real,prefix,name));
 }
 
 /* A kernel32 function is also looked up in kernelbase, which modules importing it through an API set bind to. */
@@ -231,9 +239,7 @@ static vk_function vk_hooked( vk_function f, const char *name ) {
 	if( f == NULL || name == NULL ) return f;
 	for(int i=0;i<count;i++)
 		if( strcmp(name,vulkan_functions[i]) == 0 ) {
-			AcquireSRWLockExclusive(&hook_lock);
-			stub = stub_for((void*)f,copy_name("vulkan!",vulkan_functions[i]));
-			ReleaseSRWLockExclusive(&hook_lock);
+			stub = stub_for((void*)f,"vulkan!",vulkan_functions[i]);
 			return (vk_function)stub;
 		}
 	return f;
@@ -254,7 +260,7 @@ static vk_function __stdcall hook_vkGetDeviceProcAddr( void *device, const char 
 static void patch_vtable( void **vtable, int index, const char *name ) {
 	void *stub;
 	if( is_stub(vtable[index]) ) return;
-	stub = stub_for(vtable[index],name);
+	stub = stub_for(vtable[index],NULL,name);
 	if( stub != vtable[index] ) write_pointer(vtable + index,stub);
 }
 
@@ -422,7 +428,7 @@ static void refresh( void ) {
 			char *bang = strchr(item,'!');
 			if( bang == NULL ) continue;
 			*bang = 0;
-			add_named_import(item,_strdup(bang + 1));
+			add_named_import(item,bang + 1);
 		}
 		free(list);
 	}
