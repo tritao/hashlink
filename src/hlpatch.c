@@ -744,6 +744,13 @@ static bool validate_function( hl_module *m, hl_patch *patch, patch_layout *layo
 		case ORet:if(!valid_reg(f,p[0])){*error="Invalid return register";return false;}break;
 		case OThrow:case ORethrow:if(!valid_reg(f,p[0])){*error="Invalid throw register";return false;}break;
 		case ONullCheck:if(!valid_reg(f,p[0])){*error="Invalid null check register";return false;}break;
+		// Operations on registers alone: the JIT compiles them in a patch as it does at load.
+		case OIncr:case ODecr:
+			if(!valid_reg(f,p[0])){*error="Invalid register operand";return false;}break;
+		case ONeg:case ONot:case OGetType:case OGetTID:case ORef:case OUnref:case OSetref:case ORefData:
+			if(!valid_reg(f,p[0])||!valid_reg(f,p[1])){*error="Invalid register operands";return false;}break;
+		case OUDiv:case OUMod:case OGetI8:case OGetI16:case OGetMem:case OSetI8:case OSetI16:case OSetMem:case ORefOffset:
+			if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||!valid_reg(f,p[2])){*error="Invalid register operands";return false;}break;
 		case OTrap:
 			if(!valid_reg(f,p[0])||p[1]<0||i+1+p[1]>=f->instruction_count){*error="Invalid trap operands";return false;}
 			break;
