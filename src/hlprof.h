@@ -45,6 +45,7 @@ typedef struct {
 	unsigned long long stalls;
 	unsigned long long stall_ticks;
 	unsigned long long drained_bytes;
+	unsigned long long lost_records;
 } hl_prof_stats;
 
 /* Nonzero while a session records. Probes test it before writing anything. */
@@ -65,6 +66,10 @@ HL_API bool hl_prof_start( unsigned int pool_mib );
    what they drop in PROFILE_EVENT_DROPPED_CALLS events. 0 keeps every call. A dropped call's time stays in its caller. */
 HL_API void hl_prof_set_min_call_ns( unsigned int ns );
 HL_API void hl_prof_stop( void );
+/* While on (calls nest), a record the calling thread writes when the pool is empty is lost and counted in
+   hl_prof_stats.lost_records, instead of waiting for the consumer to free a chunk. For the consumer thread itself, and
+   around writes made holding a lock the consumer takes. */
+HL_API void hl_prof_no_wait( bool on );
 /* Marks the start of a runtime startup phase on the calling thread (the previous one ends there); NULL marks the program's
    entry point and ends them. A session started in between records them in a PROFILE_EVENT_STARTUP event. */
 HL_API void hl_prof_startup_phase( const char *name );
@@ -84,7 +89,8 @@ HL_API void hl_prof_get_stats( hl_prof_stats *stats );
 /* Copies the ids of up to max threads that recorded in the open session and have not exited; returns how many. */
 HL_API int hl_prof_thread_ids( unsigned int *tids, int max );
 
-/* The calling thread is exiting: its remaining records are drained and its state freed. */
+/* The calling thread is exiting: its remaining records are drained and its state freed. Threads the runtime does not
+   register are noticed when they exit without it. */
 HL_API void hl_prof_thread_exit( void );
 
 /* Writers. Each records on the calling thread and does nothing while no session records. */

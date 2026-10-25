@@ -312,6 +312,9 @@ static unsigned int session_id;
 static volatile unsigned long long stall_count;
 static volatile unsigned long long stall_ticks;
 static unsigned long long drained_bytes;
+static volatile unsigned long long lost_records;
+/* Nonzero while the calling thread must not wait for the consumer to free a chunk (see hl_prof_no_wait). */
+static HL_THREAD_VAR int no_wait_depth;
 /* Calls shorter than this are dropped as they exit (0 keeps every call). Set from min_call_ns when a session starts. */
 static unsigned int min_call_ns;
 static unsigned long long min_call_ticks;
@@ -343,6 +346,25 @@ static void thread_reset( prof_thread *t ) {
 	t->session = session_id;
 }
 
+static void thread_exited( prof_thread *t );
+
+/* A thread the runtime does not know about (a native thread recording through _penter or a boundary hook) never calls
+   hl_prof_thread_exit: the system tells the profiler when it exits instead, so its state and chunk are not kept forever. */
+#ifdef HL_WIN
+static DWORD exit_slot = FLS_OUT_OF_INDEXES;
+static void WINAPI on_thread_exit( void *t ) { if( t ) thread_exited((prof_thread*)t); }
+#	define WATCH_EXIT(t) do { if( exit_slot == FLS_OUT_OF_INDEXES ) exit_slot = FlsAlloc(on_thread_exit); \
+		if( exit_slot != FLS_OUT_OF_INDEXES ) FlsSetValue(exit_slot,(t)); } while(0)
+#	define UNWATCH_EXIT() do { if( exit_slot != FLS_OUT_OF_INDEXES ) FlsSetValue(exit_slot,NULL); } while(0)
+#else
+static pthread_key_t exit_key;
+static bool exit_key_ready;
+static void on_thread_exit( void *t ) { if( t ) thread_exited((prof_thread*)t); }
+#	define WATCH_EXIT(t) do { if( !exit_key_ready ) exit_key_ready = pthread_key_create(&exit_key,on_thread_exit) == 0; \
+		if( exit_key_ready ) pthread_setspecific(exit_key,(t)); } while(0)
+#	define UNWATCH_EXIT() do { if( exit_key_ready ) pthread_setspecific(exit_key,NULL); } while(0)
+#endif
+
 /* The calling thread's state for the current session: created on the thread's first record, reset when a new session
    begins. Slow path only. */
 static prof_thread *thread_state( void ) {
@@ -356,6 +378,7 @@ static prof_thread *thread_state( void ) {
 		t->next = threads;
 		threads = t;
 		prof_current = t;
+		WATCH_EXIT(t);
 	}
 	if( t->session != session_id ) thread_reset(t);
 	REGISTRY_UNLOCK();
@@ -371,14 +394,17 @@ static void yield_thread( void ) {
 }
 
 /* Moves the thread to a fresh chunk with room for bytes. When the pool is empty the thread waits for the consumer and the
-   wait is recorded as a STALL. Returns NULL when recording stopped meanwhile. */
-static unsigned char *next_chunk( prof_thread *t, unsigned int bytes ) {
+   wait is recorded as a STALL; without wait, or once recording stopped, the record is lost and NULL returned. */
+static unsigned char *next_chunk( prof_thread *t, unsigned int bytes, bool wait ) {
 	unsigned long long stall_started = 0;
 	unsigned char *p;
 	int index = pool_pop();
 	if( bytes + 16 > HL_PROF_CHUNK_SIZE ) return NULL;
 	while( index < 0 ) {
-		if( !hl_prof_on ) return NULL;
+		if( !wait || !hl_prof_on ) {
+			FETCH_ADD64(&lost_records,1);
+			return NULL;
+		}
 		if( !stall_started ) stall_started = now_ticks();
 		yield_thread();
 		index = pool_pop();
@@ -420,7 +446,7 @@ static FORCE_INLINE unsigned char *reserve( prof_thread **out, unsigned int byte
 	p = t->cur;
 	/* A chunk is never filled to its last byte, so a published position always lies inside its own chunk; a position at
 	   the end would equal the start of the chunk after it in the pool. */
-	if( p == NULL || (size_t)(t->end - p) <= bytes ) p = next_chunk(t,bytes);
+	if( p == NULL || (size_t)(t->end - p) <= bytes ) p = next_chunk(t,bytes,no_wait_depth == 0);
 	*out = t;
 	return p;
 }
@@ -435,13 +461,14 @@ static FORCE_INLINE unsigned long long head( int kind ) {
 /* ---- dropped calls ---------------------------------------------------------------------------------------------- */
 
 /* Writes the thread's dropped-call counts as one PROFILE_EVENT_DROPPED_CALLS event (entries of u64 key, u32 count, u32 0)
-   and clears them. The producer calls it, or the consumer once the producer can no longer write (stop, thread exit). */
-static void write_dropped( prof_thread *t ) {
+   and clears them. The producer calls it, or another thread once the producer can no longer write (stop, thread exit),
+   which must not wait for a chunk. */
+static void write_dropped( prof_thread *t, bool wait ) {
 	unsigned int length = (unsigned int)t->dropped_used * 16, bytes = 16 + length, n = 0;
 	unsigned char *p;
 	if( !t->dropped_used ) return;
 	p = t->cur;
-	if( p == NULL || (size_t)(t->end - p) <= bytes ) p = next_chunk(t,bytes);
+	if( p == NULL || (size_t)(t->end - p) <= bytes ) p = next_chunk(t,bytes,wait);
 	if( p != NULL ) {
 		((unsigned long long*)p)[0] = head(HL_PROF_EVENT);
 		((unsigned long long*)p)[1] = (unsigned long long)PROFILE_EVENT_DROPPED_CALLS | ((unsigned long long)length << 32);
@@ -464,13 +491,13 @@ static void count_dropped( prof_thread *t, unsigned long long key ) {
 	for(int probe=0;probe<DROPPED_PROBES;probe++) {
 		prof_dropped *d = t->dropped + ((slot + probe) & (DROPPED_SLOTS - 1));
 		if( d->key == key ) {
-			if( ++d->count == 0xFFFFFFFFu ) write_dropped(t);
+			if( ++d->count == 0xFFFFFFFFu ) write_dropped(t,no_wait_depth == 0);
 			return;
 		}
 		if( d->key == 0 ) { free_slot = d; break; }
 	}
 	if( free_slot == NULL ) {
-		write_dropped(t);
+		write_dropped(t,no_wait_depth == 0);
 		free_slot = t->dropped + slot;
 	}
 	free_slot->key = key;
@@ -478,9 +505,10 @@ static void count_dropped( prof_thread *t, unsigned long long key ) {
 	t->dropped_used++;
 }
 
-/* Publishes what the thread holds back and writes its dropped-call counts, once it no longer records. */
+/* Publishes what the thread holds back and writes its dropped-call counts, once it no longer records. Never waits: it runs
+   with the registry locked, which the consumer needs to free a chunk. */
 static void release_thread( prof_thread *t ) {
-	write_dropped(t);
+	write_dropped(t,false);
 	if( t->held ) {
 		t->held = NULL;
 		STORE_RELEASE_PTR(&t->pos,t->cur);
@@ -674,7 +702,7 @@ HL_PRIM void hl_prof_frame( int kind, unsigned int frame_set ) {
 	((unsigned long long*)p)[1] = frame_set;
 	COMMIT(t,p,16);
 	/* A frame's dropped calls are counted within it. */
-	write_dropped(t);
+	write_dropped(t,no_wait_depth == 0);
 }
 
 HL_PRIM void hl_prof_counter( const void *name, int units, int encoding, double value ) {
@@ -717,6 +745,24 @@ static volatile long recording_toggle;
 
 HL_PRIM void hl_prof_set_min_call_ns( unsigned int ns ) {
 	min_call_ns = ns;
+}
+
+HL_PRIM void hl_prof_no_wait( bool on ) {
+	no_wait_depth += on ? 1 : -1;
+}
+
+/* One pause, resume or stop at a time: so the RECORDING events alternate, and a resume cannot turn recording back on
+   after a stop. */
+static void toggle_lock( void ) {
+#ifdef _MSC_VER
+	while( _InterlockedCompareExchange(&recording_toggle,1,0) != 0 ) yield_thread();
+#else
+	while( !__sync_bool_compare_and_swap(&recording_toggle,0,1) ) yield_thread();
+#endif
+}
+
+static void toggle_unlock( void ) {
+	STORE_RELEASE_INT(&recording_toggle,0);
 }
 
 /* Startup phases: the runtime's work before the program's entry point, which a session started then replays as one
@@ -783,6 +829,7 @@ HL_PRIM bool hl_prof_start( unsigned int pool_mib ) {
 	stall_count = 0;
 	stall_ticks = 0;
 	drained_bytes = 0;
+	lost_records = 0;
 	base_ticks = now_ticks();
 	startup = !startup_closed && startup_count > 0;
 	if( startup ) {
@@ -800,12 +847,7 @@ HL_PRIM bool hl_prof_start( unsigned int pool_mib ) {
 HL_PRIM bool hl_prof_set_recording( bool on ) {
 	unsigned char payload[4] = { 0, 0, 0, 0 };
 	bool ok = true;
-	/* One toggle at a time, so the RECORDING events alternate. */
-#ifdef _MSC_VER
-	while( _InterlockedCompareExchange(&recording_toggle,1,0) != 0 ) {}
-#else
-	while( !__sync_bool_compare_and_swap(&recording_toggle,0,1) ) {}
-#endif
+	toggle_lock();
 	if( !session_open ) ok = false;
 	else if( on != (hl_prof_on != 0) ) {
 		if( !on ) {
@@ -818,7 +860,7 @@ HL_PRIM bool hl_prof_set_recording( bool on ) {
 		}
 		recording_changes++;
 	}
-	recording_toggle = 0;
+	toggle_unlock();
 	return ok;
 }
 
@@ -844,7 +886,8 @@ DEFINE_PRIM(_BOOL, prof_recording_get, _NO_ARG);
 
 HL_PRIM void hl_prof_stop( void ) {
 	prof_thread *t;
-	if( !session_open ) return;
+	toggle_lock();
+	if( !session_open ) { toggle_unlock(); return; }
 	session_open = 0;
 	if( hl_prof_on ) {
 		STORE_RELEASE_INT(&hl_prof_on,0);
@@ -861,6 +904,7 @@ HL_PRIM void hl_prof_stop( void ) {
 	for(t=threads;t;t=t->next)
 		if( t->session == session_id && !t->exited ) release_thread(t);
 	REGISTRY_UNLOCK();
+	toggle_unlock();
 }
 
 /* Hands a thread's new records to fn. Consumer only, with the registry locked. */
@@ -928,6 +972,7 @@ HL_PRIM void hl_prof_get_stats( hl_prof_stats *stats ) {
 	stats->stalls = stall_count;
 	stats->stall_ticks = stall_ticks;
 	stats->drained_bytes = drained_bytes;
+	stats->lost_records = lost_records;
 }
 
 HL_PRIM int hl_prof_thread_ids( unsigned int *tids, int max ) {
@@ -943,10 +988,15 @@ HL_PRIM int hl_prof_thread_ids( unsigned int *tids, int max ) {
 HL_PRIM void hl_prof_thread_exit( void ) {
 	prof_thread *t = prof_current;
 	if( t == NULL ) return;
+	UNWATCH_EXIT();
+	thread_exited(t);
+}
+
+static void thread_exited( prof_thread *t ) {
 	prof_current = NULL;
 	REGISTRY_LOCK();
-	if( hl_prof_on && t->session == session_id ) {
-		/* The consumer drains what is left, then frees it. */
+	if( t->session == session_id && t->chunk >= 0 ) {
+		/* The consumer drains what is left, then frees it: also while paused, and after a stop until the final drain. */
 		release_thread(t);
 		STORE_RELEASE_INT(&t->exited,1);
 	} else {

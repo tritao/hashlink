@@ -210,7 +210,10 @@ static void stream_native_symbol_locked( void *address, double time, int tid );
 static void stream_native_symbol( void *address, double time, int tid ) {
 	if( native_lock == NULL ) return;
 	hl_mutex_acquire(native_lock);
+	/* The consumer takes native_lock to name native keys: records written holding it must not wait for the consumer. */
+	hl_prof_no_wait(true);
 	stream_native_symbol_locked(address,time,tid);
+	hl_prof_no_wait(false);
 	hl_mutex_release(native_lock);
 }
 

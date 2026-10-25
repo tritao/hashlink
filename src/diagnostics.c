@@ -500,12 +500,13 @@ static void push_threads( hl_socket *socket, bool force ) {
 }
 
 static void push_stats( hl_socket *socket ) {
-	unsigned char payload[40];
+	unsigned char payload[48];
 	hl_prof_stats stats;
 	hl_prof_get_stats(&stats);
 	write_u32(payload,(unsigned int)stats.chunks_in_use); write_u32(payload + 4,(unsigned int)stats.chunk_count);
 	write_u64(payload + 8,stats.stalls); write_u64(payload + 16,stats.stall_ticks);
 	write_u64(payload + 24,session.raw_bytes); write_u64(payload + 32,session.sent_bytes);
+	write_u64(payload + 40,stats.lost_records);
 	push(socket,DIAG_PUSH_STATS,payload,sizeof(payload));
 }
 
@@ -716,6 +717,8 @@ static void diagnostics_loop( void *_ ) {
 	hl_get_thread()->flags |= HL_THREAD_INVISIBLE;
 	hl_prof_boundary_ignore_thread();
 	hl_thread_set_name(hl_thread_current(),"hl.diagnostics");
+	/* The consumer frees chunks: its own records never wait for one. */
+	hl_prof_no_wait(true);
 	while( diag_transport ) {
 		hl_socket *socket = hl_diag_transport_accept(diag_transport);
 		if( socket == NULL ) break;

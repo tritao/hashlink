@@ -447,7 +447,7 @@ static int record_session( socket_t sock,const char *output_path,uint32_t pid,in
 	uint64_t frames=0,bytes=0,raw=0,last_raw=0;double started=monotime(),next_report=started+interval/1000.0,stop_deadline=0,last_report=started;
 	/* Duration counts recorded time: a paused session's clock stands still. */
 	int recording=1;double recording_since=started,recorded_seconds=0;uint64_t dropped=0;
-	FILE *out=NULL;unsigned char file_header[24];uint32_t chunks_in_use=0,chunk_count=0;uint64_t stalls=0;
+	FILE *out=NULL;unsigned char file_header[24];uint32_t chunks_in_use=0,chunk_count=0;uint64_t stalls=0,lost=0;
 	if(output_path){out=fopen(output_path,"wb");if(!out){fprintf(stderr,"Could not open capture file %s\n",output_path);return 1;}setvbuf(out,NULL,_IOFBF,1<<20);
 		memcpy(file_header,"HLPC",4);file_header[4]=2;file_header[5]=0;file_header[6]=24;file_header[7]=0;put32(file_header+8,0);put32(file_header+12,pid);put32(file_header+16,(uint32_t)rate);put32(file_header+20,(uint32_t)sources);
 		if(fwrite(file_header,1,24,out)!=24)goto done;}
@@ -478,7 +478,7 @@ static int record_session( socket_t sock,const char *output_path,uint32_t pid,in
 			if(flags&F_ERROR){fprintf(stderr,"The runtime refused request type %u\n",type);if(type==P_START)goto done;continue;}
 			if(!(flags&F_PUSH))continue;
 			if(type==PUSH_DATA&&size>=16)raw+=u32(payload+8);
-			if(type==PUSH_STATS&&size>=16){chunks_in_use=u32(payload);chunk_count=u32(payload+4);stalls=u64(payload+8);}
+			if(type==PUSH_STATS&&size>=16){chunks_in_use=u32(payload);chunk_count=u32(payload+4);stalls=u64(payload+8);if(size>=48)lost=u64(payload+40);}
 			if(type==PUSH_RECORDING&&size>=4&&(u32(payload)!=0)!=recording){double at=monotime();
 				if(recording)recorded_seconds+=at-recording_since;else recording_since=at;
 				recording=u32(payload)!=0;printf("recording %s\n",recording?"resumed":"paused");fflush(stdout);}
@@ -493,6 +493,7 @@ static int record_session( socket_t sock,const char *output_path,uint32_t pid,in
 	if(!ended)fprintf(stderr,"warning: the session ended without its final frame; the capture is partial\n");
 	printf("recorded %.1f MiB of records in %llu frames\n",raw/1048576.0,(unsigned long long)frames);
 	if(dropped)printf("dropped %.1f MiB pushed after the size limit\n",dropped/1048576.0);
+	if(lost)fprintf(stderr,"warning: the runtime lost %llu records written while its buffers were full\n",(unsigned long long)lost);
 	code=0;
 done:
 	free(payload);if(out&&fclose(out)!=0){fprintf(stderr,"Capture finalization failed\n");code=1;}
