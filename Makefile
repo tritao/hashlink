@@ -288,7 +288,7 @@ $(HLC): $(BOOT) $(LIBHL)
 $(HL) $(HLC):
 	$(CC) $(LDFLAGS) $(USE_LIBHL_LDFLAGS) $^ $($@_LDLIBS) -o $@
 
-$(HLPROF_LIVE): tools/hlprof-live.c tools/pftrace.c include/lz4/lz4.c
+$(HLPROF_LIVE): tools/hlprof-live.c tools/pftrace.c tools/elf_symbols.c include/lz4/lz4.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $^ $(HLPROF_LIVE_LDLIBS) -o $@
 
 %.hdll: HDLL_LINK = $(CC) $(LDFLAGS)

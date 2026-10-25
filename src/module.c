@@ -477,26 +477,26 @@ static void **module_find_frame_record( hl_module **modules, int module_count, v
 }
 
 /*
-	Captures the JIT frames of a thread that was stopped by the profiler, from the registers it stopped with.
+	Captures the frames of a thread that was stopped by the profiler, from the registers it stopped with.
 
 	The scan in hl_module_capture_stack_range reads every word of the stack, which for a deep UI build is tens of
 	kilobytes while the thread is held stopped, and it reports stale (frame, return address) pairs left behind by calls
-	that already returned. JIT functions keep a frame-pointer chain, so when the thread stopped in JIT code the live frames
-	are found by following it.
+	that already returned. JIT functions keep a frame-pointer chain, so the live frames are found by following it.
 
-	Native code is the difficulty. It may not keep a chain (and may use the frame-pointer register for something else),
-	so a chain that runs into a native frame between two JIT frames is continued from the nearest frame record found just
-	above, which is a short, bounded read because native frames are small. Build native libraries with
-	-fno-omit-frame-pointer to get every frame.
+	Every return address on the chain is captured, with its kind in `kinds`: a JIT frame, or a native candidate that the
+	caller checks is code once the thread runs again (the check may take the loader lock, which the stopped thread could
+	hold). Native code built with -fno-omit-frame-pointer keeps the chain, so its frames between two JIT frames appear.
+	Native code built without may use the register for something else; a chain that breaks there is continued from the
+	nearest JIT frame record found just above, a short, bounded read because native frames are small, and the frames
+	skipped are marked with one gap.
 */
-int hl_module_capture_stack_from_frame( void *stack_top, void **stack_ptr, void **frame_ptr, bool jit_leaf, void **out, int size ) {
+int hl_module_capture_stack_from_frame( void *stack_top, void **stack_ptr, void **frame_ptr, void **out, unsigned char *kinds, int size ) {
 	int module_count;
 	hl_module **modules = hl_module_registry_snapshot(&module_count);
 	int count = 0;
 	void **fp = NULL;
 	bool usable = frame_ptr && frame_ptr >= stack_ptr && (void*)frame_ptr < stack_top && ((uintptr_t)frame_ptr & (sizeof(void*)-1)) == 0
 		&& (frame_ptr[0] == NULL || (frame_ptr[0] > (void*)frame_ptr && frame_ptr[0] <= stack_top));
-	(void)jit_leaf;
 	{
 		// In JIT code the register is the frame pointer. Stopped in native code. If it keeps frame pointers, the register still heads a chain whose first record returns
 		// into the JIT function that called it. If not, the register is the JIT caller's own (that one frame is then
@@ -505,21 +505,27 @@ int hl_module_capture_stack_from_frame( void *stack_top, void **stack_ptr, void 
 		// their stale contents name functions that are not running.
 		fp = usable ? frame_ptr : module_find_frame_record(modules,module_count,stack_ptr,stack_top);
 	}
-	while( fp && (void*)fp < stack_top && (!out || count < size) ) {
+	while( fp && (void*)(fp + 2) <= stack_top && count < size ) {
 		void *lr = fp[1];
 		void *next_fp = fp[0];
-		if( module_reportable_address(modules,module_count,lr) ) {
-			if( out ) out[count] = lr;
+		if( lr ) {
+			out[count] = lr;
+			kinds[count] = module_reportable_address(modules,module_count,lr) ? HL_CAPTURE_JIT : HL_CAPTURE_NATIVE;
 			count++;
 		}
 		if( next_fp == NULL || next_fp >= stack_top ) break; // the outermost frame
-		if( next_fp <= (void*)fp || ((uintptr_t)next_fp & (sizeof(void*)-1)) != 0 )
+		if( next_fp <= (void*)fp || ((uintptr_t)next_fp & (sizeof(void*)-1)) != 0 ) {
 			fp = module_find_frame_record(modules,module_count,fp + 2,stack_top);
-		else
+			if( fp && count < size ) {
+				out[count] = NULL;
+				kinds[count] = HL_CAPTURE_GAP;
+				count++;
+			}
+		} else
 			fp = (void**)next_fp;
 	}
 	hl_module_registry_snapshot_free(modules,module_count);
-	return out && count > size ? size : count;
+	return count;
 }
 
 static int module_capture_stack( void **stack, int size ) {

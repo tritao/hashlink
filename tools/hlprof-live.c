@@ -28,6 +28,7 @@ typedef int socket_t;
 enum { SVC_PROFILE=2, P_STATUS=1, P_CONFIGURE=2, P_READ=3, P_METADATA=4 };
 enum { F_RESPONSE=1, F_ERROR=2, CAP_PROFILE=1, CAP_SYMBOLS=2 };
 #include "../src/profile_events.h"
+#include "elf_symbols.h"
 #include "pftrace.h"
 #include "../include/lz4/lz4.h"
 
@@ -132,9 +133,15 @@ static native_symbol *resolve_native( uint64_t pc ){for(native_symbol *n=native_
 static int add_native( uint64_t pc,uint64_t base,const unsigned char *module,uint32_t module_len,const unsigned char *name,uint32_t name_len ) {
 	native_symbol *n=resolve_native(pc);if(n)return 1;n=(native_symbol*)calloc(1,sizeof(*n));if(!n)return 0;
 	n->module=(char*)malloc((size_t)module_len+1);n->name=(char*)malloc((size_t)name_len+1);if(!n->module||!n->name){free(n->module);free(n->name);free(n);return 0;}
-	memcpy(n->module,module,module_len);n->module[module_len]=0;memcpy(n->name,name,name_len);n->name[name_len]=0;n->pc=pc;n->base=base;n->next=native_symbols;native_symbols=n;return 1;
+	memcpy(n->module,module,module_len);n->module[module_len]=0;memcpy(n->name,name,name_len);n->name[name_len]=0;n->pc=pc;n->base=base;n->next=native_symbols;native_symbols=n;
+	/* The runtime names a function that is not exported by its image, from the image's base: name it from the image's symbol
+	   table when it can be read here. */
+	{const char *file=n->module;for(const char *c=n->module;*c;c++)if(*c=='/'||*c=='\\')file=c+1;
+	uint64_t into=0;const char *function=pc>=base&&!strcmp(n->name,file)?elf_function_name(n->module,pc-base,&into):NULL;
+	if(function){char *named=(char*)malloc(strlen(function)+1);if(named){strcpy(named,function);free(n->name);n->name=named;n->base=pc-into;}}}
+	return 1;
 }
-static void free_native( void ){while(native_symbols){native_symbol *next=native_symbols->next;free(native_symbols->module);free(native_symbols->name);free(native_symbols->file);free(native_symbols);native_symbols=next;}}
+static void free_native( void ){while(native_symbols){native_symbol *next=native_symbols->next;free(native_symbols->module);free(native_symbols->name);free(native_symbols->file);free(native_symbols);native_symbols=next;}elf_symbols_free();}
 static int add_native_location( const unsigned char *payload,uint32_t size ) {
 	if(size<32||u32(payload+28)!=size-32)return 0;
 	native_symbol *n=resolve_native(u64(payload));if(!n||n->file)return 1;
@@ -305,6 +312,20 @@ static void pf_stacks_finish( pf_export *pf ) {
 	for(uint32_t i=0;i<pf->stack_count;i++){pf_stack *st=pf->stacks+i;pf_stack_cut(pf,st,0,st->last+pf->weight_ns/1e9);pf_stack_truncate(st,0);free(st->names);free(st->root);}
 	free(pf->stacks);pf->stacks=NULL;pf->stack_count=pf->stack_capacity=0;
 }
+/* Whether a native module is HashLink's own launcher or runtime library. */
+static int runtime_image( const char *module ) {
+	const char *base=module;for(const char *c=module;*c;c++)if(*c=='/'||*c=='\\')base=c+1;
+	return !strcmp(base,"hl")||!strcmp(base,"hl.exe")||!strncmp(base,"libhl.",6);
+}
+/* A sample's frame count without the root-most frames in HashLink's launcher and runtime (main, hl_dyn_call, the thread
+   entry): every Haxe stack starts with them and they say nothing about the program. Native frames of the program's own,
+   such as a native thread's loop, are kept. */
+static uint32_t launcher_trimmed( symbols *s,const unsigned char *leaf_first,uint32_t frames ) {
+	while(frames>1){uint64_t pc=u64(leaf_first+(frames-1)*8);native_symbol *n;
+		if(resolve(s,pc)||(n=resolve_native(pc))==NULL||!runtime_image(n->module))break;
+		frames--;}
+	return frames;
+}
 static int pf_sample( pf_export *pf,symbols *s,double time,uint32_t tid,const unsigned char *leaf_first,uint32_t frames,int gc_stop ) {
 	uint64_t ts=pf_time(pf,time);
 	if(frames>pf->frame_capacity){uint64_t *next=(uint64_t*)realloc(pf->frames,sizeof(uint64_t)*frames);if(!next)return 0;pf->frames=next;pf->frame_capacity=frames;}
@@ -356,11 +377,11 @@ static int consume( symbols *s,unsigned char *pending,size_t *length,uint64_t *s
 			if(leaf)leaf->self++;
 			if(leaf_line)leaf_line->self++;
 			if(raw_leaf&&frames){if(raw_symbol){printf("leaf_pc=0x%llx offset=0x%llx function=%s",(unsigned long long)leaf_pc,(unsigned long long)(leaf_pc-raw_symbol->start),raw_symbol->name);if(raw_line)printf(" opcode=%u opcode_kind=%u location=%s:%u",raw_line->opcode_index,raw_line->opcode,raw_line->file,raw_line->line);putchar('\n');}else if(raw_native)printf("leaf_pc=0x%llx offset=0x%llx function=%s module=%s\n",(unsigned long long)leaf_pc,(unsigned long long)(leaf_pc-raw_native->base),raw_native->name,raw_native->module);else printf("leaf_pc=0x%llx offset=? function=[native/unknown]\n",(unsigned long long)leaf_pc);}
-			if(folded_stacks||perfetto){for(uint32_t i=frames;i>0;i--){uint64_t pc=u64(pending+pos+24+(i-1)*8);symbol *x=resolve(s,pc);native_symbol *native=x?NULL:resolve_native(pc);source_line *line=x?resolve_line(x,pc):NULL;char label[1536];const char *name;if(show_lines&&line){snprintf(label,sizeof(label),"%s (%s:%u)",x->name,line->file,line->line);name=label;}else if(native){snprintf(label,sizeof(label),"%s+0x%llx (%s)",native->name,(unsigned long long)(pc-native->base),native->module);name=label;}else name=x?x->name:"[unknown]";size_t n=strlen(name),need=stack_len+n+(stack_len?1:0)+1;if(need>stack_cap){size_t cap=stack_cap?stack_cap*2:256;while(cap<need)cap*=2;char *next=(char*)realloc(stack,cap);if(!next){free(stack);return 0;}stack=next;stack_cap=cap;}if(stack_len)stack[stack_len++]=';';memcpy(stack+stack_len,name,n);stack_len+=n;stack[stack_len]=0;}}
+			if(folded_stacks||perfetto){for(uint32_t i=launcher_trimmed(s,pending+pos+24,frames);i>0;i--){uint64_t pc=u64(pending+pos+24+(i-1)*8);symbol *x=resolve(s,pc);native_symbol *native=x?NULL:resolve_native(pc);source_line *line=x?resolve_line(x,pc):NULL;char label[1536];const char *name;if(show_lines&&line){snprintf(label,sizeof(label),"%s (%s:%u)",x->name,line->file,line->line);name=label;}else if(native){if(pc==native->base&&native->module[0]=='[')snprintf(label,sizeof(label),"%s",native->name);else snprintf(label,sizeof(label),"%s+0x%llx (%s)",native->name,(unsigned long long)(pc-native->base),native->module);name=label;}else name=x?x->name:"[unknown]";size_t n=strlen(name),need=stack_len+n+(stack_len?1:0)+1;if(need>stack_cap){size_t cap=stack_cap?stack_cap*2:256;while(cap<need)cap*=2;char *next=(char*)realloc(stack,cap);if(!next){free(stack);return 0;}stack=next;stack_cap=cap;}if(stack_len)stack[stack_len++]=';';memcpy(stack+stack_len,name,n);stack_len+=n;stack[stack_len]=0;}}
 			if(folded_stacks&&stack&&!folded_add(folded_stacks,stack)){free(stack);return 0;}
 			if(perfetto){perfetto_begin_event(perfetto,perfetto_first);fputs("{\"ph\":\"i\",\"s\":\"t\",\"cat\":\"hl.sample\",\"name\":",perfetto);json_string(perfetto,leaf?leaf->name:native_leaf?native_leaf->name:"sample");fprintf(perfetto,",\"pid\":%u,\"tid\":%u,\"ts\":%.3f,\"args\":{\"stack\":",pid,tid,(event_time-*time_origin)*1000000.0);json_string(perfetto,stack?stack:"");fprintf(perfetto,",\"gc_stop\":%s",(pending[pos+5]&1)?"true":"false");if(leaf_line){fputs(",\"file\":",perfetto);json_string(perfetto,leaf_line->file);fprintf(perfetto,",\"line\":%u",leaf_line->line);}fputs("}}",perfetto);if(pending[pos+5]&1){perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"i\",\"s\":\"t\",\"cat\":\"hl.gc\",\"name\":\"GC stop sample\",\"pid\":%u,\"tid\":%u,\"ts\":%.3f}",pid,tid,(event_time-*time_origin)*1000000.0);}}
 			free(stack);
-			if(pf&&frames&&!pf_sample(pf,s,event_time,tid,pending+pos+24,frames,pending[pos+5]&1))return 0;
+			if(pf&&frames&&!pf_sample(pf,s,event_time,tid,pending+pos+24,launcher_trimmed(s,pending+pos+24,frames),pending[pos+5]&1))return 0;
 		}else if(pending[pos+4]==2){uint32_t tid=u32(pending+pos+16),event_id=u32(pending+pos+20),payload_size=body-20;const unsigned char *payload=pending+pos+24;if(metadata_dirty&&((event_id==PROFILE_EVENT_MODULE_REVISION&&body==32)||(event_id==PROFILE_EVENT_MODULE_LOADED&&body==28)))*metadata_dirty=1;
 			if(event_id==PROFILE_EVENT_NATIVE_SYMBOL&&payload_size>=24){uint32_t module_len=u32(payload+16),name_len=u32(payload+20);if(module_len>payload_size-24||name_len!=payload_size-24-module_len||!add_native(u64(payload),u64(payload+8),payload+24,module_len,payload+24+module_len,name_len))return 0;}
 			if(event_id==PROFILE_EVENT_NATIVE_LOCATION&&!add_native_location(payload,payload_size))return 0;

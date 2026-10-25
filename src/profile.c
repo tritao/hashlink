@@ -40,6 +40,7 @@
 
 #ifdef HL_LINUX
 #include <dlfcn.h>
+#include <link.h>
 #include <semaphore.h>
 #include <signal.h>
 #include <sys/syscall.h>
@@ -68,11 +69,13 @@
 #endif
 
 #define MAX_STACK_SIZE (8 << 20)
+/* The pc a sample holds where the unwinder skipped frames; the exporter names it from its symbol record. */
+#define UNWIND_GAP_PC ((void*)1)
 #define MAX_STACK_COUNT 2048
 
 HL_API double hl_sys_time( void );
 int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out, int size );
-int hl_module_capture_stack_from_frame( void *stack_top, void **stack_ptr, void **frame_ptr, bool jit_leaf, void **out, int size );
+int hl_module_capture_stack_from_frame( void *stack_top, void **stack_ptr, void **frame_ptr, void **out, unsigned char *kinds, int size );
 uchar *hl_module_resolve_symbol_full( void *addr, uchar *out, int *outSize, int **r_debug_addr );
 bool hl_module_is_jit_code( void *addr );
 
@@ -236,9 +239,22 @@ static void stream_native_symbol_locked( void *address, double time, int tid ) {
 	unsigned long long pc = (unsigned long long)(uintptr_t)address;
 	unsigned int slot = (unsigned int)((pc >> 4) & 4095);
 	Dl_info info;
-	if( native_seen[slot] == pc || !dladdr(address,&info) || info.dli_sname == NULL ) return;
+	if( native_seen[slot] == pc ) return;
+	if( address == UNWIND_GAP_PC ) {
+		native_seen[slot] = pc;
+		stream_native_symbol_record(pc,pc,"[profiler]","[unwind gap]",time,tid);
+		return;
+	}
+	if( !dladdr(address,&info) || info.dli_fname == NULL ) return;
 	native_seen[slot] = pc;
-	stream_native_symbol_record(pc,(unsigned long long)(uintptr_t)info.dli_saddr,info.dli_fname ? info.dli_fname : "[native]",info.dli_sname,time,tid);
+	if( info.dli_sname != NULL )
+		stream_native_symbol_record(pc,(unsigned long long)(uintptr_t)info.dli_saddr,info.dli_fname,info.dli_sname,time,tid);
+	else {
+		// Not exported, so dladdr has no name: name it by its image, from whose base the exporter writes the offset, which a
+		// symbolizer can resolve offline.
+		const char *file = strrchr(info.dli_fname,'/');
+		stream_native_symbol_record(pc,(unsigned long long)(uintptr_t)info.dli_fbase,info.dli_fname,file ? file + 1 : info.dli_fname,time,tid);
+	}
 	stream_native_location_record(pc,(unsigned long long)(uintptr_t)info.dli_fbase,0,0,NULL,time,tid);
 #elif defined(HL_WIN)
 	static HANDLE process;
@@ -547,6 +563,72 @@ static struct {
 	double first, last;
 } sampling_cost;
 
+#if defined(HL_LINUX) || defined(HL_MAC)
+/* The kinds of the frames being captured; only the sampler thread uses it. */
+static unsigned char capture_kinds[MAX_STACK_COUNT];
+
+#ifdef HL_LINUX
+/* The executable segments of the loaded images, read with dl_iterate_phdr; only the sampler thread uses them. */
+typedef struct { uintptr_t start, end; } code_range;
+#define MAX_CODE_RANGES 1024
+static code_range code_ranges[MAX_CODE_RANGES];
+static int code_range_count;
+static double code_ranges_read;
+
+static int read_code_ranges( struct dl_phdr_info *info, size_t size, void *unused ) {
+	(void)size; (void)unused;
+	for(int i=0;i<info->dlpi_phnum && code_range_count<MAX_CODE_RANGES;i++) {
+		const ElfW(Phdr) *segment = &info->dlpi_phdr[i];
+		if( segment->p_type != PT_LOAD || !(segment->p_flags & PF_X) ) continue;
+		code_ranges[code_range_count].start = (uintptr_t)(info->dlpi_addr + segment->p_vaddr);
+		code_ranges[code_range_count].end = (uintptr_t)(info->dlpi_addr + segment->p_vaddr + segment->p_memsz);
+		code_range_count++;
+	}
+	return 0;
+}
+
+static bool in_code_range( uintptr_t pc ) {
+	for(int i=0;i<code_range_count;i++)
+		if( pc >= code_ranges[i].start && pc < code_ranges[i].end ) return true;
+	return false;
+}
+#endif
+
+/* Whether a return address found on a frame-pointer chain is in native code, rather than a stale or unrelated value.
+   Takes the loader lock: call it only while no thread is held stopped. */
+static bool native_code_address( void *address, double time ) {
+#ifdef HL_LINUX
+	uintptr_t pc = (uintptr_t)address;
+	if( in_code_range(pc) ) return true;
+	// A library loaded since the segments were read: read them again, at most every 100 ms.
+	if( time - code_ranges_read < 0.1 ) return false;
+	code_ranges_read = time;
+	code_range_count = 0;
+	dl_iterate_phdr(read_code_ranges,NULL);
+	return in_code_range(pc);
+#else
+	Dl_info info;
+	(void)time;
+	return dladdr(address,&info) && info.dli_sname != NULL;
+#endif
+}
+
+/* Keeps the JIT frames and the native frames that are code, and folds runs of gaps (and the native values dropped
+   around them) into one gap frame. Returns the new count. */
+static int keep_sampled_frames( void **frames, unsigned char *kinds, int count, double time ) {
+	int kept = 0;
+	bool gap = false;
+	for(int i=0;i<count;i++) {
+		if( kinds[i] == HL_CAPTURE_GAP ) { gap = true; continue; }
+		if( kinds[i] == HL_CAPTURE_NATIVE && !native_code_address(frames[i],time) ) continue;
+		if( gap && kept > 0 ) frames[kept++] = UNWIND_GAP_PC;
+		gap = false;
+		frames[kept++] = frames[i];
+	}
+	return kept;
+}
+#endif
+
 static void read_thread_data( thread_handle *t ) {
 	double sample_started = hl_sys_time();
 	double stopped_at;
@@ -564,13 +646,13 @@ static void read_thread_data( thread_handle *t ) {
 #if defined(HL_LINUX) || defined(HL_MAC)
     double capture_started = hl_sys_time();
     void *frame = get_thread_frameptr();
-    bool stopped_in_jit = eip && hl_module_is_jit_code(eip);
     int count = frame ?
-        hl_module_capture_stack_from_frame(t->inf->stack_top, stack, frame, stopped_in_jit, data.stackOut, MAX_STACK_COUNT) :
+        hl_module_capture_stack_from_frame(t->inf->stack_top, stack, frame, data.stackOut, capture_kinds, MAX_STACK_COUNT) :
         hl_module_capture_stack_range(t->inf->stack_top, stack, data.stackOut, MAX_STACK_COUNT);
     sampling_cost.capture += hl_sys_time() - capture_started;
     pause_thread(t, false);
     sampling_cost.stopped += hl_sys_time() - stopped_at;
+    if( frame ) count = keep_sampled_frames(data.stackOut, capture_kinds, count, hl_sys_time());
 #else
 	int size = (int)((unsigned char*)t->inf->stack_top - (unsigned char*)stack);
 	if( size > MAX_STACK_SIZE-32 ) size = MAX_STACK_SIZE-32;
@@ -603,8 +685,8 @@ static void read_thread_data( thread_handle *t ) {
 	{
 		Dl_info native_leaf;
 		bool jit_leaf = eip && hl_module_is_jit_code(eip);
-		bool named_native_leaf = eip && dladdr(eip,&native_leaf) && native_leaf.dli_sname;
-		if( count < MAX_STACK_COUNT && (jit_leaf || named_native_leaf) ) {
+		bool native_leaf_code = eip && !jit_leaf && (frame ? native_code_address(eip,hl_sys_time()) : dladdr(eip,&native_leaf) && native_leaf.dli_sname);
+		if( count < MAX_STACK_COUNT && (jit_leaf || native_leaf_code) ) {
 			memmove(data.stackOut + 1,data.stackOut,sizeof(void*) * count);
 			data.stackOut[0] = eip;
 			count++;

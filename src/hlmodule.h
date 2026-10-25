@@ -415,6 +415,13 @@ void hl_profile_stream_notify_revision( unsigned long long module_id, int revisi
 void hl_profile_stream_notify_module( unsigned long long module_id );
 HL_API void hl_gc_profile_stats( unsigned long long *allocated, unsigned long long *allocations, unsigned long long *heap, unsigned long long *collections, unsigned long long *mark_micros );
 hl_type *hl_module_resolve_type( hl_module *m, hl_type *t, bool err );
+/* What hl_module_capture_stack_from_frame found at each captured frame. */
+typedef enum {
+	HL_CAPTURE_JIT,     /* a return address into JIT code */
+	HL_CAPTURE_NATIVE,  /* a return address the profiler checks is native code before keeping it */
+	HL_CAPTURE_GAP      /* frames skipped where the frame-pointer chain broke */
+} hl_capture_kind;
+
 HL_EXTERN_C HL_EXPORT hl_module **hl_module_registry_snapshot( int *count );
 HL_EXTERN_C HL_EXPORT void hl_module_registry_snapshot_free( hl_module **modules, int count );
 /* Resolve a JIT program counter without requiring HLB source debug tables. */
