@@ -800,6 +800,8 @@ typedef struct _hl_tls hl_tls;
 
 HL_API hl_thread *hl_thread_start( void *callback, void *param, bool withGC );
 HL_API hl_thread *hl_thread_current( void );
+/* Names a thread for debuggers, crash dumps and profiler captures. */
+HL_API void hl_thread_set_name( hl_thread *t, const char *name );
 HL_API void hl_thread_yield(void);
 HL_API void hl_register_thread( void *stack_top );
 HL_API void hl_unregister_thread( void );

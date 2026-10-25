@@ -709,6 +709,7 @@ static void profile_sleep( double seconds ) {
 
 static void hl_profile_loop( void *_ ) {
 	hl_prof_boundary_ignore_thread();
+	hl_thread_set_name(hl_thread_current(),"hl.sampler");
 	double next = hl_sys_time();
 	data.tmpMemory = malloc(MAX_STACK_SIZE);
 	data.waitLoop = false;

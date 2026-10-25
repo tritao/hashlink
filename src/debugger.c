@@ -210,6 +210,7 @@ static void hl_debug_loop() {
 	int hl_ver = HL_VERSION;
 	bool loop = false;
 	int pid = hl_sys_getpid();
+	hl_thread_set_name(hl_thread_current(),"hl.debugger");
 	const char *protocol = getenv("HL_DEBUG_PROTOCOL");
 	if( protocol && protocol[0] == '3' && protocol[1] == 0 ) debug_protocol3 = true;
 #	ifdef HL_64

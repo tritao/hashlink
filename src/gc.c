@@ -1618,6 +1618,9 @@ static void gc_check_mark() {
 static void mark_thread_main( void *param ) {
 	int index = (int)(int_val)param;
 	gc_mthread *inf = &mark_threads[index];
+	char name[32];
+	snprintf(name,sizeof(name),"hl.gc.mark.%d",index);
+	hl_thread_set_name(hl_thread_current(),name);
 	while( true ) {
 		hl_semaphore_acquire(inf->ready);
 		inf->mark_count += gc_flush_mark(&inf->stack);

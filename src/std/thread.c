@@ -22,6 +22,8 @@
 
 #include <hl.h>
 #include "hlsystem.h"
+#include "../hlprof.h"
+#include "../profile_events.h"
 
 typedef struct _hl_semaphore hl_semaphore;
 typedef struct _hl_condition hl_condition;
@@ -920,12 +922,16 @@ HL_PRIM hl_thread *hl_thread_create( vclosure *c ) {
 }
 
 #if defined(HL_WIN) && defined(HL_THREADS)
+// The thread's description, which debuggers, crash dumps and profilers read.
+static void SetThreadDescriptionById(DWORD dwThreadID, const char* threadName) {
+	HANDLE h = OpenThread(THREAD_SET_LIMITED_INFORMATION, FALSE, dwThreadID);
+	if( h == NULL ) return;
+	SetThreadDescription(h, hl_to_utf16(threadName));
+	CloseHandle(h);
+}
 #ifdef HL_MINGW
 static void SetThreadName(DWORD dwThreadID, const char* threadName) {
-	SetThreadDescription(
-		OpenThread(THREAD_SET_LIMITED_INFORMATION, FALSE, dwThreadID),
-		hl_to_utf16(threadName)
-	);
+	SetThreadDescriptionById(dwThreadID, threadName);
 }
 #else
 const DWORD MS_VC_EXCEPTION = 0x406D1388;
@@ -940,6 +946,9 @@ typedef struct tagTHREADNAME_INFO
 #pragma pack(pop)
 void SetThreadName(DWORD dwThreadID, const char* threadName) {
     THREADNAME_INFO info;
+    SetThreadDescriptionById(dwThreadID, threadName);
+    // Older debuggers only see the name through this exception, raised while they are attached.
+    if( !IsDebuggerPresent() ) return;
     info.dwType = 0x1000;
     info.szName = threadName;
     info.dwThreadID = dwThreadID;
@@ -990,9 +999,12 @@ HL_PRIM void hl_thread_set_name( hl_thread *t, const char *name ) {
 		tinf = threads->threads[i];
 		if( tinf->thread_id == tid ) {
 			memcpy(tinf->thread_name, name, len);
-			tinf->thread_name[len + 1] = 0;
+			tinf->thread_name[len] = 0;
 		}
 	}
+	// A recording session gets the name in the thread's own records, so it holds even if the thread exits before the
+	// session's next thread list.
+	if( t == hl_thread_current() ) hl_prof_event(PROFILE_EVENT_THREAD_NAME, name, (unsigned int)len);
 #endif
 }
 
