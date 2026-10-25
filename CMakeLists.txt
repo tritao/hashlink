@@ -358,6 +358,9 @@ target_link_libraries(hlprof-bench PRIVATE libhl)
 add_executable(hlprof-live tools/hlprof-live.c tools/pftrace.c tools/elf_symbols.c include/lz4/lz4.c)
 if(WIN32)
     target_link_libraries(hlprof-live PRIVATE ws2_32)
+else()
+    # dlopen, for the C++ demangler (part of libc from glibc 2.34).
+    target_link_libraries(hlprof-live PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
 # Prints a bytecode file as text, for diffing builds (see tools/hldump.c). It reads with the VM's own reader.

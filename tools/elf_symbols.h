@@ -9,4 +9,8 @@
 const char *elf_function_name( const char *path, uint64_t offset, uint64_t *function_offset );
 void elf_symbols_free( void );
 
+/* A C++ name demangled with the C++ runtime's __cxa_demangle when it is loadable, as a new string the caller frees;
+   NULL when `name` is not mangled or no demangler is available. */
+char *demangle_cpp( const char *name );
+
 #endif

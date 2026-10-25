@@ -10,6 +10,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
 
 typedef struct { uint64_t start, size; char *name; } elf_function;
 typedef struct { char *path; uint64_t first_vaddr; elf_function *functions; size_t count; } elf_image;
@@ -41,13 +44,53 @@ static unsigned char *read_file( const char *path, size_t *size ) {
 	return data;
 }
 
-/* Reads the function symbols of .symtab and .dynsym. An image that cannot be read is kept with no functions. */
+/* The path of the detached debug file for an image's GNU build ID (/usr/lib/debug/.build-id/ab/cdef....debug), as
+   distributions install them for their stripped libraries, or 0 when the image has no build ID. */
+static int debug_file_for( const unsigned char *data, size_t size, char *out, size_t capacity ) {
+	uint64_t phoff = rd64(data + 32);
+	uint16_t phentsize = rd16(data + 54), phnum = rd16(data + 56);
+	for( uint16_t i = 0; i < phnum; i++ ) {
+		if( phoff + (size_t)(i + 1) * phentsize > size ) break;
+		const unsigned char *ph = data + phoff + (size_t)i * phentsize;
+		if( rd32(ph) != 4 ) continue; // PT_NOTE
+		uint64_t offset = rd64(ph + 8), length = rd64(ph + 32);
+		if( offset + length > size ) continue;
+		for( uint64_t at = 0; at + 12 <= length; ) {
+			const unsigned char *note = data + offset + at;
+			uint32_t name_size = rd32(note), descriptor_size = rd32(note + 4), type = rd32(note + 8);
+			uint64_t name_padded = (name_size + 3) & ~3u, descriptor_padded = (descriptor_size + 3) & ~3u;
+			if( at + 12 + name_padded + descriptor_padded > length ) break;
+			if( type == 3 && name_size == 4 && memcmp(note + 12, "GNU", 4) == 0 && descriptor_size >= 2 ) { // NT_GNU_BUILD_ID
+				const unsigned char *id = note + 12 + name_padded;
+				size_t written = (size_t)snprintf(out, capacity, "/usr/lib/debug/.build-id/%02x/", id[0]);
+				for( uint32_t b = 1; b < descriptor_size && written + 3 < capacity; b++ )
+					written += (size_t)snprintf(out + written, capacity - written, "%02x", id[b]);
+				snprintf(out + written, capacity - written, ".debug");
+				return 1;
+			}
+			at += 12 + name_padded + descriptor_padded;
+		}
+	}
+	return 0;
+}
+
+static int has_symtab( const unsigned char *data, size_t size ) {
+	uint64_t shoff = rd64(data + 40);
+	uint16_t shentsize = rd16(data + 58), shnum = rd16(data + 60);
+	if( shoff == 0 || shoff + (size_t)shnum * shentsize > size ) return 0;
+	for( uint16_t i = 0; i < shnum; i++ )
+		if( rd32(data + shoff + (size_t)i * shentsize + 4) == 2 ) return 1; // SHT_SYMTAB
+	return 0;
+}
+
+/* Reads the function symbols of .symtab and .dynsym; a stripped image's come from its detached debug file when one is
+   installed. An image that cannot be read is kept with no functions. */
 static void load_image( elf_image *image ) {
 	size_t size, capacity = 0;
 	unsigned char *data = read_file(image->path, &size);
 	if( !data ) return;
 	if( size < 64 || memcmp(data, "\177ELF", 4) != 0 || data[4] != 2 || data[5] != 1 ) { free(data); return; }
-	uint64_t phoff = rd64(data + 32), shoff = rd64(data + 40);
+	uint64_t phoff = rd64(data + 32);
 	uint16_t phentsize = rd16(data + 54), phnum = rd16(data + 56), shentsize = rd16(data + 58), shnum = rd16(data + 60);
 	// dladdr reports where the image's first loaded page sits, so an offset from it is a virtual address once the first
 	// segment's page-aligned address is added back (0 for shared libraries, the link address for other executables).
@@ -60,6 +103,21 @@ static void load_image( elf_image *image ) {
 		if( !found_load || vaddr < image->first_vaddr ) image->first_vaddr = vaddr;
 		found_load = 1;
 	}
+	// Addresses come from the loaded image; symbols from its debug file when it carries none of its own.
+	char debug_path[512];
+	if( !has_symtab(data, size) && debug_file_for(data, size, debug_path, sizeof(debug_path)) ) {
+		size_t debug_size;
+		unsigned char *debug = read_file(debug_path, &debug_size);
+		if( debug && debug_size >= 64 && memcmp(debug, "\177ELF", 4) == 0 && debug[4] == 2 && debug[5] == 1 ) {
+			free(data);
+			data = debug;
+			size = debug_size;
+		} else
+			free(debug);
+	}
+	uint64_t shoff = rd64(data + 40);
+	shentsize = rd16(data + 58);
+	shnum = rd16(data + 60);
 	if( shoff == 0 || shoff + (size_t)shnum * shentsize > size ) { free(data); return; }
 	for( uint16_t i = 0; i < shnum; i++ ) {
 		const unsigned char *sh = data + shoff + (size_t)i * shentsize;
@@ -146,4 +204,31 @@ void elf_symbols_free( void ) {
 	free(images);
 	images = NULL;
 	image_count = 0;
+}
+
+char *demangle_cpp( const char *name ) {
+#ifdef _WIN32
+	(void)name;
+	return NULL; // DbgHelp names Windows frames already demangled.
+#else
+	typedef char *(*demangler)(const char *, char *, size_t *, int *);
+	static demangler demangle;
+	static int looked;
+	if( !name || strncmp(name, "_Z", 2) != 0 ) return NULL;
+	if( !looked ) {
+		looked = 1;
+		// Loaded on demand, so the exporter has no link-time dependency on a C++ runtime.
+		const char *libraries[] = { "libstdc++.so.6", "libc++abi.so.1", "libc++abi.dylib", "libc++.1.dylib" };
+		for( size_t i = 0; i < sizeof(libraries) / sizeof(libraries[0]) && !demangle; i++ ) {
+			void *library = dlopen(libraries[i], RTLD_LAZY | RTLD_LOCAL);
+			if( library ) demangle = (demangler)dlsym(library, "__cxa_demangle");
+		}
+		if( !demangle ) demangle = (demangler)dlsym(RTLD_DEFAULT, "__cxa_demangle");
+	}
+	if( !demangle ) return NULL;
+	int status = 0;
+	char *result = demangle(name, NULL, NULL, &status);
+	if( status != 0 ) { free(result); return NULL; }
+	return result;
+#endif
 }

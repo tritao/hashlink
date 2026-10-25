@@ -56,6 +56,8 @@ HL_OBJ = src/code.o src/hlpatch.o src/hlruntime.o $(HL_JIT_OBJ) src/main.o src/m
 HLPROF_LIVE = hlprof-live$(EXE_SUFFIX)
 ifeq ($(OS),Windows_NT)
 HLPROF_LIVE_LDLIBS = -lws2_32
+else
+HLPROF_LIVE_LDLIBS = -ldl
 endif
 
 FMT_CPPFLAGS = -I include/mikktspace -I include/minimp3

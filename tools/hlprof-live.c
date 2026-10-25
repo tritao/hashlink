@@ -33,7 +33,7 @@ enum { F_RESPONSE=1, F_ERROR=2, CAP_PROFILE=1, CAP_SYMBOLS=2 };
 #include "../include/lz4/lz4.h"
 
 typedef struct { uint32_t offset,end,opcode_index,opcode,line; char *file; uint64_t self,total; } source_line;
-typedef struct { uint64_t start,end,self,total,region_base,region_size,module_id; uint32_t function_id,revision,region_flags; char *name; source_line *lines; uint32_t line_count; } symbol;
+typedef struct { uint64_t start,end,self,total,region_base,region_size,module_id,seen; uint32_t function_id,revision,region_flags; char *name; source_line *lines; uint32_t line_count; } symbol;
 typedef struct { symbol *items; size_t count,capacity; } symbols;
 typedef struct { const unsigned char *data; size_t length,pos; } reader;
 typedef struct { FILE *file; double started; int failed; } capture;
@@ -41,10 +41,17 @@ typedef struct folded folded;
 struct folded { char *stack; uint64_t count; folded *next; };
 typedef struct { folded *buckets[4096]; } folded_table;
 typedef struct native_symbol native_symbol;
-struct native_symbol { uint64_t pc,base,module_base,module_size; uint32_t line; char *module,*name,*file; native_symbol *next; };
+typedef struct native_function native_function;
+/* A native function's sample counts, shared by every pc named after it. */
+struct native_function { char *name; uint64_t self,total,seen; native_function *next; };
+struct native_symbol { uint64_t pc,base,module_base,module_size; uint32_t line; char *module,*name,*file; native_function *function; native_symbol *next; };
 typedef struct { uint64_t allocated,allocations,collections,mark_micros; double time; int valid; } perfetto_gc_state;
 static volatile sig_atomic_t interrupted;
 static native_symbol *native_symbols;
+static native_function *native_functions[1024];
+/* Which samples a report ranks: 0 those on a CPU (the default), 1 all, 2 those waiting in a system call. */
+static int sample_filter=0;
+static uint64_t samples_waiting,samples_ranked,sample_serial;
 static perfetto_gc_state perfetto_gc;
 static uint32_t perfetto_threads[4096];
 static uint64_t health_capacity,health_used,health_records,health_sample_nanos,health_generated;
@@ -129,6 +136,11 @@ static symbol *add_symbol( symbols *s,uint64_t start,uint64_t end,uint32_t id,ui
 static int by_address( const void *a,const void *b ){const symbol *x=a,*y=b;return x->start<y->start?-1:x->start>y->start?1:0;}
 static symbol *resolve( symbols *s,uint64_t pc ){size_t lo=0,hi=s->count;while(lo<hi){size_t m=(lo+hi)>>1;if(s->items[m].start<=pc)lo=m+1;else hi=m;}return lo&&pc<s->items[lo-1].end?s->items+lo-1:NULL;}
 static source_line *resolve_line( symbol *s,uint64_t pc ){uint32_t offset=(uint32_t)(pc-s->start),lo=0,hi=s->line_count;while(lo<hi){uint32_t m=(lo+hi)>>1;if(s->lines[m].offset<=offset)lo=m+1;else hi=m;}if(!lo)return NULL;source_line *line=s->lines+lo-1;return line->end&&offset>=line->end?NULL:line;}
+static uint32_t stack_hash( const char *text );
+static native_function *native_function_named( const char *name ){
+	uint32_t slot=stack_hash(name)&1023;for(native_function *f=native_functions[slot];f;f=f->next)if(!strcmp(f->name,name))return f;
+	native_function *f=(native_function*)calloc(1,sizeof(*f));if(!f)return NULL;f->name=(char*)malloc(strlen(name)+1);if(!f->name){free(f);return NULL;}strcpy(f->name,name);f->seen=UINT64_MAX;f->next=native_functions[slot];native_functions[slot]=f;return f;
+}
 static native_symbol *resolve_native( uint64_t pc ){for(native_symbol *n=native_symbols;n;n=n->next)if(n->pc==pc)return n;return NULL;}
 static int add_native( uint64_t pc,uint64_t base,const unsigned char *module,uint32_t module_len,const unsigned char *name,uint32_t name_len ) {
 	native_symbol *n=resolve_native(pc);if(n)return 1;n=(native_symbol*)calloc(1,sizeof(*n));if(!n)return 0;
@@ -139,9 +151,12 @@ static int add_native( uint64_t pc,uint64_t base,const unsigned char *module,uin
 	{const char *file=n->module;for(const char *c=n->module;*c;c++)if(*c=='/'||*c=='\\')file=c+1;
 	uint64_t into=0;const char *function=pc>=base&&!strcmp(n->name,file)?elf_function_name(n->module,pc-base,&into):NULL;
 	if(function){char *named=(char*)malloc(strlen(function)+1);if(named){strcpy(named,function);free(n->name);n->name=named;n->base=pc-into;}}}
+	{char *readable=demangle_cpp(n->name);if(readable){free(n->name);n->name=readable;}}
+	n->function=native_function_named(n->name);
 	return 1;
 }
-static void free_native( void ){while(native_symbols){native_symbol *next=native_symbols->next;free(native_symbols->module);free(native_symbols->name);free(native_symbols->file);free(native_symbols);native_symbols=next;}elf_symbols_free();}
+static void free_native( void ){while(native_symbols){native_symbol *next=native_symbols->next;free(native_symbols->module);free(native_symbols->name);free(native_symbols->file);free(native_symbols);native_symbols=next;}elf_symbols_free();
+	for(int i=0;i<1024;i++)while(native_functions[i]){native_function *next=native_functions[i]->next;free(native_functions[i]->name);free(native_functions[i]);native_functions[i]=next;}}
 static int add_native_location( const unsigned char *payload,uint32_t size ) {
 	if(size<32||u32(payload+28)!=size-32)return 0;
 	native_symbol *n=resolve_native(u64(payload));if(!n||n->file)return 1;
@@ -187,13 +202,28 @@ static int fetch_symbols( socket_t sock,symbols *current,uint32_t id,capture *ou
 static int by_hot( const void *a,const void *b ){const symbol *x=*(symbol*const*)a,*y=*(symbol*const*)b;if(x->self!=y->self)return x->self<y->self?1:-1;return x->total<y->total?1:x->total>y->total?-1:0;}
 typedef struct { symbol *function; source_line *line; } hot_line;
 static int by_hot_line( const void *a,const void *b ){const hot_line *x=a,*y=b;if(x->line->self!=y->line->self)return x->line->self<y->line->self?1:-1;return x->line->total<y->line->total?1:x->line->total>y->line->total?-1:0;}
+typedef struct { const char *name; uint64_t self,total; int native; } ranked_function;
+static int by_ranked( const void *a,const void *b ){const ranked_function *x=a,*y=b;if(x->self!=y->self)return x->self<y->self?1:-1;return x->total<y->total?1:x->total>y->total?-1:0;}
 static void report( symbols *s,uint64_t samples,uint64_t unresolved,uint64_t dropped,int top,int show_lines ) {
 	symbol **hot=(symbol**)malloc(s->count*sizeof(symbol*));size_t count=0;if(!hot)return;
-	printf("\nsamples=%llu unresolved_frames=%llu dropped_records=%llu\n",(unsigned long long)samples,(unsigned long long)unresolved,(unsigned long long)dropped);printf("%8s %8s  %s\n","self","total",show_lines?"location / function":"function");
+	printf("\nsamples=%llu on_cpu=%llu waiting=%llu unresolved_frames=%llu dropped_records=%llu\n",(unsigned long long)samples,(unsigned long long)(samples-samples_waiting),(unsigned long long)samples_waiting,(unsigned long long)unresolved,(unsigned long long)dropped);
+	printf("ranking %s samples (%llu)%s\n",sample_filter==1?"all":sample_filter==2?"waiting":"on-CPU",(unsigned long long)samples_ranked,sample_filter==0?"; --all includes threads waiting in system calls":"");
+	samples=samples_ranked;printf("%8s %8s  %s\n","self","total",show_lines?"location / function":"function");
 	if(health_capacity)printf("buffer=%llu/%llu (%.1f%%) requested_rate=%u effective_rate=%u\n",(unsigned long long)health_used,(unsigned long long)health_capacity,health_used*100.0/health_capacity,health_requested_rate,health_effective_rate);
 	if(health_records)printf("profiler_overhead=%.2fus/sample generated_bytes=%llu\n",health_sample_nanos/1000.0/health_records,(unsigned long long)health_generated);
 	if(show_lines){size_t line_capacity=0;for(size_t i=0;i<s->count;i++)line_capacity+=s->items[i].line_count;hot_line *lines=(hot_line*)malloc(line_capacity*sizeof(hot_line));if(!lines){free(hot);return;}for(size_t i=0;i<s->count;i++)for(uint32_t j=0;j<s->items[i].line_count;j++)if(s->items[i].lines[j].total){lines[count].function=s->items+i;lines[count++].line=s->items[i].lines+j;}qsort(lines,count,sizeof(hot_line),by_hot_line);for(size_t i=0;i<count&&i<(size_t)top;i++)printf("%7.2f%% %7.2f%%  %s:%u  %s\n",samples?lines[i].line->self*100.0/samples:0.0,samples?lines[i].line->total*100.0/samples:0.0,lines[i].line->file,lines[i].line->line,lines[i].function->name);free(lines);}
-	else{for(size_t i=0;i<s->count;i++)if(s->items[i].total)hot[count++]=s->items+i;qsort(hot,count,sizeof(symbol*),by_hot);for(size_t i=0;i<count&&i<(size_t)top;i++)printf("%7.2f%% %7.2f%%  %s\n",samples?hot[i]->self*100.0/samples:0.0,samples?hot[i]->total*100.0/samples:0.0,hot[i]->name);}
+	else{
+		/* Haxe and native functions ranked together, each by its own samples: a function's self time is the samples whose
+		   leaf it is, so time a Haxe function spends in native code it calls shows under that native code. */
+		size_t natives=0;for(int i=0;i<1024;i++)for(native_function *f=native_functions[i];f;f=f->next)natives++;
+		ranked_function *ranked=(ranked_function*)malloc((s->count+natives+1)*sizeof(ranked_function));if(!ranked){free(hot);return;}
+		for(size_t i=0;i<s->count;i++)if(s->items[i].total){ranked[count].name=s->items[i].name;ranked[count].self=s->items[i].self;ranked[count].total=s->items[i].total;ranked[count++].native=0;}
+		for(int i=0;i<1024;i++)for(native_function *f=native_functions[i];f;f=f->next)if(f->total){ranked[count].name=f->name;ranked[count].self=f->self;ranked[count].total=f->total;ranked[count++].native=1;}
+		qsort(ranked,count,sizeof(ranked_function),by_ranked);
+		for(size_t i=0;i<count&&i<(size_t)top;i++)printf("%7.2f%% %7.2f%%  %s%s\n",samples?ranked[i].self*100.0/samples:0.0,samples?ranked[i].total*100.0/samples:0.0,ranked[i].native?"[native] ":"",ranked[i].name);
+		free(ranked);}
+	for(int i=0;i<1024;i++)for(native_function *f=native_functions[i];f;f=f->next)f->self=f->total=0;
+	samples_waiting=samples_ranked=0;
 	fflush(stdout);for(size_t i=0;i<s->count;i++){s->items[i].self=s->items[i].total=0;for(uint32_t j=0;j<s->items[i].line_count;j++)s->items[i].lines[j].self=s->items[i].lines[j].total=0;}free(hot);
 }
 static uint32_t stack_hash( const char *text ){uint32_t h=2166136261U;while(*text){h^=(unsigned char)*text++;h*=16777619U;}return h;}
@@ -372,16 +402,19 @@ static int pf_event( pf_export *pf,double time,uint32_t tid,uint32_t event_id,co
 static int consume( symbols *s,unsigned char *pending,size_t *length,uint64_t *samples,uint64_t *unresolved,folded_table *folded_stacks,int show_lines,int raw_leaf,int *metadata_dirty,FILE *perfetto,int *perfetto_first,double *time_origin,uint32_t pid,pf_export *pf ) {
 	size_t pos=0;while(*length-pos>=4){uint32_t body=u32(pending+pos);if(body<20||body>(8U<<20))return 0;if(*length-pos<(size_t)body+4)break;
 		double event_time=0;if(perfetto||pf){uint64_t time_bits=u64(pending+pos+8);memcpy(&event_time,&time_bits,sizeof(event_time));if(time_origin&&*time_origin<0)*time_origin=event_time;}
-		if(pending[pos+4]==1){uint32_t frames=u32(pending+pos+20),tid=u32(pending+pos+16);uint64_t leaf_pc=frames?u64(pending+pos+24):0;symbol *raw_symbol=frames?resolve(s,leaf_pc):NULL;native_symbol *raw_native=frames?resolve_native(leaf_pc):NULL;source_line *raw_line=raw_symbol?resolve_line(raw_symbol,leaf_pc):NULL;if(body!=20+frames*8U)return 0;symbol *leaf=NULL;native_symbol *native_leaf=NULL;source_line *leaf_line=NULL;char *stack=NULL;size_t stack_len=0,stack_cap=0;(*samples)++;for(uint32_t i=0;i<frames;i++){uint64_t pc=u64(pending+pos+24+i*8);symbol *x=resolve(s,pc);native_symbol *native=x?NULL:resolve_native(pc);if(x){source_line *line=resolve_line(x,pc);x->total++;if(line)line->total++;if(!leaf){leaf=x;leaf_line=line;}}else if(native){if(!leaf&&!native_leaf)native_leaf=native;}else(*unresolved)++;}
+		if(pending[pos+4]==1){uint32_t frames=u32(pending+pos+20),tid=u32(pending+pos+16);uint64_t leaf_pc=frames?u64(pending+pos+24):0;symbol *raw_symbol=frames?resolve(s,leaf_pc):NULL;native_symbol *raw_native=frames?resolve_native(leaf_pc):NULL;source_line *raw_line=raw_symbol?resolve_line(raw_symbol,leaf_pc):NULL;if(body!=20+frames*8U)return 0;symbol *leaf=NULL;native_symbol *native_leaf=NULL;source_line *leaf_line=NULL;char *stack=NULL;size_t stack_len=0,stack_cap=0;(*samples)++;
+			/* Bit 1: the thread was waiting in a system call. Only the samples the filter keeps are ranked or exported. */
+			const int waiting=(pending[pos+5]&2)!=0,counted=sample_filter==1||(sample_filter==0?!waiting:waiting);if(waiting)samples_waiting++;if(counted){samples_ranked++;sample_serial++;}
+			for(uint32_t i=0;i<frames;i++){uint64_t pc=u64(pending+pos+24+i*8);symbol *x=resolve(s,pc);native_symbol *native=x?NULL:resolve_native(pc);if(x){source_line *line=resolve_line(x,pc);if(counted){/* Once per sample, so recursion does not count a function twice. */if(x->seen!=sample_serial){x->seen=sample_serial;x->total++;}if(line)line->total++;}if(!leaf){leaf=x;leaf_line=line;}if(i==0&&counted){x->self++;if(line)line->self++;}}else if(native){if(!leaf&&!native_leaf)native_leaf=native;if(counted&&native->function){if(native->function->seen!=sample_serial){native->function->seen=sample_serial;native->function->total++;}if(i==0)native->function->self++;}}else(*unresolved)++;}
+			if(counted){
 			if(perfetto&&perfetto_threads[tid&4095]!=tid){perfetto_threads[tid&4095]=tid;perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"M\",\"name\":\"thread_name\",\"pid\":%u,\"tid\":%u,\"args\":{\"name\":\"Thread %u\"}}",pid,tid,tid);}
-			if(leaf)leaf->self++;
-			if(leaf_line)leaf_line->self++;
 			if(raw_leaf&&frames){if(raw_symbol){printf("leaf_pc=0x%llx offset=0x%llx function=%s",(unsigned long long)leaf_pc,(unsigned long long)(leaf_pc-raw_symbol->start),raw_symbol->name);if(raw_line)printf(" opcode=%u opcode_kind=%u location=%s:%u",raw_line->opcode_index,raw_line->opcode,raw_line->file,raw_line->line);putchar('\n');}else if(raw_native)printf("leaf_pc=0x%llx offset=0x%llx function=%s module=%s\n",(unsigned long long)leaf_pc,(unsigned long long)(leaf_pc-raw_native->base),raw_native->name,raw_native->module);else printf("leaf_pc=0x%llx offset=? function=[native/unknown]\n",(unsigned long long)leaf_pc);}
 			if(folded_stacks||perfetto){for(uint32_t i=launcher_trimmed(s,pending+pos+24,frames);i>0;i--){uint64_t pc=u64(pending+pos+24+(i-1)*8);symbol *x=resolve(s,pc);native_symbol *native=x?NULL:resolve_native(pc);source_line *line=x?resolve_line(x,pc):NULL;char label[1536];const char *name;if(show_lines&&line){snprintf(label,sizeof(label),"%s (%s:%u)",x->name,line->file,line->line);name=label;}else if(native){if(pc==native->base&&native->module[0]=='[')snprintf(label,sizeof(label),"%s",native->name);else snprintf(label,sizeof(label),"%s+0x%llx (%s)",native->name,(unsigned long long)(pc-native->base),native->module);name=label;}else name=x?x->name:"[unknown]";size_t n=strlen(name),need=stack_len+n+(stack_len?1:0)+1;if(need>stack_cap){size_t cap=stack_cap?stack_cap*2:256;while(cap<need)cap*=2;char *next=(char*)realloc(stack,cap);if(!next){free(stack);return 0;}stack=next;stack_cap=cap;}if(stack_len)stack[stack_len++]=';';memcpy(stack+stack_len,name,n);stack_len+=n;stack[stack_len]=0;}}
 			if(folded_stacks&&stack&&!folded_add(folded_stacks,stack)){free(stack);return 0;}
-			if(perfetto){perfetto_begin_event(perfetto,perfetto_first);fputs("{\"ph\":\"i\",\"s\":\"t\",\"cat\":\"hl.sample\",\"name\":",perfetto);json_string(perfetto,leaf?leaf->name:native_leaf?native_leaf->name:"sample");fprintf(perfetto,",\"pid\":%u,\"tid\":%u,\"ts\":%.3f,\"args\":{\"stack\":",pid,tid,(event_time-*time_origin)*1000000.0);json_string(perfetto,stack?stack:"");fprintf(perfetto,",\"gc_stop\":%s",(pending[pos+5]&1)?"true":"false");if(leaf_line){fputs(",\"file\":",perfetto);json_string(perfetto,leaf_line->file);fprintf(perfetto,",\"line\":%u",leaf_line->line);}fputs("}}",perfetto);if(pending[pos+5]&1){perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"i\",\"s\":\"t\",\"cat\":\"hl.gc\",\"name\":\"GC stop sample\",\"pid\":%u,\"tid\":%u,\"ts\":%.3f}",pid,tid,(event_time-*time_origin)*1000000.0);}}
+			if(perfetto){perfetto_begin_event(perfetto,perfetto_first);fputs("{\"ph\":\"i\",\"s\":\"t\",\"cat\":\"hl.sample\",\"name\":",perfetto);json_string(perfetto,leaf?leaf->name:native_leaf?native_leaf->name:"sample");fprintf(perfetto,",\"pid\":%u,\"tid\":%u,\"ts\":%.3f,\"args\":{\"stack\":",pid,tid,(event_time-*time_origin)*1000000.0);json_string(perfetto,stack?stack:"");fprintf(perfetto,",\"gc_stop\":%s,\"waiting\":%s",(pending[pos+5]&1)?"true":"false",waiting?"true":"false");if(leaf_line){fputs(",\"file\":",perfetto);json_string(perfetto,leaf_line->file);fprintf(perfetto,",\"line\":%u",leaf_line->line);}fputs("}}",perfetto);if(pending[pos+5]&1){perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"i\",\"s\":\"t\",\"cat\":\"hl.gc\",\"name\":\"GC stop sample\",\"pid\":%u,\"tid\":%u,\"ts\":%.3f}",pid,tid,(event_time-*time_origin)*1000000.0);}}
 			free(stack);
 			if(pf&&frames&&!pf_sample(pf,s,event_time,tid,pending+pos+24,launcher_trimmed(s,pending+pos+24,frames),pending[pos+5]&1))return 0;
+			}
 		}else if(pending[pos+4]==2){uint32_t tid=u32(pending+pos+16),event_id=u32(pending+pos+20),payload_size=body-20;const unsigned char *payload=pending+pos+24;if(metadata_dirty&&((event_id==PROFILE_EVENT_MODULE_REVISION&&body==32)||(event_id==PROFILE_EVENT_MODULE_LOADED&&body==28)))*metadata_dirty=1;
 			if(event_id==PROFILE_EVENT_NATIVE_SYMBOL&&payload_size>=24){uint32_t module_len=u32(payload+16),name_len=u32(payload+20);if(module_len>payload_size-24||name_len!=payload_size-24-module_len||!add_native(u64(payload),u64(payload+8),payload+24,module_len,payload+24+module_len,name_len))return 0;}
 			if(event_id==PROFILE_EVENT_NATIVE_LOCATION&&!add_native_location(payload,payload_size))return 0;
@@ -926,12 +959,17 @@ done:
 	return code;
 }
 
-static void usage( const char *p ){fprintf(stderr,"Usage:\n  %s [--host HOST] [--sources LIST] [--rate HZ] [--alloc-interval N] [--pool MIB] [--interval MS] [--duration SEC] [--max-size MIB] [--paused] [--min-call-us US] [--connect-timeout SEC] [--output FILE] PORT\n  %s report [--top N] [--lines] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format folded [--lines] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format perfetto [--lines] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n  %s export --format pftrace [--process-name NAME] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n",p,p,p,p,p);}
+static void usage( const char *p ){fprintf(stderr,"Usage:\n  %s [--host HOST] [--sources LIST] [--rate HZ] [--alloc-interval N] [--pool MIB] [--interval MS] [--duration SEC] [--max-size MIB] [--paused] [--min-call-us US] [--connect-timeout SEC] [--output FILE] PORT\n  %s report [--top N] [--lines] [--all|--waiting] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format folded [--lines] [--cpu|--waiting] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format perfetto [--lines] [--cpu|--waiting] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n  %s export --format pftrace [--process-name NAME] [--cpu|--waiting] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n",p,p,p,p,p);}
 
 static int offline( int argc,char **argv,int exporting ) {
 	const char *path=NULL,*output_path=NULL;int top=15,code=1,complete=0,format=0,show_lines=0,raw_leaf=0,perfetto_first=1,metadata_dirty=0;FILE *file=NULL,*perfetto=NULL;symbols table={0};folded_table folded_stacks={0};unsigned char header[24],record_header[16],*payload=NULL,*pending=NULL;size_t pending_len=0,pending_cap=512*1024;uint64_t samples=0,unresolved=0,dropped=0,cursor=0,last_time=0,reported_dropped=0,start_ns=0,end_ns=UINT64_MAX;int have_cursor=0;double time_origin=-1;const char *process_name="HashLink";pf_export pf={0};
+	/* A report ranks what was running; an export keeps every sample unless asked otherwise. */
+	sample_filter=exporting?1:0;
 	for(int i=2;i<argc;i++){
 		if(!strcmp(argv[i],"--top")&&++i<argc&&!exporting)top=atoi(argv[i]);
+		else if(!strcmp(argv[i],"--all"))sample_filter=1;
+		else if(!strcmp(argv[i],"--cpu"))sample_filter=0;
+		else if(!strcmp(argv[i],"--waiting"))sample_filter=2;
 		else if(!strcmp(argv[i],"--lines"))show_lines=1;
 		else if(!strcmp(argv[i],"--raw-leaf")&&!exporting)raw_leaf=1;
 		else if(!strcmp(argv[i],"--start-ms")&&++i<argc)start_ns=(uint64_t)strtoull(argv[i],NULL,10)*1000000ULL;
