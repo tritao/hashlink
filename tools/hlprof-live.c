@@ -789,7 +789,7 @@ static int scan_pass1( const unsigned char *p,uint32_t length,uint32_t tid,int b
 	uint32_t pos=0;
 	while(pos+8<=length){
 		uint32_t kind=(uint32_t)(u64(p+pos)>>56);uint64_t size=8;int follows=0;
-		if(tid==frame_thread){follows=frame_drop_follows;frame_drop_follows=0;}
+		if(tid==frame_thread&&kind!=R_STALL){follows=frame_drop_follows;frame_drop_follows=0;}
 		if(kind==R_EXIT||kind==R_SPAN_END){pos+=8;continue;}
 		if(pos+16>length)return 1;
 		if(kind==R_FRAME_MARK&&!frame_thread&&u64(p+pos+8)==0){thread_drops *d=early_drops_of(tid);frame_thread=tid;frame_drop_running=d?d->total:0;}
