@@ -59,6 +59,7 @@ static __forceinline int prof_load_int( volatile int *p ) { int v = *p; _ReadWri
 #	define CAS64(p,expected,desired) (_InterlockedCompareExchange64((volatile __int64*)(p),(__int64)(desired),(__int64)(expected)) == (__int64)(expected))
 #	define FETCH_ADD32(p,v) _InterlockedExchangeAdd((volatile long*)(p),(long)(v))
 #	define FETCH_ADD64(p,v) _InterlockedExchangeAdd64((volatile __int64*)(p),(__int64)(v))
+#	define EXCHANGE_INT(p,v) _InterlockedExchange((volatile long*)(p),(long)(v))
 #	define FORCE_INLINE __forceinline
 #else
 #	define LOAD_ACQUIRE_PTR(p) __atomic_load_n((void**)(p),__ATOMIC_ACQUIRE)
@@ -71,6 +72,7 @@ static inline bool prof_cas64( volatile unsigned long long *p, unsigned long lon
 #	define CAS64(p,expected,desired) prof_cas64((p),(expected),(desired))
 #	define FETCH_ADD32(p,v) __atomic_fetch_add((p),(v),__ATOMIC_RELAXED)
 #	define FETCH_ADD64(p,v) __atomic_fetch_add((p),(v),__ATOMIC_RELAXED)
+#	define EXCHANGE_INT(p,v) __atomic_exchange_n((int*)(p),(v),__ATOMIC_SEQ_CST)
 #	define FORCE_INLINE inline __attribute__((always_inline))
 #endif
 
@@ -872,7 +874,15 @@ HL_PRIM bool hl_prof_set_recording( bool on ) {
 			STORE_RELEASE_INT(&hl_prof_on,0);
 		} else {
 			payload[0] = 1;
-			STORE_RELEASE_INT(&hl_prof_on,1);
+			/* A full fence, so the check below cannot read the session open while this store waits behind it: a stop
+			   closing the session meanwhile then turns recording off after it. */
+			EXCHANGE_INT(&hl_prof_on,1);
+			/* A stop closed the session meanwhile: it may have turned recording off already. */
+			if( !LOAD_ACQUIRE_INT(&session_open) ) {
+				STORE_RELEASE_INT(&hl_prof_on,0);
+				toggle_unlock();
+				return false;
+			}
 			hl_prof_event(PROFILE_EVENT_RECORDING,payload,4);
 		}
 		recording_changes++;
@@ -903,19 +913,20 @@ DEFINE_PRIM(_BOOL, prof_recording_get, _NO_ARG);
 
 HL_PRIM void hl_prof_stop( void ) {
 	prof_thread *t;
+	if( !session_open ) return;
+	/* Closed and off before taking the toggle: a pause or resume holding it may be waiting for a chunk, and gives up once
+	   recording is off. A resume that had already passed its check turns recording off again after seeing the session
+	   closed. */
+	STORE_RELEASE_INT(&session_open,0);
+	STORE_RELEASE_INT(&hl_prof_on,0);
 	toggle_lock();
-	if( !session_open ) { toggle_unlock(); return; }
-	session_open = 0;
-	if( hl_prof_on ) {
-		STORE_RELEASE_INT(&hl_prof_on,0);
-		/* A producer that saw recording on may still be writing its record: give it time to publish before the final
-		   drain. */
+	STORE_RELEASE_INT(&hl_prof_on,0);
+	/* A producer that saw recording on may still be writing its record: give it time to publish before the final drain. */
 #ifdef HL_WIN
-		Sleep(2);
+	Sleep(2);
 #else
-		{ struct timespec wait = { 0, 2000000 }; nanosleep(&wait,NULL); }
+	{ struct timespec wait = { 0, 2000000 }; nanosleep(&wait,NULL); }
 #endif
-	}
 	/* The producers no longer write: publish what they hold back, for the final drain. */
 	REGISTRY_LOCK();
 	for(t=threads;t;t=t->next)
