@@ -408,26 +408,89 @@ static void push_clock( hl_socket *socket ) {
 	push(socket,DIAG_PUSH_CLOCK,payload,sizeof(payload));
 }
 
+/* A thread's name as the system knows it (SetThreadDescription, pthread_setname_np), into out; false if it has none. */
+static bool system_thread_name( unsigned int tid, char *out, int capacity ) {
+#if defined(HL_WIN_DESKTOP)
+	HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION,FALSE,tid);
+	PWSTR wide = NULL;
+	int n = 0;
+	if( h == NULL ) return false;
+	if( SUCCEEDED(GetThreadDescription(h,&wide)) && wide != NULL ) {
+		if( *wide ) n = WideCharToMultiByte(CP_UTF8,0,wide,-1,out,capacity,NULL,NULL);
+		LocalFree(wide);
+	}
+	CloseHandle(h);
+	return n > 1;
+#elif defined(HL_LINUX)
+	char path[64];
+	FILE *f;
+	size_t n;
+	snprintf(path,sizeof(path),"/proc/self/task/%u/comm",tid);
+	f = fopen(path,"r");
+	if( f == NULL ) return false;
+	n = fread(out,1,(size_t)capacity - 1,f);
+	fclose(f);
+	while( n > 0 && (out[n - 1] == '\n' || out[n - 1] == 0) ) n--;
+	out[n] = 0;
+	return n > 0;
+#else
+	return false;
+#endif
+}
+
+typedef struct {
+	diag_buffer *buffer;
+	unsigned int *signature;
+	unsigned int *count;
+	unsigned int *named;
+	int named_count;
+} thread_names;
+
+static void add_thread_name( thread_names *names, unsigned int tid, const char *name ) {
+	unsigned int length = (unsigned int)strlen(name);
+	buffer_u32(names->buffer,tid);
+	buffer_u32(names->buffer,length);
+	buffer_bytes(names->buffer,name,length);
+	*names->signature = (*names->signature ^ tid) * 16777619U;
+	for(unsigned int c=0;c<length;c++) *names->signature = (*names->signature ^ (unsigned char)name[c]) * 16777619U;
+	(*names->count)++;
+}
+
+/* Recorded threads the runtime has no name for (native threads, or ones named by other means) take their system names,
+   looked up outside the recorder's lock. */
+#define RECORDED_THREADS 1024
+static void add_system_thread_names( thread_names *names ) {
+	unsigned int *tids = (unsigned int*)malloc(sizeof(unsigned int) * RECORDED_THREADS);
+	char name[128];
+	int count;
+	if( tids == NULL ) return;
+	count = hl_prof_thread_ids(tids,RECORDED_THREADS);
+	for(int i=0;i<count;i++) {
+		bool named = false;
+		for(int j=0;j<names->named_count && !named;j++) named = names->named[j] == tids[i];
+		if( !named && system_thread_name(tids[i],name,sizeof(name)) ) add_thread_name(names,tids[i],name);
+	}
+	free(tids);
+}
+
 /* Thread names, pushed whenever the set of named threads changes. */
 static void push_threads( hl_socket *socket, bool force ) {
 	hl_threads_info *threads = hl_gc_threads_info();
 	diag_buffer buffer = {0};
 	unsigned int signature = 2166136261U, count = 0;
 	int main_tid = hl_profile_main_thread();
+	thread_names names = { &buffer, &signature, &count, NULL, 0 };
+	names.named = (unsigned int*)malloc(sizeof(unsigned int) * (threads->count + 1));
 	buffer_u32(&buffer,0);
 	for(int i=0;i<threads->count;i++) {
 		hl_thread_info *t = threads->threads[i];
 		const char *name = *t->thread_name ? t->thread_name : t->thread_id == main_tid ? "main" : NULL;
-		unsigned int length;
 		if( name == NULL || (t->flags & HL_THREAD_INVISIBLE) ) continue;
-		length = (unsigned int)strlen(name);
-		buffer_u32(&buffer,(unsigned int)t->thread_id);
-		buffer_u32(&buffer,length);
-		buffer_bytes(&buffer,name,length);
-		signature = (signature ^ (unsigned int)t->thread_id) * 16777619U;
-		for(unsigned int c=0;c<length;c++) signature = (signature ^ (unsigned char)name[c]) * 16777619U;
-		count++;
+		add_thread_name(&names,(unsigned int)t->thread_id,name);
+		if( names.named ) names.named[names.named_count++] = (unsigned int)t->thread_id;
 	}
+	if( names.named ) add_system_thread_names(&names);
+	free(names.named);
 	if( !buffer.failed && (force || signature != session.threads_signature) ) {
 		write_u32(buffer.data,count);
 		session.threads_signature = signature;

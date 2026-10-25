@@ -719,7 +719,10 @@ static int decode_records( byte_buffer *o,symbols *s,tick_clock *c,uint32_t tid,
 				if(set==0&&!synth_event(o,time,tid,EXPORT_FRAME_BEGIN,name,(uint32_t)n))return 0;}
 			else if(set==0&&!synth_event(o,time,tid,EXPORT_FRAME_IDLE,NULL,0))return 0;
 			break;}
-		case R_EVENT:{if(pos+16>length)goto bad;uint32_t id=u32(p+pos+8),n=u32(p+pos+12);if(pos+16+((n+7)&~7u)>length)goto bad;if(id==PROFILE_EVENT_DROPPED_CALLS){uint64_t total=0;for(uint32_t i=0;i+16<=n;i+=16){total+=u32(p+pos+24+i);if(!short_calls_add(u64(p+pos+16+i),u32(p+pos+24+i)))return 0;}
+		case R_EVENT:{if(pos+16>length)goto bad;uint32_t id=u32(p+pos+8),n=u32(p+pos+12);if(pos+16+((n+7)&~7u)>length)goto bad;
+			/* A name the thread recorded itself replaces one taken from its entry function. */
+			if(id==PROFILE_EVENT_THREAD_NAME)st->named=1;
+			if(id==PROFILE_EVENT_DROPPED_CALLS){uint64_t total=0;for(uint32_t i=0;i+16<=n;i+=16){total+=u32(p+pos+24+i);if(!short_calls_add(u64(p+pos+16+i),u32(p+pos+24+i)))return 0;}
 				/* The frame thread writes its counts at each frame mark: one value per frame. */
 				if(tid==frame_thread&&!synth_counter(o,time,tid,"Short calls dropped per frame",(double)total))return 0;}else if(!synth_event(o,time,tid,id,p+pos+16,n))return 0;size=16+((n+7)&~7u);break;}
 		case R_COUNTER:{if(pos+24>length)goto bad;uint32_t units=u32(p+pos+16),encoding=u32(p+pos+20),bytes=units*(encoding==1?1:2);if(pos+24+((bytes+7)&~7u)>length)goto bad;
@@ -776,7 +779,8 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 		if(type==PUSH_METADATA){if(!parse_symbols(payload,size,table)){fprintf(stderr,"Malformed symbol metadata\n");goto done;}have_metadata=1;}
 		else if(type==PUSH_SESSION&&size>=32)clock.nominal_hz=u64(payload+24);
 		else if(type==PUSH_CLOCK&&size>=16){if(!clock.count)clock.origin_ns=u64(payload+8);if(!clock_add(&clock,u64(payload),u64(payload+8)))goto done;}
-		else if(type==PUSH_THREADS){free(names);names=(unsigned char*)malloc(size?size:1);if(!names)goto done;memcpy(names,payload,size);names_size=size;}
+		/* Every thread list's entries, in order: a thread that exited is in an earlier list only, and a later name wins. */
+		else if(type==PUSH_THREADS&&size>=4){unsigned char *next=(unsigned char*)realloc(names,(size_t)names_size+size-4);if(!next)goto done;names=next;memcpy(names+names_size,payload+4,size-4);names_size+=size-4;}
 		else if(type==CAPTURE_COMPLETE)*complete=1;
 		else if(type==PUSH_DATA&&size>=16){uint32_t flags=u32(payload+4),raw_size=u32(payload+8);const unsigned char *records=payload+16;
 			if(flags&1){if(raw_size>raw_cap){unsigned char *r=(unsigned char*)realloc(raw,raw_size);if(!r)goto done;raw=r;raw_cap=raw_size;}
@@ -790,7 +794,7 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 	   before the first clock pair. */
 	if(clock.count&&clock.nominal_hz)clock.origin_ns=clock.pairs[0].ns-(uint64_t)((double)clock.pairs[0].ticks*1e9/(double)clock.nominal_hz);
 	/* thread names, then the frame track names */
-	if(names_size>=4){uint32_t count=u32(names),pos=4;for(uint32_t i=0;i<count&&pos+8<=names_size;i++){uint32_t tid=u32(names+pos),n=u32(names+pos+4);open_stack *st=stack_of(tid);if(pos+8+n>names_size)break;if(!st||!synth_event(&out,0,tid,PROFILE_EVENT_THREAD_NAME,names+pos+8,n))goto done;st->named=1;pos+=8+n;}}
+	{uint32_t pos=0;while(pos+8<=names_size){uint32_t tid=u32(names+pos),n=u32(names+pos+4);open_stack *st=stack_of(tid);if(n>names_size-pos-8)break;if(!st||!synth_event(&out,0,tid,PROFILE_EVENT_THREAD_NAME,names+pos+8,n))goto done;st->named=1;pos+=8+n;}}
 	if(!synth_event(&out,0,FRAME_TRACK_TID,EXPORT_PROCESS_TRACK,"Frames",6))goto done;
 	/* The runtime's startup: its phases on the thread that ran them, and a "Startup" frame from the start of the session to
 	   the first frame, so the program's own startup (its entry point until the first frame) is a frame too. Only

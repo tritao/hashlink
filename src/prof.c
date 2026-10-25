@@ -930,6 +930,16 @@ HL_PRIM void hl_prof_get_stats( hl_prof_stats *stats ) {
 	stats->drained_bytes = drained_bytes;
 }
 
+HL_PRIM int hl_prof_thread_ids( unsigned int *tids, int max ) {
+	prof_thread *t;
+	int count = 0;
+	REGISTRY_LOCK();
+	for(t=threads;t && count < max;t=t->next)
+		if( t->session == session_id && !t->exited ) tids[count++] = t->tid;
+	REGISTRY_UNLOCK();
+	return count;
+}
+
 HL_PRIM void hl_prof_thread_exit( void ) {
 	prof_thread *t = prof_current;
 	if( t == NULL ) return;

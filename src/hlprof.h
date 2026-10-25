@@ -81,6 +81,9 @@ typedef void (*hl_prof_segment_fn)( void *context, unsigned int tid, const unsig
 HL_API unsigned long long hl_prof_drain( hl_prof_segment_fn fn, void *context );
 HL_API void hl_prof_get_stats( hl_prof_stats *stats );
 
+/* Copies the ids of up to max threads that recorded in the open session and have not exited; returns how many. */
+HL_API int hl_prof_thread_ids( unsigned int *tids, int max );
+
 /* The calling thread is exiting: its remaining records are drained and its state freed. */
 HL_API void hl_prof_thread_exit( void );
 
