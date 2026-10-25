@@ -40,6 +40,7 @@
 
 #ifdef HL_LINUX
 #include <dlfcn.h>
+#include <errno.h>
 #include <link.h>
 #include <semaphore.h>
 #include <signal.h>
@@ -89,6 +90,8 @@ struct _thread_handle {
 #	endif
 	hl_thread_info *inf;
 	char name[128];
+	/* When a thread did not stop for a sample (it blocks the signal), when to try it again. */
+	double retry_at;
 	thread_handle *next;
 };
 
@@ -355,10 +358,20 @@ static struct
 	sem_t msg3;
 	sem_t msg4;
 	ucontext_t context;
+	/* The stop request a handler may take, or 0. The signal carries its request; the handler and a sampler that
+	   stopped waiting both try to take it, so a signal that arrives late returns at once instead of holding its thread
+	   for a sampler that is not coming. */
+	int pending;
 } shared_context;
+
+/* How long the sampler waits for a thread to stop: a thread that exited, or blocks the signal, never does. */
+#define STOP_TIMEOUT_NS 20000000L
 
 static void sigprof_handler(int sig, siginfo_t *info, void *ucontext)
 {
+	int request = info->si_code == SI_QUEUE ? info->si_value.sival_int : 0;
+	if( request == 0 || !__atomic_compare_exchange_n(&shared_context.pending, &request, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) )
+		return;
 	ucontext_t *ctx = ucontext;
 	shared_context.context = *ctx;
 	sem_post(&shared_context.msg2);
@@ -514,7 +527,40 @@ static bool pause_thread( thread_handle *t, bool b ) {
 	}
 #elif defined(HL_LINUX)
 	if( b ) {
-		tgkill(getpid(), t->tid, SIGPROF);
+		static int next_request;
+		double now = hl_sys_time();
+		if( now < t->retry_at )
+			return false;
+		int request = ++next_request;
+		if( request <= 0 )
+			request = next_request = 1;
+		__atomic_store_n(&shared_context.pending, request, __ATOMIC_RELEASE);
+		siginfo_t info;
+		memset(&info, 0, sizeof(info));
+		info.si_signo = SIGPROF;
+		info.si_code = SI_QUEUE;
+		info.si_pid = getpid();
+		info.si_uid = getuid();
+		info.si_value.sival_int = request;
+		if( syscall(SYS_rt_tgsigqueueinfo, getpid(), t->tid, SIGPROF, &info) != 0 ) {
+			// The thread is gone: nothing can take the request.
+			__atomic_store_n(&shared_context.pending, 0, __ATOMIC_RELEASE);
+			return false;
+		}
+		struct timespec deadline;
+		clock_gettime(CLOCK_REALTIME, &deadline);
+		deadline.tv_nsec += STOP_TIMEOUT_NS;
+		if( deadline.tv_nsec >= 1000000000L ) { deadline.tv_sec++; deadline.tv_nsec -= 1000000000L; }
+		int waited;
+		while( (waited = sem_timedwait(&shared_context.msg2, &deadline)) != 0 && errno == EINTR ) {}
+		if( waited == 0 )
+			return true;
+		// Not stopped in time: take the request back, unless its handler took it first and is about to report.
+		int expected = request;
+		if( __atomic_compare_exchange_n(&shared_context.pending, &expected, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ) {
+			t->retry_at = now + 1.0;
+			return false;
+		}
 		return sem_wait(&shared_context.msg2) == 0;
 	} else {
 		sem_post(&shared_context.msg3);
