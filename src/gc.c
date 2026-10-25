@@ -1012,7 +1012,14 @@ HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data) {
 	intptr_t tls = (intptr_t)((uintptr_t)&current_thread - (uintptr_t)__builtin_thread_pointer());
 	if(tls < (-2147483647-1) || tls > 2147483647) return false;
 	data->tls_offset = (int)tls;
-	data->slot_offset = ((part << PAGE_KIND_BITS) | (rt->hasPtr ? MEM_KIND_DYNAMIC : MEM_KIND_NOPTR)) * sizeof(gc_tlab_slot);
+	// An owner's objects live in the owner's pages, so they use that owner's slots. The class is fixed when the module
+	// registers, before it is compiled. Without a class of its own the type allocates through the helper.
+	int oc = 0;
+	if( type->gc_owner != NULL ) {
+		oc = gc_owner_class_lookup(type->gc_owner);
+		if( oc < 0 ) return false;
+	}
+	data->slot_offset = (oc * GC_TLAB_SLOTS + ((part << PAGE_KIND_BITS) | (rt->hasPtr ? MEM_KIND_DYNAMIC : MEM_KIND_NOPTR))) * sizeof(gc_tlab_slot);
 #define GC_TLAB_GUARD(value, bits, width) \
 	data->guards[data->nguards].address = (void*)&(value); \
 	data->guards[data->nguards].mask = (bits); \
