@@ -480,8 +480,10 @@ static void push_threads( hl_socket *socket, bool force ) {
 	unsigned int signature = 2166136261U, count = 0;
 	int main_tid = hl_profile_main_thread();
 	thread_names names = { &buffer, &signature, &count, NULL, 0 };
-	names.named = (unsigned int*)malloc(sizeof(unsigned int) * (threads->count + 1));
 	buffer_u32(&buffer,0);
+	/* A thread that unregisters frees its entry: the list is read under its lock. */
+	hl_gc_threads_lock(true);
+	names.named = (unsigned int*)malloc(sizeof(unsigned int) * (threads->count + 1));
 	for(int i=0;i<threads->count;i++) {
 		hl_thread_info *t = threads->threads[i];
 		const char *name = *t->thread_name ? t->thread_name : t->thread_id == main_tid ? "main" : NULL;
@@ -489,6 +491,7 @@ static void push_threads( hl_socket *socket, bool force ) {
 		add_thread_name(&names,(unsigned int)t->thread_id,name);
 		if( names.named ) names.named[names.named_count++] = (unsigned int)t->thread_id;
 	}
+	hl_gc_threads_lock(false);
 	if( names.named ) add_system_thread_names(&names);
 	free(names.named);
 	if( !buffer.failed && (force || signature != session.threads_signature) ) {

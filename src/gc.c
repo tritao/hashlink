@@ -531,6 +531,10 @@ HL_API void hl_unregister_thread() {
 	hl_mutex_release(gc_threads.global_lock);
 }
 
+HL_API void hl_gc_threads_lock( bool lock ) {
+	gc_global_lock(lock);
+}
+
 HL_API hl_threads_info *hl_gc_threads_info() {
 	return &gc_threads;
 }

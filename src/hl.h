@@ -1120,6 +1120,8 @@ typedef struct {
 
 HL_API hl_thread_info *hl_get_thread();
 HL_API hl_threads_info *hl_gc_threads_info();
+/* Holds the thread list still, for a registered thread to read it: threads register and unregister under this lock. */
+HL_API void hl_gc_threads_lock( bool lock );
 
 #ifdef HL_TRACK_ENABLE
 
