@@ -440,10 +440,15 @@ static void *get_thread_frameptr( void ) {
 /* The registers of the thread being sampled; only the sampler thread touches it. */
 static CONTEXT sample_context;
 
-/* A superseded JIT entry rewritten by hl_jit_patch_method: mov rax, imm64; jmp [rax]. It has no frame of its own. */
+/* A superseded JIT entry rewritten by hl_jit_patch_method: mov rax, imm64; jmp [rax]. It has no frame of its own.
+   The unwind data of a patchable module's function starts after its entry nop (HL_JIT_ENTRY_PAD), where the rewrite starts. */
 static bool is_patch_entry_stub( DWORD64 pc, DWORD64 image_base, PRUNTIME_FUNCTION fn ) {
-	const unsigned char *entry = (const unsigned char*)(image_base + fn->BeginAddress);
-	return pc < (DWORD64)entry + 12 && entry[0] == 0x48 && entry[1] == 0xB8 && entry[10] == 0xFF && entry[11] == 0x20;
+	const unsigned char *begin = (const unsigned char*)(image_base + fn->BeginAddress);
+	for(int pad=0;pad<=HL_JIT_ENTRY_PAD;pad+=HL_JIT_ENTRY_PAD) {
+		const unsigned char *entry = begin - pad;
+		if( pc < (DWORD64)entry + 12 && entry[0] == 0x48 && entry[1] == 0xB8 && entry[10] == 0xFF && entry[11] == 0x20 ) return true;
+	}
+	return false;
 }
 
 /*
@@ -718,6 +723,11 @@ static void read_thread_data( thread_handle *t ) {
     double capture_started = hl_sys_time();
     void *frame = get_thread_frameptr();
     waiting = stopped_in_syscall();
+    // A thread stopped in the stub of a patched function has pushed nothing yet, so its caller's return address is on top
+    // of the stack and the frame pointer chain starts one frame above the caller.
+    void *entry_origin = NULL, *entry_return = NULL;
+    if( frame && eip && hl_module_patch_entry_origin(eip,&entry_origin) && (void**)stack < (void**)t->inf->stack_top )
+        entry_return = *(void**)stack;
     int count = frame ?
         hl_module_capture_stack_from_frame(t->inf->stack_top, stack, frame, data.stackOut, capture_kinds, MAX_STACK_COUNT) :
         hl_module_capture_stack_range(t->inf->stack_top, stack, data.stackOut, MAX_STACK_COUNT);
@@ -725,6 +735,15 @@ static void read_thread_data( thread_handle *t ) {
     pause_thread(t, false);
     sampling_cost.stopped += hl_sys_time() - stopped_at;
     if( frame ) count = keep_sampled_frames(data.stackOut, capture_kinds, count, hl_sys_time());
+    if( entry_origin ) {
+        // Attribute the sample to the function whose entry jumped here, with the caller below it.
+        if( entry_return && count < MAX_STACK_COUNT ) {
+            memmove(data.stackOut + 1,data.stackOut,sizeof(void*) * count);
+            data.stackOut[0] = entry_return;
+            count++;
+        }
+        eip = entry_origin;
+    }
 #else
 	int size = (int)((unsigned char*)t->inf->stack_top - (unsigned char*)stack);
 	if( size > MAX_STACK_SIZE-32 ) size = MAX_STACK_SIZE-32;
@@ -742,6 +761,11 @@ static void read_thread_data( thread_handle *t ) {
 	sampling_cost.stopped += hl_sys_time() - stopped_at;
 	double capture_started = hl_sys_time();
 	int count = unwind_stack_copy(&sample_context,(unsigned char*)(data.tmpMemory + 2),(DWORD64)stack,(DWORD64)stack + size,data.stackOut,MAX_STACK_COUNT);
+	{
+		// A pc in the stub of a patched function (it has no unwind data, so it was read as a leaf) belongs to that function.
+		void *entry_origin;
+		if( count > 0 && hl_module_patch_entry_origin(data.stackOut[0],&entry_origin) ) data.stackOut[0] = entry_origin;
+	}
 	sampling_cost.capture += hl_sys_time() - capture_started;
 #else
 	data.tmpMemory[0] = eip;

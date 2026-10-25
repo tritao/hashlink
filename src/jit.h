@@ -348,6 +348,11 @@ void hl_jit_error( const char *msg, const char *func, int line );
 void *hl_jit_code( jit_ctx *ctx, hl_module *m, int *codesize, hl_debug_infos **debug, hl_module *previous );
 void *hl_jit_patch_code( jit_ctx *ctx, hl_module *m, int *codesize, hl_debug_infos **debug );
 void hl_jit_patch_method( void *old_fun, void **new_fun_table );
+/* Turns the patchable nop at a function entry into a jmp rel32 to stub with one aligned store. False when the entry has no
+   nop (or is already redirected another way) or stub is out of rel32 reach: use hl_jit_patch_method then. */
+bool hl_jit_patch_entry_jump( void *entry, void *stub );
+/* Bytes of patchable nop that start every function of the module being compiled (0 when calls go through the table). */
+int hl_jit_entry_pad( hl_module *m );
 
 static ereg _reg_chk( ereg r, rkind k, ereg ret ) {
 	if( REG_KIND(r) != k ) jit_assert();

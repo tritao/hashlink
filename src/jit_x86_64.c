@@ -1522,6 +1522,13 @@ void hl_codegen_function( jit_ctx *jit ) {
 	int const_addr_prev = int_arr_count(ctx->const_addr);
 	byte_reserve(ctx->code,64);
 	ctx->code.cur -= 64;
+	int entry_pad = hl_jit_entry_pad(jit->mod);
+	if( entry_pad ) {
+		// Callers of a patchable module reach this entry directly: the first patch of the function turns this nop into
+		// a jump to the function's stub with one 8-byte store (see hl_jit_patch_entry_jump). Functions start 16-aligned.
+		emit_nop(ctx,entry_pad);
+		ctx->pos_map[0] = byte_count(ctx->code);
+	}
 #	ifdef GEN_DEBUG
 	int reg_index = 0;
 	int emit_index = 0;

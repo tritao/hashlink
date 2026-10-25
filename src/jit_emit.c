@@ -706,9 +706,14 @@ static void seal_block( emit_ctx *ctx, emit_block *b ) {
 
 static ereg emit_call_fid( emit_ctx *ctx, int findex, ereg *args, int nargs, emit_mode mode ) {
 	einstr *e;
+#	ifdef HL_JIT_DIRECT_PATCHABLE_CALLS
+	if( ctx->mod->staging_patch ) {
+#	else
 	if( ctx->mod->patchable || ctx->mod->staging_patch ) {
-		/* Patchable bytecode calls go through the module table, allowing a
-		   transaction to redirect existing callers without rewriting code. */
+#	endif
+		/* Patch generations go through the module table: it holds the stable stubs, and added functions have no other
+		   entry. The base module of a patchable module calls its own functions directly (see HL_JIT_DIRECT_PATCHABLE_CALLS):
+		   the first patch of a function rewrites its original entry, so callers that never went through the table follow. */
 		ereg target = LOAD_MEM_PTR(LOAD_CONST_PTR(ctx->mod->functions_ptrs), findex * HL_WSIZE);
 		e = emit_instr(ctx, CALL_REG);
 		e->a = target;

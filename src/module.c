@@ -754,9 +754,10 @@ static bool module_init_patch_entries( hl_module *m ) {
 	int count = module_slot_capacity(m->code);
 	int stride = HL_JIT_PATCH_ENTRY_STRIDE;
 	m->patch_targets = (void**)calloc(count,sizeof(void*));
+	m->patch_origin = (void**)calloc(count,sizeof(void*));
 	m->patch_entry_code_size = count * stride;
 	m->patch_entry_code = hl_alloc_executable_memory(m->patch_entry_code_size);
-	if( m->patch_targets == NULL || m->patch_entry_code == NULL ) return false;
+	if( m->patch_targets == NULL || m->patch_origin == NULL || m->patch_entry_code == NULL ) return false;
 	hl_jit_write_begin();
 	memset(m->patch_entry_code,0xCC,m->patch_entry_code_size);
 	hl_jit_write_end(m->patch_entry_code,m->patch_entry_code_size);
@@ -765,6 +766,7 @@ static bool module_init_patch_entries( hl_module *m ) {
 		void *target = m->functions_ptrs[slot];
 		void *entry = (unsigned char*)m->patch_entry_code + slot * stride;
 		m->patch_targets[slot] = target;
+		m->patch_origin[slot] = target;
 		hl_jit_patch_method(entry,m->patch_targets + slot);
 		m->functions_ptrs[slot] = entry;
 	}
@@ -775,6 +777,46 @@ static bool module_init_patch_entries( hl_module *m ) {
 		m->functions_ptrs[slot] = entry;
 	}
 	return true;
+}
+
+void hl_module_redirect_slot( hl_module *m, int slot, void *code ) {
+	if( m->patch_targets == NULL ) {
+		// Without stubs the function's own entry is the only thing to redirect, and the table is what closures read.
+		hl_jit_patch_method(m->functions_ptrs[slot],m->functions_ptrs + slot);
+		m->functions_ptrs[slot] = code;
+		return;
+	}
+	void *origin = m->patch_origin ? m->patch_origin[slot] : NULL;
+	bool first = origin != NULL && m->patch_targets[slot] == origin;
+	// The stub jumps to patch_targets[slot], which still holds the original entry until now: store the new code before
+	// the entry starts jumping to the stub, or a caller would loop between the two.
+	m->patch_targets[slot] = code;
+	if( origin == NULL ) return; // a slot only patches add: nothing but the stub ever reached it
+	// Everything that reaches the original entry (bytecode calls, static closures, prototypes) now follows the new code.
+#	ifdef HL_JIT_DIRECT_PATCHABLE_CALLS
+	// The entry jumps straight to the code when it is within reach, saving the hop through the stub, and to the stub
+	// (reachable, or the entry would not have been rewritten this way) when it is not.
+	void *stub = (unsigned char*)m->patch_entry_code + slot * HL_JIT_PATCH_ENTRY_STRIDE;
+	if( hl_jit_patch_entry_jump(origin,code) || hl_jit_patch_entry_jump(origin,stub) ) return;
+#	endif
+	if( first ) hl_jit_patch_method(origin,m->patch_targets + slot);
+}
+
+bool hl_module_patch_entry_origin( void *pc, void **origin ) {
+	int module_count;
+	hl_module **modules = hl_module_registry_snapshot(&module_count);
+	bool found = false;
+	for(int i=0;i<module_count&&!found;i++) {
+		hl_module *m = modules[i];
+		unsigned char *stubs = (unsigned char*)m->patch_entry_code;
+		if( stubs == NULL || m->patch_origin == NULL || (unsigned char*)pc < stubs || (unsigned char*)pc >= stubs + m->patch_entry_code_size ) continue;
+		void *entry = m->patch_origin[((unsigned char*)pc - stubs) / HL_JIT_PATCH_ENTRY_STRIDE];
+		if( entry == NULL ) continue;
+		*origin = entry;
+		found = true;
+	}
+	hl_module_registry_snapshot_free(modules,module_count);
+	return found;
 }
 
 static void append_fields( char **p, hl_type *t );
@@ -1351,8 +1393,7 @@ h_bool hl_module_patch_slots( hl_module *target, hl_module *generation, const in
 	}
 
 	for(i=0;i<count;i++) {
-		hl_jit_patch_method(target->functions_ptrs[indices[i]],target->functions_ptrs + indices[i]);
-		target->functions_ptrs[indices[i]] = generation->functions_ptrs[indices[i]];
+		hl_module_redirect_slot(target,indices[i],generation->functions_ptrs[indices[i]]);
 	}
 	return true;
 }
@@ -1591,8 +1632,7 @@ h_bool hl_module_patch( hl_module *m1, hl_code *c ) {
 		// update real function ptr
 		if( m2->hash->functions_hashes[i] < 0 ) continue;
 		hl_function *f1 = m1->code->functions + m2->hash->functions_hashes[i];
-		hl_jit_patch_method(m1->functions_ptrs[f1->findex], m1->functions_ptrs + f1->findex);
-		m1->functions_ptrs[f1->findex] = ptr;
+		hl_module_redirect_slot(m1, f1->findex, ptr);
 	}
 	for(i=0;i<m1->code->ntypes;i++) {
 		hl_type *t = m1->code->types + i;
@@ -1663,6 +1703,7 @@ void hl_module_free_shutdown( hl_module *m ) {
 #endif
 	if( m->patch_entry_code ) hl_free_executable_memory(m->patch_entry_code,m->patch_entry_code_size);
 	free(m->patch_targets);
+	free(m->patch_origin);
 	hl_free_executable_memory(m->jit_code, m->codesize);
 	if( m->hash ) hl_code_hash_free(m->hash);
 	free(m->functions_indexes);

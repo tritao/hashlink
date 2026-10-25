@@ -33,6 +33,15 @@
 #define HL_JIT_PATCH_ENTRY_STRIDE 16
 #endif
 
+/* On x86-64 a patchable module's own bytecode calls its functions directly (a plain call rel32, as in a normal module)
+   instead of through the stub table. The first patch of a function then redirects callers by rewriting its original
+   entry, so each function of such a module starts with an HL_JIT_ENTRY_PAD byte nop that one aligned store turns into
+   a jmp rel32 to the slot's stub. Patch generations keep calling through the table. */
+#if defined(HL_64) && !defined(__aarch64__) && !defined(_M_ARM64)
+#define HL_JIT_DIRECT_PATCHABLE_CALLS
+#define HL_JIT_ENTRY_PAD 8
+#endif
+
 typedef struct {
 	const char *lib;
 	const char *name;
@@ -273,6 +282,8 @@ typedef struct {
 	hl_patch_code **patch_owners;
 	hl_patch_code *retired_patch_code;
 	void **patch_targets;
+	/* The original code entry of each slot of the base module (NULL for slots that only patches add). */
+	void **patch_origin;
 	void *patch_entry_code;
 	int patch_entry_code_size;
 	int *patch_ints;
@@ -345,6 +356,10 @@ HL_EXTERN_C HL_EXPORT int hl_module_init( hl_module *m, int flags );
 h_bool hl_module_patch( hl_module *m, hl_code *code );
 /** Atomically redirect compatible function indices to an initialized generation. */
 HL_EXTERN_C HL_EXPORT h_bool hl_module_patch_slots( hl_module *target, hl_module *generation, const int *indices, int count );
+/** Points a function slot at new code: every caller, direct or through the table or a closure, reaches it afterwards. */
+HL_EXTERN_C void hl_module_redirect_slot( hl_module *m, int slot, void *code );
+/** True when pc lies in a patchable module's stub for a slot with an original entry; origin receives that entry. */
+HL_EXTERN_C bool hl_module_patch_entry_origin( void *pc, void **origin );
 /** Validate and redirect every bytecode function to a complete generation. */
 HL_EXTERN_C HL_EXPORT h_bool hl_module_patch_generation( hl_module *target, hl_module *generation );
 HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch( hl_module *module, hl_patch *patch, const char **error_msg );
@@ -453,6 +468,10 @@ HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_validate_call( hl_runt
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const unsigned char *bytes, int length );
 HL_EXTERN_C HL_EXPORT const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_debug_region_count( hl_runtime_module *runtime );
+/** Test hook: how a function's original entry was redirected: 0 untouched, 1 by the 12-byte writer, 2 by the atomic jump, -1 unknown. */
+HL_EXTERN_C HL_EXPORT int hl_runtime_module_entry_state( hl_runtime_module *runtime, int stable_id );
+/** Test hook: 1 when the base code of caller contains a direct call to the original entry of callee, 0 when not, -1 unknown. */
+HL_EXTERN_C HL_EXPORT int hl_runtime_module_calls_directly( hl_runtime_module *runtime, int caller_id, int callee_id );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_hlp_summary( const unsigned char *bytes, int length, int *base_revision, int *revision, int *function_count );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_revision( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_jit_count( hl_runtime_module *runtime );
