@@ -922,11 +922,18 @@ HL_PRIM hl_thread *hl_thread_create( vclosure *c ) {
 }
 
 #if defined(HL_WIN) && defined(HL_THREADS)
-// The thread's description, which debuggers, crash dumps and profilers read.
+// The thread's description, which debuggers, crash dumps and profilers read. Converted on the stack: the thread may
+// not be registered with the GC.
 static void SetThreadDescriptionById(DWORD dwThreadID, const char* threadName) {
-	HANDLE h = OpenThread(THREAD_SET_LIMITED_INFORMATION, FALSE, dwThreadID);
+	char narrow[128];
+	wchar_t wide[128];
+	HANDLE h;
+	strncpy(narrow, threadName, sizeof(narrow) - 1);
+	narrow[sizeof(narrow) - 1] = 0;
+	if( MultiByteToWideChar(CP_UTF8, 0, narrow, -1, wide, 128) <= 0 ) return;
+	h = OpenThread(THREAD_SET_LIMITED_INFORMATION, FALSE, dwThreadID);
 	if( h == NULL ) return;
-	SetThreadDescription(h, hl_to_utf16(threadName));
+	SetThreadDescription(h, wide);
 	CloseHandle(h);
 }
 #ifdef HL_MINGW
