@@ -362,7 +362,7 @@ static int consume( symbols *s,unsigned char *pending,size_t *length,uint64_t *s
 			free(stack);
 			if(pf&&frames&&!pf_sample(pf,s,event_time,tid,pending+pos+24,frames,pending[pos+5]&1))return 0;
 		}else if(pending[pos+4]==2){uint32_t tid=u32(pending+pos+16),event_id=u32(pending+pos+20),payload_size=body-20;const unsigned char *payload=pending+pos+24;if(metadata_dirty&&((event_id==PROFILE_EVENT_MODULE_REVISION&&body==32)||(event_id==PROFILE_EVENT_MODULE_LOADED&&body==28)))*metadata_dirty=1;
-			if(event_id==PROFILE_EVENT_NATIVE_SYMBOL&&payload_size>=24){uint32_t module_len=u32(payload+16),name_len=u32(payload+20);if(module_len+name_len!=payload_size-24||!add_native(u64(payload),u64(payload+8),payload+24,module_len,payload+24+module_len,name_len))return 0;}
+			if(event_id==PROFILE_EVENT_NATIVE_SYMBOL&&payload_size>=24){uint32_t module_len=u32(payload+16),name_len=u32(payload+20);if(module_len>payload_size-24||name_len!=payload_size-24-module_len||!add_native(u64(payload),u64(payload+8),payload+24,module_len,payload+24+module_len,name_len))return 0;}
 			if(event_id==PROFILE_EVENT_NATIVE_LOCATION&&!add_native_location(payload,payload_size))return 0;
 			if(pf&&!pf_event(pf,event_time,tid,event_id,payload,payload_size))return 0;
 			if(perfetto&&(event_id==0x484C2001U||event_id==0x484C2002U)){
@@ -421,6 +421,9 @@ static int console_toggle( void ) {
 #endif
 }
 enum { F_PUSH=4 };
+#define PAD8_64(n) (((uint64_t)(n)+7)&~7ULL)
+/* Larger capture records are malformed: the runtime never pushes a frame over 256 MiB. */
+#define MAX_RECORD (256U<<20)
 enum { SOURCE_INSTRUMENT=1, SOURCE_SAMPLING=2, SOURCE_ALLOC=4 };
 enum { R_ENTER=0x01, R_EXIT=0x02, R_UNWIND=0x03, R_SPAN_BEGIN=0x10, R_SPAN_END=0x11, R_FRAME_MARK=0x12, R_FRAME_IDLE=0x13, R_EVENT=0x20, R_COUNTER=0x21, R_SAMPLE=0x22, R_STALL=0x30 };
 /* Export-only events synthesized from v2 records. */
@@ -529,17 +532,19 @@ static double clock_seconds( tick_clock *c,uint64_t ticks ) {
 /* A thread's open calls (kind 1), spans (2) and hidden calls (3: a thread-start wrapper, which counts as a call but has no
    slice). named: the thread has a name, from the runtime or from its entry function. */
 typedef struct { uint32_t tid; int used,named; unsigned char *kinds; uint32_t count,capacity,calls,pause; } open_stack;
-static open_stack open_stacks[4096];
+#define OPEN_STACKS 65536
+static open_stack open_stacks[OPEN_STACKS];
 static open_stack *stack_of( uint32_t tid ) {
-	uint32_t slot=(tid*2654435761U)&4095;
-	for(uint32_t i=0;i<4096;i++){open_stack *s=open_stacks+((slot+i)&4095);if(!s->used){s->used=1;s->tid=tid;return s;}if(s->tid==tid)return s;}
+	uint32_t slot=(tid*2654435761U)&(OPEN_STACKS-1);
+	for(uint32_t i=0;i<OPEN_STACKS;i++){open_stack *s=open_stacks+((slot+i)&(OPEN_STACKS-1));if(!s->used){s->used=1;s->tid=tid;return s;}if(s->tid==tid)return s;}
+	fprintf(stderr,"The capture has more than %d threads, which the export cannot hold\n",OPEN_STACKS);
 	return NULL;
 }
 static int stack_push( open_stack *s,unsigned char kind ) {
 	if(s->count==s->capacity){uint32_t cap=s->capacity?s->capacity*2:64;unsigned char *k=(unsigned char*)realloc(s->kinds,cap);if(!k)return 0;s->kinds=k;s->capacity=cap;}
 	s->kinds[s->count++]=kind;if(kind!=2)s->calls++;return 1;
 }
-static void stacks_free( void ){for(int i=0;i<4096;i++)free(open_stacks[i].kinds);memset(open_stacks,0,sizeof(open_stacks));}
+static void stacks_free( void ){for(int i=0;i<OPEN_STACKS;i++)free(open_stacks[i].kinds);memset(open_stacks,0,sizeof(open_stacks));}
 
 /* Pauses within the session (PROFILE_EVENT_RECORDING 0), collected in pass 1. Calls that ran while recording was paused
    went unrecorded, so each thread's open calls end at a pause and its stack starts empty after it. */
@@ -721,8 +726,8 @@ static int decode_records( byte_buffer *o,symbols *s,tick_clock *c,uint32_t tid,
 			if(!stack_push(st,1)||!synth_event(o,time,tid,EXPORT_CALL_BEGIN,name,n))return 0;break;}
 		case R_EXIT:if(st->calls&&!close_slices(o,st,time,tid,st->calls-1,0))return 0;break;
 		case R_UNWIND:if(pos+16>length)goto bad;{uint64_t skipped=u64(p+pos+8);if(!close_slices(o,st,time,tid,skipped<st->calls?st->calls-(uint32_t)skipped:0,0))return 0;}size=16;break;
-		case R_SPAN_BEGIN:{if(pos+16>length)goto bad;uint32_t units=u32(p+pos+8),encoding=u32(p+pos+12),bytes=units*(encoding==1?1:2);if(pos+16+((bytes+7)&~7u)>length)goto bad;
-			uint32_t n=record_name(p+pos+16,units,encoding,name,sizeof(name));if(!stack_push(st,2)||!synth_event(o,time,tid,PROFILE_EVENT_SPAN_BEGIN,name,n))return 0;size=16+((bytes+7)&~7u);break;}
+		case R_SPAN_BEGIN:{if(pos+16>length)goto bad;uint32_t units=u32(p+pos+8),encoding=u32(p+pos+12);uint64_t record=16+PAD8_64((uint64_t)units*(encoding==1?1:2));if(pos+record>length)goto bad;
+			uint32_t n=record_name(p+pos+16,units,encoding,name,sizeof(name));if(!stack_push(st,2)||!synth_event(o,time,tid,PROFILE_EVENT_SPAN_BEGIN,name,n))return 0;size=(uint32_t)record;break;}
 		case R_SPAN_END:{int has_span=0;for(uint32_t i=0;i<st->count;i++)if(st->kinds[i]==2)has_span=1;if(has_span&&!close_slices(o,st,time,tid,0,1))return 0;break;}
 		case R_FRAME_MARK:case R_FRAME_IDLE:{if(pos+16>length)goto bad;uint64_t set=u64(p+pos+8);size=16;if(set>=16)break;frame_set_state *f=frame_sets+set;uint32_t frame_tid=FRAME_TRACK_TID+(uint32_t)set;
 			if(f->open&&!synth_event(o,time,frame_tid,PROFILE_EVENT_SPAN_END,NULL,0))return 0;f->open=0;
@@ -731,14 +736,14 @@ static int decode_records( byte_buffer *o,symbols *s,tick_clock *c,uint32_t tid,
 				if(set==0&&!synth_event(o,time,tid,EXPORT_FRAME_BEGIN,name,(uint32_t)n))return 0;}
 			else if(set==0&&!synth_event(o,time,tid,EXPORT_FRAME_IDLE,NULL,0))return 0;
 			break;}
-		case R_EVENT:{if(pos+16>length)goto bad;uint32_t id=u32(p+pos+8),n=u32(p+pos+12);if(pos+16+((n+7)&~7u)>length)goto bad;
+		case R_EVENT:{if(pos+16>length)goto bad;uint32_t id=u32(p+pos+8),n=u32(p+pos+12);if(pos+16+PAD8_64(n)>length)goto bad;
 			/* A name the thread recorded itself replaces one taken from its entry function. */
 			if(id==PROFILE_EVENT_THREAD_NAME)st->named=1;
 			if(id==PROFILE_EVENT_DROPPED_CALLS){uint64_t total=0;for(uint32_t i=0;i+16<=n;i+=16){total+=u32(p+pos+24+i);if(!short_calls_add(u64(p+pos+16+i),u32(p+pos+24+i)))return 0;}
 				if(tid==frame_thread)frame_dropped+=total;}else if(!synth_event(o,time,tid,id,p+pos+16,n))return 0;size=16+((n+7)&~7u);break;}
-		case R_COUNTER:{if(pos+24>length)goto bad;uint32_t units=u32(p+pos+16),encoding=u32(p+pos+20),bytes=units*(encoding==1?1:2);if(pos+24+((bytes+7)&~7u)>length)goto bad;
-			uint32_t n=record_name(p+pos+24,units,encoding,name,sizeof(name));if(!synth(o,2,0,time,tid,PROFILE_EVENT_COUNTER,p+pos+8,8,name,n))return 0;size=24+((bytes+7)&~7u);break;}
-		case R_SAMPLE:{if(pos+16>length)goto bad;uint64_t w1=u64(p+pos+8);uint32_t sample_tid=(uint32_t)w1,frames=(uint32_t)((w1>>32)&0xFFFF),flags=(uint32_t)((w1>>48)&0xFF);if(pos+16+frames*8>length)goto bad;
+		case R_COUNTER:{if(pos+24>length)goto bad;uint32_t units=u32(p+pos+16),encoding=u32(p+pos+20);uint64_t record=24+PAD8_64((uint64_t)units*(encoding==1?1:2));if(pos+record>length)goto bad;
+			uint32_t n=record_name(p+pos+24,units,encoding,name,sizeof(name));if(!synth(o,2,0,time,tid,PROFILE_EVENT_COUNTER,p+pos+8,8,name,n))return 0;size=(uint32_t)record;break;}
+		case R_SAMPLE:{if(pos+16>length)goto bad;uint64_t w1=u64(p+pos+8);uint32_t sample_tid=(uint32_t)w1,frames=(uint32_t)((w1>>32)&0xFFFF),flags=(uint32_t)((w1>>48)&0xFF);if(pos+16+(uint64_t)frames*8>length)goto bad;
 			if(!synth(o,1,(int)flags,time,sample_tid,frames,p+pos+16,frames*8,NULL,0))return 0;size=16+frames*8;break;}
 		case R_STALL:{if(pos+16>length)goto bad;double end=clock_seconds(c,u64(p+pos+8)&TICK_MASK);if(!synth_event(o,time,tid,EXPORT_STALL,&end,8))return 0;size=16;break;}
 		default:goto bad;}
@@ -759,37 +764,47 @@ bad:
 static int scan_pass1( const unsigned char *p,uint32_t length,uint32_t tid ) {
 	uint32_t pos=0;
 	while(pos+8<=length){
-		uint32_t kind=(uint32_t)(u64(p+pos)>>56),size=8;
+		uint32_t kind=(uint32_t)(u64(p+pos)>>56);uint64_t size=8;
 		if(kind==R_EXIT||kind==R_SPAN_END){pos+=8;continue;}
 		if(pos+16>length)return 1;
 		if(kind==R_FRAME_MARK&&!frame_thread&&u64(p+pos+8)==0)frame_thread=tid;
 		switch(kind){
 		case R_ENTER:case R_UNWIND:case R_FRAME_MARK:case R_FRAME_IDLE:case R_STALL:size=16;break;
-		case R_SPAN_BEGIN:{uint32_t bytes=u32(p+pos+8)*(u32(p+pos+12)==1?1:2);size=16+((bytes+7)&~7u);break;}
-		case R_COUNTER:{if(pos+24>length)return 1;uint32_t bytes=u32(p+pos+16)*(u32(p+pos+20)==1?1:2);size=24+((bytes+7)&~7u);break;}
-		case R_SAMPLE:size=16+(uint32_t)((u64(p+pos+8)>>32)&0xFFFF)*8;break;
-		case R_EVENT:{uint32_t id=u32(p+pos+8),n=u32(p+pos+12);const unsigned char *payload=p+pos+16;size=16+((n+7)&~7u);
+		case R_SPAN_BEGIN:size=16+PAD8_64((uint64_t)u32(p+pos+8)*(u32(p+pos+12)==1?1:2));break;
+		case R_COUNTER:if(pos+24>length)return 1;size=24+PAD8_64((uint64_t)u32(p+pos+16)*(u32(p+pos+20)==1?1:2));break;
+		case R_SAMPLE:size=16+((u64(p+pos+8)>>32)&0xFFFF)*8;break;
+		case R_EVENT:{uint32_t id=u32(p+pos+8),n=u32(p+pos+12);const unsigned char *payload=p+pos+16;size=16+PAD8_64(n);
 			if(pos+size>length)return 1;
 			if(id==PROFILE_EVENT_RECORDING&&n>=4&&payload[0]==0&&!add_pause(u64(p+pos)&TICK_MASK,tid))return 0;
 			if(id==PROFILE_EVENT_STARTUP&&!startup&&n>=8){if(!(startup=(unsigned char*)malloc(n)))return 0;memcpy(startup,payload,n);startup_size=n;}
-			if(id==PROFILE_EVENT_NATIVE_SYMBOL&&n>=24){uint32_t module_len=u32(payload+16),name_len=u32(payload+20);if(module_len+name_len==n-24&&!add_native(u64(payload),u64(payload+8),payload+24,module_len,payload+24+module_len,name_len))return 0;}
+			if(id==PROFILE_EVENT_NATIVE_SYMBOL&&n>=24){uint32_t module_len=u32(payload+16),name_len=u32(payload+20);if(module_len<=n-24&&name_len==n-24-module_len&&!add_native(u64(payload),u64(payload+8),payload+24,module_len,payload+24+module_len,name_len))return 0;}
 			break;}
 		default:return 1;}
-		pos+=size;}
+		if(pos+size>length)return 1;
+		pos+=(uint32_t)size;}
 	return 1;
+}
+
+/* Grows *buffer to hold size bytes; on failure *buffer is kept, for the caller to free. */
+static int grow( unsigned char **buffer,uint32_t *capacity,uint32_t size ) {
+	unsigned char *next;
+	if(size<=*capacity&&*buffer)return 1;
+	if(!(next=(unsigned char*)realloc(*buffer,size?size:1)))return 0;
+	*buffer=next;*capacity=size;return 1;
 }
 
 /* Reads a v2 capture (positioned after its header) into consume(): metadata, clock pairs and thread names first, then
    every thread's records. */
 static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,uint64_t *samples,uint64_t *unresolved,folded_table *folded_stacks,int show_lines,int raw_leaf,FILE *perfetto,int *perfetto_first,double *time_origin,uint32_t pid,pf_export *pf,int *complete ) {
-	unsigned char record_header[16],*payload=NULL,*raw=NULL;uint32_t raw_cap=0;long data_start=ftell(file);tick_clock clock={0};byte_buffer out={0},fresh={0};reorder_buffer order={0};int code=0,have_metadata=0;uint64_t malformed=0;
+	unsigned char record_header[16],*payload=NULL,*raw=NULL;uint32_t raw_cap=0,payload_cap=0;long data_start=ftell(file);tick_clock clock={0};byte_buffer out={0},fresh={0};reorder_buffer order={0};int code=0,have_metadata=0;uint64_t malformed=0;
 	unsigned char *names=NULL;uint32_t names_size=0;
 	memset(frame_sets,0,sizeof(frame_sets));
 	pause_count=0;frame_thread=0;free(startup);startup=NULL;startup_size=0;frame_dropped=0;frame_started=closed_frame=-1;frame_closing=0;
 	/* pass 1: the last metadata snapshot (it lists retired regions too), clock pairs, session and thread names */
 	while(fread(record_header,1,16,file)==16){
 		uint32_t type=u32(record_header),size=u32(record_header+4);
-		payload=(unsigned char*)realloc(payload,size?size:1);if(!payload)goto done;
+		if(size>MAX_RECORD){fprintf(stderr,"warning: oversized capture record; the capture ends there\n");break;}
+		if(!grow(&payload,&payload_cap,size))goto done;
 		if(size&&fread(payload,1,size,file)!=size){fprintf(stderr,"warning: truncated capture record\n");break;}
 		if(type==PUSH_METADATA){if(!parse_symbols(payload,size,table)){fprintf(stderr,"Malformed symbol metadata\n");goto done;}have_metadata=1;}
 		else if(type==PUSH_SESSION&&size>=32)clock.nominal_hz=u64(payload+24);
@@ -798,7 +813,7 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 		else if(type==PUSH_THREADS&&size>=4){unsigned char *next=(unsigned char*)realloc(names,(size_t)names_size+size-4);if(!next)goto done;names=next;memcpy(names+names_size,payload+4,size-4);names_size+=size-4;}
 		else if(type==CAPTURE_COMPLETE)*complete=1;
 		else if(type==PUSH_DATA&&size>=16){uint32_t flags=u32(payload+4),raw_size=u32(payload+8);const unsigned char *records=payload+16;
-			if(flags&1){if(raw_size>raw_cap){unsigned char *r=(unsigned char*)realloc(raw,raw_size);if(!r)goto done;raw=r;raw_cap=raw_size;}
+			if(flags&1){if(raw_size>MAX_RECORD)continue;if(!grow(&raw,&raw_cap,raw_size))goto done;
 				if(LZ4_decompress_safe((const char*)payload+16,(char*)raw,(int)(size-16),(int)raw_size)!=(int)raw_size)continue;records=raw;}
 			else raw_size=size-16;
 			if(!scan_pass1(records,raw_size,u32(payload)))goto done;}
@@ -824,11 +839,12 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 	if(fseek(file,data_start,SEEK_SET)!=0)goto done;
 	while(fread(record_header,1,16,file)==16){
 		uint32_t type=u32(record_header),size=u32(record_header+4);uint64_t elapsed=u64(record_header+8);
-		payload=(unsigned char*)realloc(payload,size?size:1);if(!payload)goto done;
+		if(size>MAX_RECORD)break;
+		if(!grow(&payload,&payload_cap,size))goto done;
 		if(size&&fread(payload,1,size,file)!=size)break;
 		if(type!=PUSH_DATA||size<16||elapsed<start_ns||elapsed>end_ns)continue;
 		{uint32_t tid=u32(payload),flags=u32(payload+4),raw_size=u32(payload+8);const unsigned char *records=payload+16;
-			if(flags&1){if(raw_size>raw_cap){unsigned char *r=(unsigned char*)realloc(raw,raw_size);if(!r)goto done;raw=r;raw_cap=raw_size;}
+			if(flags&1){if(raw_size>MAX_RECORD){malformed++;continue;}if(!grow(&raw,&raw_cap,raw_size))goto done;
 				if(LZ4_decompress_safe((const char*)payload+16,(char*)raw,(int)(size-16),(int)raw_size)!=(int)raw_size){malformed++;continue;}records=raw;}
 			else raw_size=size-16;
 			if(!decode_records(&fresh,table,&clock,tid,records,raw_size,&malformed)||!reorder_add(&order,fresh.data,fresh.length))goto done;
@@ -838,7 +854,7 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 	}
 	/* close what is still open when the capture ends */
 	{double end=clock.count?clock_seconds(&clock,clock.pairs[clock.count-1].ticks):0;if(end<order.newest)end=order.newest;
-		for(int i=0;i<4096;i++)if(open_stacks[i].used&&!close_slices(&fresh,open_stacks+i,end,open_stacks[i].tid,0,0))goto done;
+		for(int i=0;i<OPEN_STACKS;i++)if(open_stacks[i].used&&!close_slices(&fresh,open_stacks+i,end,open_stacks[i].tid,0,0))goto done;
 		for(int i=0;i<16;i++)if(frame_sets[i].open&&!synth_event(&fresh,end,FRAME_TRACK_TID+(uint32_t)i,PROFILE_EVENT_SPAN_END,NULL,0))goto done;
 		if(!reorder_add(&order,fresh.data,fresh.length)||!reorder_release(&order,1e300,&out))goto done;}
 	if(order.late)fprintf(stderr,"warning: %llu records arrived more than %.0f s late and were moved to keep time order\n",(unsigned long long)order.late,REORDER_WINDOW);
