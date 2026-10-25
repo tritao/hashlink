@@ -1014,12 +1014,17 @@ HL_PRIM void hl_thread_set_name( hl_thread *t, const char *name ) {
 	int tid = hl_get_thread_id(t);
 	int len = (int)strlen(name);
 	if( len >= 127 ) len = 126;
-	for(int i=0;i<threads->count;i++) {
-		tinf = threads->threads[i];
-		if( tinf->thread_id == tid ) {
-			memcpy(tinf->thread_name, name, len);
-			tinf->thread_name[len] = 0;
+	// The list is read under its lock, which only a registered thread can take; others name only the system thread.
+	if( hl_get_thread() ) {
+		hl_gc_threads_lock(true);
+		for(int i=0;i<threads->count;i++) {
+			tinf = threads->threads[i];
+			if( tinf->thread_id == tid ) {
+				memcpy(tinf->thread_name, name, len);
+				tinf->thread_name[len] = 0;
+			}
 		}
+		hl_gc_threads_lock(false);
 	}
 	// A recording session gets the name in the thread's own records, so it holds even if the thread exits before the
 	// session's next thread list.
@@ -1032,11 +1037,19 @@ HL_PRIM vbyte *hl_thread_get_name( hl_thread *t ) {
 	hl_threads_info *threads = hl_gc_threads_info();
 	hl_thread_info *tinf;
 	int tid = hl_get_thread_id(t);
+	vbyte *name = NULL;
+	// Read under the list's lock, as hl_thread_set_name writes it; only a registered thread can take it.
+	if( !hl_get_thread() ) return NULL;
+	hl_gc_threads_lock(true);
 	for(int i=0;i<threads->count;i++) {
 		tinf = threads->threads[i];
-		if( tinf->thread_id == tid )
-			return *tinf->thread_name ? (vbyte*)tinf->thread_name : NULL;
+		if( tinf->thread_id == tid ) {
+			name = *tinf->thread_name ? (vbyte*)tinf->thread_name : NULL;
+			break;
+		}
 	}
+	hl_gc_threads_lock(false);
+	return name;
 #endif
 	return NULL;
 }
