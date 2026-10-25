@@ -553,10 +553,31 @@ static recording_pause *pauses;static uint32_t pause_count,pause_capacity;
 static int pause_compare( const void *a,const void *b ){uint64_t x=((const recording_pause*)a)->ticks,y=((const recording_pause*)b)->ticks;return x<y?-1:x>y?1:0;}
 /* Also from pass 1: the thread that marks the main frames, and the runtime's startup phases (PROFILE_EVENT_STARTUP). */
 static uint32_t frame_thread;
-/* The frame thread's dropped short calls, summed per frame: the runtime writes them whenever a thread's table fills and at
-   each frame boundary, right after the boundary's record, so the counts that follow a boundary close the frame before it.
-   closing: 2 on the boundary record, 1 until the record after it. */
-static uint64_t frame_dropped;static double frame_started,closed_frame;static int frame_closing;
+/* The frame thread's dropped short calls, summed per frame in pass 1, so pass 2 writes each frame's total where the frame
+   starts rather than where its last count arrives, which can be later than the reorder window. The runtime writes counts
+   whenever a thread's table fills and at each frame boundary, right after the boundary's record, so the counts that follow
+   a boundary close the frame before it. Frame i starts at tick frame_drop_starts[i]: 0 for the one before the first
+   boundary. Pass 2 finds frames by tick, since a window skips some boundaries. */
+static uint64_t *frame_drops,*frame_drop_starts;static uint32_t frame_drop_count,frame_drop_capacity,frame_drop_cursor;static uint64_t frame_drop_running,frame_drop_start;static int frame_drop_follows;
+/* Other threads' counts in pass 1, until one of them turns out to be the frame thread. */
+typedef struct { uint32_t tid; int used; uint64_t total; } thread_drops;
+static thread_drops early_drops[OPEN_STACKS];
+static thread_drops *early_drops_of( uint32_t tid ) {
+	uint32_t slot=(tid*2654435761U)&(OPEN_STACKS-1);
+	for(uint32_t i=0;i<OPEN_STACKS;i++){thread_drops *d=early_drops+((slot+i)&(OPEN_STACKS-1));if(!d->used){d->used=1;d->tid=tid;return d;}if(d->tid==tid)return d;}
+	return NULL;
+}
+/* Ends the frame thread's current frame; the next starts at next_start. */
+static int frame_drops_close( uint64_t next_start ) {
+	if(frame_drop_count==frame_drop_capacity){uint32_t cap=frame_drop_capacity?frame_drop_capacity*2:1024;uint64_t *totals=(uint64_t*)realloc(frame_drops,cap*sizeof(uint64_t)),*starts;
+		if(!totals)return 0;frame_drops=totals;if(!(starts=(uint64_t*)realloc(frame_drop_starts,cap*sizeof(uint64_t))))return 0;frame_drop_starts=starts;frame_drop_capacity=cap;}
+	frame_drop_starts[frame_drop_count]=frame_drop_start;frame_drops[frame_drop_count++]=frame_drop_running;frame_drop_running=0;frame_drop_start=next_start;return 1;
+}
+/* The dropped calls of the frame starting at ticks, or -1 if none starts there. */
+static double frame_drops_at( uint64_t ticks ) {
+	while(frame_drop_cursor<frame_drop_count&&frame_drop_starts[frame_drop_cursor]<ticks)frame_drop_cursor++;
+	return frame_drop_cursor<frame_drop_count&&frame_drop_starts[frame_drop_cursor]==ticks?(double)frame_drops[frame_drop_cursor]:-1;
+}
 static unsigned char *startup;static uint32_t startup_size;
 static int add_pause( uint64_t ticks,uint32_t tid ) {
 	if(pause_count==pause_capacity){uint32_t cap=pause_capacity?pause_capacity*2:16;recording_pause *p=(recording_pause*)realloc(pauses,cap*sizeof(*p));if(!p)return 0;pauses=p;pause_capacity=cap;}
@@ -733,7 +754,8 @@ static int decode_records( byte_buffer *o,symbols *s,tick_clock *c,uint32_t tid,
 		case R_SPAN_END:{int has_span=0;for(uint32_t i=0;i<st->count;i++)if(st->kinds[i]==2)has_span=1;if(has_span&&!close_slices(o,st,time,tid,0,1))return 0;break;}
 		case R_FRAME_MARK:case R_FRAME_IDLE:{if(pos+16>length)goto bad;uint64_t set=u64(p+pos+8);size=16;if(set>=16)break;frame_set_state *f=frame_sets+set;uint32_t frame_tid=FRAME_TRACK_TID+(uint32_t)set;
 			if(f->open&&!synth_event(o,time,frame_tid,PROFILE_EVENT_SPAN_END,NULL,0))return 0;f->open=0;
-			if(set==0&&tid==frame_thread){closed_frame=frame_started;frame_started=time;frame_closing=2;}
+			/* The frame (or idle stretch) starting here: its dropped calls, from pass 1. */
+			if(set==0&&tid==frame_thread){double dropped=frame_drops_at(w0&TICK_MASK);if(dropped>=0&&!synth_counter(o,time,tid,"Short calls dropped per frame",dropped))return 0;}
 			if(kind==R_FRAME_MARK){int n=snprintf(name,sizeof(name),"Frame %llu",(unsigned long long)++f->number);if(!synth_event(o,time,frame_tid,PROFILE_EVENT_SPAN_BEGIN,name,(uint32_t)n))return 0;f->open=1;f->tid=tid;
 				if(set==0&&!synth_event(o,time,tid,EXPORT_FRAME_BEGIN,name,(uint32_t)n))return 0;}
 			else if(set==0&&!synth_event(o,time,tid,EXPORT_FRAME_IDLE,NULL,0))return 0;
@@ -741,18 +763,14 @@ static int decode_records( byte_buffer *o,symbols *s,tick_clock *c,uint32_t tid,
 		case R_EVENT:{if(pos+16>length)goto bad;uint32_t id=u32(p+pos+8),n=u32(p+pos+12);if(pos+16+PAD8_64(n)>length)goto bad;
 			/* A name the thread recorded itself replaces one taken from its entry function. */
 			if(id==PROFILE_EVENT_THREAD_NAME)st->named=1;
-			if(id==PROFILE_EVENT_DROPPED_CALLS){uint64_t total=0;for(uint32_t i=0;i+16<=n;i+=16){total+=u32(p+pos+24+i);if(!short_calls_add(u64(p+pos+16+i),u32(p+pos+24+i)))return 0;}
-				if(tid==frame_thread)frame_dropped+=total;}else if(!synth_event(o,time,tid,id,p+pos+16,n))return 0;size=16+((n+7)&~7u);break;}
+			if(id==PROFILE_EVENT_DROPPED_CALLS){for(uint32_t i=0;i+16<=n;i+=16)if(!short_calls_add(u64(p+pos+16+i),u32(p+pos+24+i)))return 0;}
+			else if(!synth_event(o,time,tid,id,p+pos+16,n))return 0;size=16+((n+7)&~7u);break;}
 		case R_COUNTER:{if(pos+24>length)goto bad;uint32_t units=u32(p+pos+16),encoding=u32(p+pos+20);uint64_t record=24+PAD8_64((uint64_t)units*(encoding==1?1:2));if(pos+record>length)goto bad;
 			uint32_t n=record_name(p+pos+24,units,encoding,name,sizeof(name));if(!synth(o,2,0,time,tid,PROFILE_EVENT_COUNTER,p+pos+8,8,name,n))return 0;size=(uint32_t)record;break;}
 		case R_SAMPLE:{if(pos+16>length)goto bad;uint64_t w1=u64(p+pos+8);uint32_t sample_tid=(uint32_t)w1,frames=(uint32_t)((w1>>32)&0xFFFF),flags=(uint32_t)((w1>>48)&0xFF);if(pos+16+(uint64_t)frames*8>length)goto bad;
 			if(!synth(o,1,(int)flags,time,sample_tid,frames,p+pos+16,frames*8,NULL,0))return 0;size=16+frames*8;break;}
 		case R_STALL:{if(pos+16>length)goto bad;double end=clock_seconds(c,u64(p+pos+8)&TICK_MASK);if(!synth_event(o,time,tid,EXPORT_STALL,&end,8))return 0;size=16;break;}
 		default:goto bad;}
-		/* A frame's dropped calls, as one counter value from the frame's start. */
-		if(tid==frame_thread&&frame_closing&&--frame_closing==0){
-			if(closed_frame>=0&&!synth_counter(o,closed_frame,tid,"Short calls dropped per frame",(double)frame_dropped))return 0;
-			frame_dropped=0;}
 		pos+=size;}
 	return 1;
 bad:
@@ -766,10 +784,12 @@ bad:
 static int scan_pass1( const unsigned char *p,uint32_t length,uint32_t tid ) {
 	uint32_t pos=0;
 	while(pos+8<=length){
-		uint32_t kind=(uint32_t)(u64(p+pos)>>56);uint64_t size=8;
+		uint32_t kind=(uint32_t)(u64(p+pos)>>56);uint64_t size=8;int follows=0;
+		if(tid==frame_thread){follows=frame_drop_follows;frame_drop_follows=0;}
 		if(kind==R_EXIT||kind==R_SPAN_END){pos+=8;continue;}
 		if(pos+16>length)return 1;
-		if(kind==R_FRAME_MARK&&!frame_thread&&u64(p+pos+8)==0)frame_thread=tid;
+		if(kind==R_FRAME_MARK&&!frame_thread&&u64(p+pos+8)==0){thread_drops *d=early_drops_of(tid);frame_thread=tid;frame_drop_running=d?d->total:0;}
+		if((kind==R_FRAME_MARK||kind==R_FRAME_IDLE)&&tid==frame_thread&&u64(p+pos+8)==0){if(!frame_drops_close(u64(p+pos)&TICK_MASK))return 0;frame_drop_follows=1;}
 		switch(kind){
 		case R_ENTER:case R_UNWIND:case R_FRAME_MARK:case R_FRAME_IDLE:case R_STALL:size=16;break;
 		case R_SPAN_BEGIN:size=16+PAD8_64((uint64_t)u32(p+pos+8)*(u32(p+pos+12)==1?1:2));break;
@@ -778,6 +798,8 @@ static int scan_pass1( const unsigned char *p,uint32_t length,uint32_t tid ) {
 		case R_EVENT:{uint32_t id=u32(p+pos+8),n=u32(p+pos+12);const unsigned char *payload=p+pos+16;size=16+PAD8_64(n);
 			if(pos+size>length)return 1;
 			if(id==PROFILE_EVENT_RECORDING&&n>=4&&payload[0]==0&&!add_pause(u64(p+pos)&TICK_MASK,tid))return 0;
+			if(id==PROFILE_EVENT_DROPPED_CALLS){uint64_t total=0;thread_drops *d;for(uint32_t i=0;i+16<=n;i+=16)total+=u32(payload+8+i);
+				if(tid!=frame_thread){if((d=early_drops_of(tid))!=NULL)d->total+=total;}else if(follows&&frame_drop_count)frame_drops[frame_drop_count-1]+=total;else frame_drop_running+=total;}
 			if(id==PROFILE_EVENT_STARTUP&&!startup&&n>=8){if(!(startup=(unsigned char*)malloc(n)))return 0;memcpy(startup,payload,n);startup_size=n;}
 			if(id==PROFILE_EVENT_NATIVE_SYMBOL&&n>=24){uint32_t module_len=u32(payload+16),name_len=u32(payload+20);if(module_len<=n-24&&name_len==n-24-module_len&&!add_native(u64(payload),u64(payload+8),payload+24,module_len,payload+24+module_len,name_len))return 0;}
 			break;}
@@ -801,7 +823,7 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 	unsigned char record_header[16],*payload=NULL,*raw=NULL;uint32_t raw_cap=0,payload_cap=0;long data_start=ftell(file);tick_clock clock={0};byte_buffer out={0},fresh={0};reorder_buffer order={0};int code=0,have_metadata=0;uint64_t malformed=0;
 	unsigned char *names=NULL;uint32_t names_size=0;
 	memset(frame_sets,0,sizeof(frame_sets));
-	pause_count=0;frame_thread=0;free(startup);startup=NULL;startup_size=0;frame_dropped=0;frame_started=closed_frame=-1;frame_closing=0;
+	pause_count=0;frame_thread=0;free(startup);startup=NULL;startup_size=0;free(frame_drops);free(frame_drop_starts);frame_drops=frame_drop_starts=NULL;frame_drop_count=frame_drop_capacity=frame_drop_cursor=0;frame_drop_running=frame_drop_start=0;frame_drop_follows=0;memset(early_drops,0,sizeof(early_drops));
 	/* pass 1: the last metadata snapshot (it lists retired regions too), clock pairs, session and thread names */
 	while(fread(record_header,1,16,file)==16){
 		uint32_t type=u32(record_header),size=u32(record_header+4);
@@ -821,6 +843,7 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 			if(!scan_pass1(records,raw_size,u32(payload)))goto done;}
 	}
 	if(!have_metadata){fprintf(stderr,"The capture holds no symbol metadata\n");goto done;}
+	if(frame_thread&&!frame_drops_close(0))goto done;
 	if(pause_count)qsort(pauses,pause_count,sizeof(recording_pause),pause_compare);
 	/* Time 0 is the session's base tick, which a session started during the runtime's startup puts at its first phase,
 	   before the first clock pair. */
@@ -833,7 +856,8 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 	   the Perfetto trace shows them: the other exports read spans and calls as the program's own. */
 	if(startup&&pf){uint32_t tid=u32(startup),count=u32(startup+4),pos=8,frames_tid=frame_thread?frame_thread:tid;
 		if(!synth_event(&out,0,FRAME_TRACK_TID,PROFILE_EVENT_SPAN_BEGIN,"Startup",7)||!synth_event(&out,0,frames_tid,EXPORT_FRAME_BEGIN,"Startup",7))goto done;
-		frame_sets[0].open=1;frame_sets[0].tid=frames_tid;frame_started=0;
+		frame_sets[0].open=1;frame_sets[0].tid=frames_tid;
+		if(frame_drop_count&&frame_drop_starts[0]==0&&!synth_counter(&out,0,frames_tid,"Short calls dropped per frame",(double)frame_drops[0]))goto done;
 		for(uint32_t i=0;i<count&&pos+24<=startup_size;i++){uint32_t n=u32(startup+pos+16);if(n>startup_size-pos-24)break;
 			if(!synth_event(&out,clock_seconds(&clock,u64(startup+pos)),tid,EXPORT_PHASE_BEGIN,startup+pos+24,n)||!synth_event(&out,clock_seconds(&clock,u64(startup+pos+8)),tid,EXPORT_PHASE_END,NULL,0))goto done;
 			pos+=24+((n+7)&~7u);}}
