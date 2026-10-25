@@ -285,6 +285,7 @@ typedef struct {
 	uint64_t tc_iid;
 	uint64_t stack_uuid;	/* the thread's call-stack track, 0 until used */
 	uint32_t tid;
+	uint32_t trace_tid;	/* the tid its descriptor gave Perfetto: the pid for the main thread */
 	int emitted;
 	int process_track, rank;	/* a process-level track (pftrace_process_track), not a thread */
 	char *name;
@@ -485,9 +486,11 @@ static void emit_thread( pftrace *t, thread_entry *th, uint64_t ts ) {
 		/* Perfetto lists a process's threads by tid, except its main thread (tid == pid), which comes first. The main
 		   thread takes that tid, and its name keeps the real one. */
 		snprintf(main_name, sizeof(main_name), "main (thread %lu)", (unsigned long)th->tid);
+		th->trace_tid = t->pid;
 		pb_vi(&t->pk, 2, t->pid);
 		pb_str(&t->pk, 5, main_name, strlen(main_name));
 	} else {
+		th->trace_tid = th->tid;
 		pb_vi(&t->pk, 2, th->tid);
 		pb_str(&t->pk, 5, th->name, strlen(th->name));
 	}
@@ -937,7 +940,8 @@ void pftrace_sample( pftrace *t, uint64_t ts_ns, uint32_t tid, const uint64_t *f
 		a = pb_begin(&t->in, F_IN_TASK_CONTEXTS);
 		pb_vi(&t->in, 1, th->tc_iid);
 		pb_vi(&t->in, 2, t->pid);
-		pb_vi(&t->in, 3, tid);
+		/* The samples go to the thread its descriptor named. */
+		pb_vi(&t->in, 3, th->trace_tid);
 		pb_end(&t->in, a);
 	}
 	cs = intern_stack(t, frames_root_first, count);
