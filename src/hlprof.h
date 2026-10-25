@@ -70,6 +70,9 @@ HL_API void hl_prof_stop( void );
    hl_prof_stats.lost_records, instead of waiting for the consumer to free a chunk. For the consumer thread itself, and
    around writes made holding a lock the consumer takes. */
 HL_API void hl_prof_no_wait( bool on );
+/* False within hl_prof_no_wait on the calling thread. Such a section records no calls, instrumented or hooked: one that
+   lost its ENTER or EXIT to a full pool would unpair the thread's calls. A call must not span its start or end. */
+HL_API bool hl_prof_may_wait( void );
 /* Marks the start of a runtime startup phase on the calling thread (the previous one ends there); NULL marks the program's
    entry point and ends them. A session started in between records them in a PROFILE_EVENT_STARTUP event. */
 HL_API void hl_prof_startup_phase( const char *name );

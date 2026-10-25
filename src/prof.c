@@ -523,7 +523,7 @@ static void release_thread( prof_thread *t ) {
 static FORCE_INLINE void write_enter( unsigned long long key, bool keep ) {
 	prof_thread *t;
 	unsigned char *p;
-	if( !hl_prof_on || (p = reserve(&t,16)) == NULL ) return;
+	if( !hl_prof_on || no_wait_depth || (p = reserve(&t,16)) == NULL ) return;
 	((unsigned long long*)p)[0] = head(HL_PROF_ENTER);
 	((unsigned long long*)p)[1] = key;
 	t->depth++;
@@ -546,7 +546,7 @@ HL_PRIM void hl_prof_exit( void ) {
 	prof_thread *t = prof_current;
 	unsigned char *p;
 	unsigned long long now;
-	if( !hl_prof_on ) return;
+	if( !hl_prof_on || no_wait_depth ) return;
 	now = now_ticks();
 	/* With a run held, the innermost open call's ENTER is its last record. A short call is dropped by taking it back. */
 	if( t != NULL && t->held != NULL && t->session == session_id && t->held_recording == recording_changes ) {
@@ -762,6 +762,10 @@ HL_PRIM void hl_prof_set_min_call_ns( unsigned int ns ) {
 
 HL_PRIM void hl_prof_no_wait( bool on ) {
 	no_wait_depth += on ? 1 : -1;
+}
+
+HL_PRIM bool hl_prof_may_wait( void ) {
+	return no_wait_depth == 0;
 }
 
 /* One pause, resume or stop at a time: so the RECORDING events alternate, and a resume cannot turn recording back on

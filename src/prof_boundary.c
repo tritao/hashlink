@@ -51,7 +51,8 @@ extern void hl_prof_boundary_thunk( void );
 
 /* Called by the thunk before the real call. Returns whether it recorded an enter, which the thunk closes after. */
 int hl_prof_boundary_enter( boundary_desc *d ) {
-	if( !hl_prof_on || boundary_busy ) return 0;
+	/* A thread that must not wait records no call: one lost to a full pool would unpair its ENTER and EXIT. */
+	if( !hl_prof_on || boundary_busy || !hl_prof_may_wait() ) return 0;
 	/* The recorder may wait for the consumer through a hooked call: that wait is not recorded. */
 	boundary_busy = 1;
 	hl_prof_enter_blocking((unsigned long long)(uintptr_t)(stubs + (d - descs) * STUB_SIZE));
