@@ -277,12 +277,13 @@ static int pf_stack_sample( pf_export *pf,symbols *s,double time,uint32_t tid,co
 	st->last=time;
 	return 1;
 }
-/* An instrumented call begins or ends on the thread. The first one replaces the stack the thread's samples built. */
-static int pf_stack_call( pf_export *pf,double time,uint32_t tid,const unsigned char *name,uint32_t size,int begin ) {
+/* An instrumented call begins or ends on the thread. The first one replaces the stack the thread's samples built. A startup
+   phase (instrumented 0) is laid out the same way but leaves the thread's samples shown. */
+static int pf_stack_call( pf_export *pf,double time,uint32_t tid,const unsigned char *name,uint32_t size,int begin,int instrumented ) {
 	pf_stack *st=pf_stack_of(pf,tid);uint32_t base;
 	if(!st)return 0;
 	base=st->root?1:0;
-	if(!st->instrumented){st->instrumented=1;pf_stack_cut(pf,st,base,time);pf_stack_truncate(st,0);}
+	if(instrumented&&!st->instrumented){st->instrumented=1;pf_stack_cut(pf,st,base,time);pf_stack_truncate(st,0);}
 	if(!begin){if(st->depth){pf_stack_cut(pf,st,base+st->depth-1,time);pf_stack_truncate(st,st->depth-1);}st->last=time;return 1;}
 	if(st->depth==st->capacity){uint32_t capacity=st->capacity?st->capacity*2:64;char **next=(char**)realloc(st->names,sizeof(char*)*capacity);if(!next)return 0;st->names=next;st->capacity=capacity;}
 	if(!(st->names[st->depth]=(char*)malloc((size_t)size+1)))return 0;
@@ -319,8 +320,10 @@ static int pf_event( pf_export *pf,double time,uint32_t tid,uint32_t event_id,co
 	case PROFILE_EVENT_SPAN_BEGIN:if(!(text=pf_text(payload,size)))return 0;pftrace_slice_begin(pf->trace,ts,tid,text,"hl.span");free(text);break;
 	case PROFILE_EVENT_SPAN_END:pftrace_slice_end(pf->trace,ts,tid);break;
 	/* Instrumented calls go on the thread's call-stack track, cut into frames like sampled stacks. */
-	case 0x484C2001U:if(!pf_stack_call(pf,time,tid,payload,size,1))return 0;break;
-	case 0x484C2002U:if(!pf_stack_call(pf,time,tid,NULL,0,0))return 0;break;
+	case 0x484C2001U:if(!pf_stack_call(pf,time,tid,payload,size,1,1))return 0;break;
+	case 0x484C2002U:if(!pf_stack_call(pf,time,tid,NULL,0,0,1))return 0;break;
+	case 0x484C2007U:if(!pf_stack_call(pf,time,tid,payload,size,1,0))return 0;break;
+	case 0x484C2008U:if(!pf_stack_call(pf,time,tid,NULL,0,0,0))return 0;break;
 	case 0x484C2004U:if(!(text=pf_text(payload,size)))return 0;{int ok=pf_stack_frame(pf,time,tid,text);free(text);if(!ok)return 0;}break;
 	case 0x484C2005U:if(!pf_stack_frame(pf,time,tid,"Idle"))return 0;break;
 	case 0x484C2003U:if(size==8){double end;memcpy(&end,payload,8);pftrace_slice_begin(pf->trace,ts,tid,"profiler stall","hl.profiler");pftrace_slice_end(pf->trace,pf_time(pf,end),tid);}break;
@@ -429,6 +432,9 @@ enum { R_ENTER=0x01, R_EXIT=0x02, R_UNWIND=0x03, R_SPAN_BEGIN=0x10, R_SPAN_END=0
 #define EXPORT_FRAME_IDLE 0x484C2005U
 /* A process-level track (payload: its name) for the slices of a pseudo-thread. */
 #define EXPORT_PROCESS_TRACK 0x484C2006U
+/* A runtime startup phase begins (payload: its name) or ends: a call that leaves the thread's samples shown. */
+#define EXPORT_PHASE_BEGIN 0x484C2007U
+#define EXPORT_PHASE_END 0x484C2008U
 #define FRAME_TRACK_TID 0x7FFFF000U
 #define TICK_MASK 0x00FFFFFFFFFFFFFFULL
 
@@ -812,7 +818,7 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 		if(!synth_event(&out,0,FRAME_TRACK_TID,PROFILE_EVENT_SPAN_BEGIN,"Startup",7)||!synth_event(&out,0,frames_tid,EXPORT_FRAME_BEGIN,"Startup",7))goto done;
 		frame_sets[0].open=1;frame_sets[0].tid=frames_tid;frame_started=0;
 		for(uint32_t i=0;i<count&&pos+24<=startup_size;i++){uint32_t n=u32(startup+pos+16);if(n>startup_size-pos-24)break;
-			if(!synth_event(&out,clock_seconds(&clock,u64(startup+pos)),tid,EXPORT_CALL_BEGIN,startup+pos+24,n)||!synth_event(&out,clock_seconds(&clock,u64(startup+pos+8)),tid,EXPORT_CALL_END,NULL,0))goto done;
+			if(!synth_event(&out,clock_seconds(&clock,u64(startup+pos)),tid,EXPORT_PHASE_BEGIN,startup+pos+24,n)||!synth_event(&out,clock_seconds(&clock,u64(startup+pos+8)),tid,EXPORT_PHASE_END,NULL,0))goto done;
 			pos+=24+((n+7)&~7u);}}
 	/* pass 2: the threads' records */
 	if(fseek(file,data_start,SEEK_SET)!=0)goto done;
