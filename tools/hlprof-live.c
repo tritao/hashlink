@@ -720,9 +720,11 @@ static int decode_records( byte_buffer *o,symbols *s,tick_clock *c,uint32_t tid,
 				if(!synth_event(o,at,FRAME_TRACK_TID+i,PROFILE_EVENT_SPAN_END,NULL,0)||(i==0&&!synth_event(o,at,tid,EXPORT_FRAME_IDLE,NULL,0)))return 0;}}
 		switch(kind){
 		case R_ENTER:{if(pos+16>length)goto bad;uint32_t n=call_name(s,u64(p+pos+8),name,sizeof(name));size=16;
-			/* A thread's entry function names it if the runtime did not; a thread-start wrapper around it is hidden. */
+			/* A thread's entry function names it if the runtime did not; a thread-start wrapper around it is hidden. The thread
+			   must have started while recording: when the session began before the program and no pause came first. A thread
+			   recording only from a later point would be named after whatever it called first. */
 			if(!st->count&&thread_wrapper(name)){if(!stack_push(st,3))return 0;break;}
-			if(!st->named&&(!st->count||(st->count==1&&st->kinds[0]==3))){st->named=1;if(!name_thread(o,tid,name))return 0;}
+			if(!st->named&&(!st->count||(st->count==1&&st->kinds[0]==3))){st->named=1;if(startup&&!st->pause&&!name_thread(o,tid,name))return 0;}
 			if(!stack_push(st,1)||!synth_event(o,time,tid,EXPORT_CALL_BEGIN,name,n))return 0;break;}
 		case R_EXIT:if(st->calls&&!close_slices(o,st,time,tid,st->calls-1,0))return 0;break;
 		case R_UNWIND:if(pos+16>length)goto bad;{uint64_t skipped=u64(p+pos+8);if(!close_slices(o,st,time,tid,skipped<st->calls?st->calls-(uint32_t)skipped:0,0))return 0;}size=16;break;
