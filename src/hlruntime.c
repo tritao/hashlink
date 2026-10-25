@@ -253,6 +253,42 @@ const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, 
 	return address == NULL ? NULL : hl_module_resolve_jit_location(address);
 }
 
+int hl_runtime_module_entry_state( hl_runtime_module *runtime, int stable_id ) {
+	int slot, state = -1;
+	if( runtime == NULL ) return -1;
+	hl_mutex_acquire(runtime->lock);
+	slot = resolve_stable_id(runtime,stable_id);
+	if( slot >= 0 && runtime->module->patch_origin && runtime->module->patch_origin[slot] ) {
+		const unsigned char *entry = (const unsigned char*)runtime->module->patch_origin[slot];
+		state = entry[0] == 0xE9 ? 2 : entry[0] == 0x48 && entry[1] == 0xB8 ? 1 : 0;
+	}
+	hl_mutex_release(runtime->lock);
+	return state;
+}
+
+int hl_runtime_module_calls_directly( hl_runtime_module *runtime, int caller_id, int callee_id ) {
+	int caller, callee, result = -1;
+	if( runtime == NULL ) return -1;
+	hl_mutex_acquire(runtime->lock);
+	caller = resolve_stable_id(runtime,caller_id);
+	callee = resolve_stable_id(runtime,callee_id);
+	if( caller >= 0 && callee >= 0 && runtime->module->patch_origin && runtime->module->patch_origin[caller] && runtime->module->patch_origin[callee] ) {
+		const unsigned char *code = (const unsigned char*)runtime->module->patch_origin[caller];
+		const unsigned char *end = (const unsigned char*)runtime->module->jit_code + runtime->module->codesize;
+		const unsigned char *target = (const unsigned char*)runtime->module->patch_origin[callee];
+		// The caller's code is scanned for a call rel32 to the callee's entry; a few hundred bytes cover a test function.
+		result = 0;
+		for(int i=0;i<1024&&code+i+5<=end;i++) {
+			int delta;
+			if( code[i] != 0xE8 ) continue;
+			memcpy(&delta,code + i + 1,sizeof(delta));
+			if( code + i + 5 + delta == target ) { result = 1; break; }
+		}
+	}
+	hl_mutex_release(runtime->lock);
+	return result;
+}
+
 int hl_runtime_module_debug_region_count( hl_runtime_module *runtime ) {
 	return runtime == NULL ? 0 : hl_module_patch_debug_region_count(runtime->module);
 }

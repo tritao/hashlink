@@ -973,7 +973,7 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	hl_module_crash_write_lock();
 	if(m->patch_lo==NULL||allocation->code<m->patch_lo)m->patch_lo=allocation->code;
 	if(m->patch_hi==NULL||(void*)((unsigned char*)allocation->code+allocation->code_size)>m->patch_hi)m->patch_hi=(unsigned char*)allocation->code+allocation->code_size;
-	for(int i=0;i<patch->function_count;i++){int slot=allocation->functions[i].findex;hl_patch_code *old=m->patch_owners[slot];void *target=(unsigned char*)allocation->code+offsets[i];if(m->patch_targets){if(old==NULL&&m->patch_targets[slot]!=NULL)hl_jit_patch_method(m->patch_targets[slot],m->patch_targets+slot);m->patch_targets[slot]=target;}else{hl_jit_patch_method(m->functions_ptrs[slot],m->functions_ptrs+slot);m->functions_ptrs[slot]=target;}m->patch_owners[slot]=allocation;allocation->references++;if(old&&--old->references==0){if(m->patch_targets){old->next_retired=superseded;superseded=old;}else{old->next_retired=m->retired_patch_code;patch_store(m->retired_patch_code,old);}}}
+	for(int i=0;i<patch->function_count;i++){int slot=allocation->functions[i].findex;hl_patch_code *old=m->patch_owners[slot];void *target=(unsigned char*)allocation->code+offsets[i];hl_module_redirect_slot(m,slot,target);m->patch_owners[slot]=allocation;allocation->references++;if(old&&--old->references==0){if(m->patch_targets){old->next_retired=superseded;superseded=old;}else{old->next_retired=m->retired_patch_code;patch_store(m->retired_patch_code,old);}}}
 	publish_added_functions(m,patch);staged_added=false;
 	patch_live_publish(m,live_block);live_block=NULL;
 	// Stable dispatch no longer reaches superseded code; only a concurrent reader may still hold it.

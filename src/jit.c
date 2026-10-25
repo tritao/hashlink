@@ -94,6 +94,15 @@ jit_ctx *hl_jit_alloc() {
 	return ctx;
 }
 
+int hl_jit_entry_pad( hl_module *m ) {
+#ifdef HL_JIT_DIRECT_PATCHABLE_CALLS
+	/* Patch generations are only reached through stubs, so only the base module's functions carry the nop. */
+	return m->patchable && !m->staging_patch ? HL_JIT_ENTRY_PAD : 0;
+#else
+	return 0;
+#endif
+}
+
 void hl_jit_define_function( jit_ctx *ctx, int start, int size ) {
 #ifdef WIN64_UNWIND_TABLES
 	int fid = ctx->fdef_index++;
@@ -210,7 +219,10 @@ int hl_jit_function( jit_ctx *ctx, hl_module *m, hl_function *f ) {
 	hl_codegen_function(ctx);
 	regstats_record(ctx);
 	int pos = ctx->out_pos;
-	hl_jit_define_function(ctx, pos, ctx->code_size);
+	/* The unwind data of a patchable module's function starts after its entry nop: a thread stopped on the entry
+	   (or on the jump that replaced the nop) has pushed nothing, which is how code without unwind data is read. */
+	int pad = hl_jit_entry_pad(m);
+	hl_jit_define_function(ctx, pos + pad, ctx->code_size - pad);
 	if( m->jit_debug && ctx->code_pos_map ) {
 		bool compact = ctx->code_size < 0xFFFF;
 		void *debug = malloc((compact ? sizeof(unsigned short) : sizeof(int)) * (f->nops + 1));
@@ -492,6 +504,26 @@ void *hl_jit_code( jit_ctx *ctx, hl_module *m, int *codesize, hl_debug_infos **d
 void *hl_jit_patch_code( jit_ctx *ctx, hl_module *m, int *codesize, hl_debug_infos **debug ) {
 	return hl_jit_code_finalize(ctx,m,codesize,debug,NULL,false);
 }
+
+#ifdef HL_JIT_DIRECT_PATCHABLE_CALLS
+bool hl_jit_patch_entry_jump( void *entry, void *stub ) {
+	static const unsigned char nop8[HL_JIT_ENTRY_PAD] = { 0x0F, 0x1F, 0x84, 0, 0, 0, 0, 0 };
+	unsigned char *code = (unsigned char*)entry;
+	long long delta = (long long)((unsigned char*)stub - (code + 5));
+	unsigned long long word;
+	if( ((uintptr_t)entry & 7) || delta != (long long)(int)delta ) return false;
+	if( code[0] != 0xE9 && memcmp(code,nop8,sizeof(nop8)) ) return false;
+	/* jmp rel32 then three int3: a thread is either before the store (executing the nop) or after it (the jmp), and
+	   the bytes after the jmp are never reached. */
+	word = 0xE9ull | ((unsigned long long)(unsigned int)(int)delta << 8) | 0xCCCCCC0000000000ull;
+#	ifdef _MSC_VER
+	_InterlockedExchange64((volatile __int64*)code,(__int64)word);
+#	else
+	__atomic_store_n((unsigned long long*)code,word,__ATOMIC_SEQ_CST);
+#	endif
+	return true;
+}
+#endif
 
 #if !defined(__aarch64__) && !defined(_M_ARM64)
 void hl_jit_patch_method( void*fun, void**newt ) {
