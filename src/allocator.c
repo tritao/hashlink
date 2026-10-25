@@ -63,8 +63,16 @@ static const int GC_SIZES[GC_PARTITIONS] = {4,8,12,16,20,	8,64,1<<13,0};
 #define GC_ALL_PAGES	(GC_PARTITIONS << PAGE_KIND_BITS)
 #define	GC_ALIGN		(1 << GC_ALIGN_BITS)
 
-static gc_pheader *gc_pages[GC_ALL_PAGES] = {NULL};
-static gc_pheader *gc_free_pages[GC_ALL_PAGES] = {NULL};
+// Ownership is a property of the page. The page lists are indexed by (owner class, partition, kind): class 0 holds
+// unowned memory and every other class holds only blocks allocated for one owner, so the owner's live blocks are
+// exactly the marked blocks of its pages and no per-allocation record is needed. A page id is
+// class * GC_ALL_PAGES + (partition << PAGE_KIND_BITS | kind); the partition and kind of an id are taken modulo GC_ALL_PAGES.
+#define GC_PAGE_SLOTS	(GC_PAGE_CLASSES * GC_ALL_PAGES)
+#define GC_PID(oc,part,kind)	((oc) * GC_ALL_PAGES + (((part) << PAGE_KIND_BITS) | (kind)))
+#define GC_PID_PART(pid)		(((pid) % GC_ALL_PAGES) >> PAGE_KIND_BITS)
+
+static gc_pheader *gc_pages[GC_PAGE_SLOTS] = {NULL};
+static gc_pheader *gc_free_pages[GC_PAGE_SLOTS] = {NULL};
 
 #define MAX_FL_CACHED 16
 
@@ -281,8 +289,8 @@ static void flush_free_list( gc_pheader *ph ) {
 // Every block position and run length of a page, including the end of a run that reaches the page's last block.
 typedef char gc_fl_cursor_holds_page_blocks[GC_PAGE_SIZE <= (fl_cursor)~0 ? 1 : -1];
 
-static void *gc_alloc_fixed_run( int part, int kind, int want, int *got ) {
-	int pid = (part << PAGE_KIND_BITS) | kind;
+static void *gc_alloc_fixed_run( int oc, int part, int kind, int want, int *got ) {
+	int pid = GC_PID(oc,part,kind);
 	gc_pheader *ph = gc_free_pages[pid];
 	gc_allocator_page_data *p = NULL;
 	int bid = -1;
@@ -334,13 +342,13 @@ static void *gc_alloc_fixed_run( int part, int kind, int want, int *got ) {
 	return ptr;
 }
 
-static void *gc_alloc_fixed( int part, int kind ) {
+static void *gc_alloc_fixed( int oc, int part, int kind ) {
 	int got;
-	return gc_alloc_fixed_run(part,kind,1,&got);
+	return gc_alloc_fixed_run(oc,part,kind,1,&got);
 }
 
-static void *gc_alloc_var( int part, int size, int kind ) {
-	int pid = (part << PAGE_KIND_BITS) | kind;
+static void *gc_alloc_var( int oc, int part, int size, int kind ) {
+	int pid = GC_PID(oc,part,kind);
 	gc_pheader *ph = gc_free_pages[pid];
 	gc_allocator_page_data *p = NULL;
 	unsigned char *ptr;
@@ -407,19 +415,19 @@ alloc_var:
 	return ptr;
 }
 
-static void *gc_allocator_alloc( int *size, int page_kind ) {
+static void *gc_allocator_alloc( int *size, int page_kind, int oc ) {
 	int sz = *size;
 	sz += (-sz) & (GC_ALIGN - 1);
 	if( sz >= GC_LARGE_BLOCK ) {
 		sz += (-sz) & (GC_PAGE_SIZE - 1);
 		*size = sz;
-		gc_pheader *ph = gc_allocator_new_page((GC_LARGE_PART << PAGE_KIND_BITS) | page_kind,sz,sz,page_kind,false);
+		gc_pheader *ph = gc_allocator_new_page(GC_PID(oc,GC_LARGE_PART,page_kind),sz,sz,page_kind,false);
 		return ph->base;
 	}
 	if( sz <= GC_SIZES[GC_FIXED_PARTS-1] && page_kind != MEM_KIND_FINALIZER ) {
 		int part = (sz >> GC_ALIGN_BITS) - 1;
 		*size = GC_SIZES[part];
-		return gc_alloc_fixed(part, page_kind);
+		return gc_alloc_fixed(oc, part, page_kind);
 	}
 	int p;
 	for(p=GC_FIXED_PARTS;p<GC_PARTITIONS;p++) {
@@ -427,7 +435,7 @@ static void *gc_allocator_alloc( int *size, int page_kind ) {
 		int query = sz + ((-sz) & (block - 1));
 		if( query < block * 255 ) {
 			*size = query;
-			return gc_alloc_var(p, query, page_kind);
+			return gc_alloc_var(oc, p, query, page_kind);
 		}
 	}
 	*size = -1;
@@ -457,7 +465,7 @@ static bool gc_page_is_empty( gc_pheader *ph ) {
 static int gc_empty_pid;
 static gc_pheader **gc_empty_link;
 static int64 gc_empty_budget, gc_empty_retained;
-static void gc_empty_sweep_cancel(void) { gc_empty_link = NULL; gc_empty_pid = GC_ALL_PAGES; }
+static void gc_empty_sweep_cancel(void) { gc_empty_link = NULL; gc_empty_pid = GC_PAGE_SLOTS; }
 static void gc_empty_sweep_begin(void) {
 	static int keep = -1;
 	static int64 cap;
@@ -497,7 +505,7 @@ static void gc_empty_sweep_begin(void) {
 	gc_empty_link = NULL;
 }
 static bool gc_empty_sweep_slice(double deadline, bool deferred) {
-	while( gc_empty_link || gc_empty_pid < GC_ALL_PAGES ) {
+	while( gc_empty_link || gc_empty_pid < GC_PAGE_SLOTS ) {
 		if( deferred && hl_sys_time() >= deadline ) return false;
 		if( !gc_empty_link ) gc_empty_link = &gc_pages[gc_empty_pid++];
 		gc_pheader *ph = *gc_empty_link;
@@ -506,7 +514,7 @@ static bool gc_empty_sweep_slice(double deadline, bool deferred) {
 		// Allocation flushes the old marks and makes need_flush false before
 		// reusing slots. Such a page can contain fresh, unmarked live objects.
 		if( (!deferred || p->need_flush) && gc_page_is_empty(ph) ) {
-			if( ((gc_empty_pid-1) >> PAGE_KIND_BITS) != GC_LARGE_PART && ph->page_size <= gc_empty_budget-gc_empty_retained ) {
+			if( GC_PID_PART(gc_empty_pid-1) != GC_LARGE_PART && ph->page_size <= gc_empty_budget-gc_empty_retained ) {
 				gc_empty_retained += ph->page_size;
 			} else {
 				gc_pheader *next = ph->next_page;
@@ -524,6 +532,50 @@ static bool gc_empty_sweep_slice(double deadline, bool deferred) {
 static void gc_flush_empty_pages(void) {
 	gc_empty_sweep_begin();
 	gc_empty_sweep_slice(0,false);
+}
+
+static int gc_popcount8( unsigned int x ) {
+	x = x - ((x >> 1) & 0x55);
+	x = (x & 0x33) + ((x >> 2) & 0x33);
+	return (int)((x + (x >> 4)) & 0x0F);
+}
+
+// The blocks of an owner class that the last mark found live. Only meaningful right after a major collection, which
+// leaves each page's mark bits as its live set (a variable-size block has the bit on its first block only).
+static int gc_allocator_class_live_blocks( int oc ) {
+	int count = 0;
+	for(int pid=oc*GC_ALL_PAGES;pid<(oc+1)*GC_ALL_PAGES;pid++) {
+		for(gc_pheader *ph=gc_pages[pid];ph;ph=ph->next_page) {
+			gc_allocator_page_data *p = &ph->alloc;
+			if( ph->bmp == NULL ) continue;
+			int first = p->first_block, last = (p->max_blocks + 7) >> 3;
+			for(int byte=first>>3;byte<last;byte++) {
+				unsigned int bits = ph->bmp[byte];
+				// the first byte may start inside the page's header area, the last one may run past its blocks
+				if( byte == first >> 3 ) bits &= 0xFFu << (first & 7);
+				if( byte == last - 1 && (p->max_blocks & 7) ) bits &= (1u << (p->max_blocks & 7)) - 1;
+				count += gc_popcount8(bits);
+			}
+		}
+	}
+	return count;
+}
+
+// Returns every page of an owner class to the system, whatever the empty-page budget says. The caller must have
+// collected with the world stopped and found the class without live blocks, and must hold the global lock.
+static void gc_allocator_release_class( int oc ) {
+	gc_empty_sweep_cancel();
+	for(int pid=oc*GC_ALL_PAGES;pid<(oc+1)*GC_ALL_PAGES;pid++) {
+		gc_pheader *ph = gc_pages[pid];
+		while( ph ) {
+			gc_pheader *next = ph->next_page;
+			free_freelist(&ph->alloc.free);
+			gc_free_page(ph,ph->alloc.max_blocks);
+			ph = next;
+		}
+		gc_pages[pid] = NULL;
+		gc_free_pages[pid] = NULL;
+	}
 }
 
 static int64 gc_allocator_private_memory() {
@@ -547,7 +599,7 @@ static int gc_free_memory( gc_pheader *ph ) {
 #ifdef GC_DEBUG
 static void gc_clear_unmarked_mem() {
 	int i;
-	for(i=0;i<GC_ALL_PAGES;i++) {
+	for(i=0;i<GC_PAGE_SLOTS;i++) {
 		gc_pheader *ph = gc_pages[i];
 		while( ph ) {
 			int bid;
@@ -579,7 +631,7 @@ static void gc_clear_unmarked_mem() {
 
 static void gc_call_finalizers(){
 	int i;
-	for(i=MEM_KIND_FINALIZER;i<GC_ALL_PAGES;i+=1<<PAGE_KIND_BITS) {
+	for(i=MEM_KIND_FINALIZER;i<GC_PAGE_SLOTS;i+=1<<PAGE_KIND_BITS) {
 		gc_pheader *ph = gc_pages[i];
 		while( ph ) {
 			int bid;
@@ -605,7 +657,7 @@ static void gc_call_finalizers(){
 
 static void gc_allocator_before_mark( unsigned char *mark_cur ) {
 	int pid;
-	for(pid=0;pid<GC_ALL_PAGES;pid++) {
+	for(pid=0;pid<GC_PAGE_SLOTS;pid++) {
 		gc_pheader *p = gc_pages[pid];
 		gc_free_pages[pid] = p;
 		while( p ) {
@@ -685,7 +737,7 @@ static void gc_allocator_after_mark() {
 static void gc_get_stats( int *page_count, int *private_data ) {
 	int count = 0;
 	int i;
-	for(i=0;i<GC_ALL_PAGES;i++) {
+	for(i=0;i<GC_PAGE_SLOTS;i++) {
 		gc_pheader *p = gc_pages[i];
 		while( p ) {
 			count++;
@@ -698,7 +750,7 @@ static void gc_get_stats( int *page_count, int *private_data ) {
 
 static void gc_iter_pages( gc_page_iterator iter ) {
 	int i;
-	for(i=0;i<GC_ALL_PAGES;i++) {
+	for(i=0;i<GC_PAGE_SLOTS;i++) {
 		gc_pheader *p = gc_pages[i];
 		while( p ) {
 			int size = 0;

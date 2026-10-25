@@ -1171,10 +1171,11 @@ static void hl_module_add( hl_module *m ) {
 int hl_module_init( hl_module *m, int flags ) {
 	int i;
 	jit_ctx *ctx;
-	// Allocation ownership costs a ledger entry per allocation and a walk of the whole ledger per
-	// collection, and only runtime-owned (patchable) modules are ever retired against it.
+	// Only runtime-owned (patchable) modules are ever retired against their allocations. Their objects live in
+	// pages of their own, so counting what a module still holds costs nothing until the module is retired.
 	void *gc_owner = (flags & HL_MODULE_PATCHABLE) != 0 ? m : NULL;
 	for(i=0;i<m->code->ntypes;i++) m->code->types[i].gc_owner = gc_owner;
+	if( gc_owner != NULL ) hl_gc_owner_register(gc_owner);
 	bool hot_reload = (flags & HL_MODULE_HOT_RELOAD) != 0;
 	// expand globals
 	if( hot_reload ) {
@@ -1654,6 +1655,8 @@ void hl_module_free_shutdown( hl_module *m ) {
 		for(int i=0;i<m->code->nglobals;i++)
 			if( hl_is_ptr(m->code->globals[i]) )
 				hl_remove_root(m->globals_data+m->globals_indexes[i]);
+	// Hands the module's pages back and frees its allocation class for the next module, if nothing it allocated is live.
+	hl_gc_owner_release(m);
 #ifdef HL_VTUNE
 	hl_module_free_vtune(m);
 #endif

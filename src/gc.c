@@ -89,6 +89,14 @@ static int_val gc_hash( void *ptr ) {
 #define PAGE_KIND_BITS		2
 #define PAGE_KIND_MASK		((1 << PAGE_KIND_BITS) - 1)
 
+// Allocation owners (patchable modules) get their own pages, see allocator.c. Class 0 is unowned memory, classes
+// 1..GC_OWNER_CLASSES belong to one registered owner each, and the overflow class is shared by every owner that
+// registered while all the others were taken. A shared class can only over-count an owner's live blocks, which delays
+// that owner's retirement and never allows it early.
+#define GC_OWNER_CLASSES	16
+#define GC_OVERFLOW_CLASS	(GC_OWNER_CLASSES + 1)
+#define GC_PAGE_CLASSES		(GC_OWNER_CLASSES + 2)
+
 #if defined(HL_DEBUG) && !defined(HL_CONSOLE)
 #	define GC_DEBUG
 #	define GC_MEMCHK
@@ -141,7 +149,7 @@ void gc_allocator_after_mark();
 // Returns NULL if no block could be allocated
 // Sets size to really allocated size (could be larger)
 // Sets size to -1 if allocation refused (required size is invalid)
-void *gc_allocator_alloc( int *size, int page_kind );
+void *gc_allocator_alloc( int *size, int page_kind, int owner_class );
 
 // returns the number of pages allocated and private data size (global)
 void gc_get_stats( int *page_count, int *private_data);
@@ -189,13 +197,6 @@ static gc_pheader *gc_level1_null[1<<GC_LEVEL1_BITS] = {NULL};
 static gc_pheader **hl_gc_page_map[1<<GC_LEVEL0_BITS] = {NULL};
 static gc_pheader *gc_free_pheaders = NULL;
 
-typedef struct _gc_owned_alloc gc_owned_alloc;
-struct _gc_owned_alloc {
-	void *ptr;
-	void *owner;
-	gc_owned_alloc *next;
-};
-static gc_owned_alloc *gc_owned_allocs = NULL;
 /* Opt-in diagnostics: no per-phase clocks when disabled. */
 static bool gc_latency_trace;
 static bool gc_scan_profile_enabled;
@@ -226,6 +227,8 @@ static int64 gc_total_allocated_bytes( void );
 // out without taking the global lock or touching shared counters. A slot is only written by its own thread while it
 // runs, and by the collector once the thread is blocked, so no atomic is needed.
 #	define GC_TLAB_SLOTS	(GC_FIXED_PARTS << PAGE_KIND_BITS)
+// One group of slots per owner class that can take part in the fast path: the unowned class and each registered one.
+#	define GC_TLAB_ALL_SLOTS	((1 + GC_OWNER_CLASSES) * GC_TLAB_SLOTS)
 #	define GC_TLAB_RUN		2048
 #if defined(__x86_64__) || defined(_M_X64)
 # define GC_ALLOC_FAST_SUPPORTED
@@ -245,19 +248,57 @@ typedef struct {
 #	define gc_release_fence()
 #endif
 
-static void gc_sweep_owned_allocs() {
-	gc_owned_alloc **cursor = &gc_owned_allocs;
-	while( *cursor ) {
-		gc_owned_alloc *owned = *cursor;
-		gc_pheader *page = GC_GET_PAGE(owned->ptr);
-		int bid = page == NULL ? -1 : gc_allocator_get_block_id(page,owned->ptr);
-		if( bid >= 0 && (page->bmp[bid>>3] & (1<<(bid&7))) != 0 ) {
-			cursor = &owned->next;
-			continue;
+// Owner classes. The table is written under the global lock and read without it: an entry only ever says "this owner
+// has this class", the class itself being nothing but static page lists, so a stale read just takes the locked path.
+static void * volatile gc_owner_table[GC_OWNER_CLASSES + 1];
+static volatile int gc_owner_hint = 1;
+static void **gc_overflow_owners = NULL;
+static int gc_overflow_count = 0, gc_overflow_capacity = 0;
+static bool gc_overflow_warned = false;
+
+// The class of a registered owner, or -1 when this owner has no class of its own (it must register, or is shared).
+static HL_INLINE int gc_owner_class_lookup( void *owner ) {
+	int hint = gc_owner_hint;
+	if( gc_owner_table[hint] == owner ) return hint;
+	for(int i=1;i<=GC_OWNER_CLASSES;i++)
+		if( gc_owner_table[i] == owner ) {
+			gc_owner_hint = i;
+			return i;
 		}
-		*cursor = owned->next;
-		free(owned);
+	return -1;
+}
+
+// Locked. The class of an owner that has one, or 0.
+static int gc_owner_class_find( void *owner ) {
+	int oc = gc_owner_class_lookup(owner);
+	if( oc > 0 ) return oc;
+	for(int i=0;i<gc_overflow_count;i++)
+		if( gc_overflow_owners[i] == owner ) return GC_OVERFLOW_CLASS;
+	return 0;
+}
+
+// Locked. Gives an owner a class of its own, or the shared overflow class when they are all taken.
+static int gc_owner_class_register( void *owner ) {
+	int oc = gc_owner_class_find(owner);
+	if( oc > 0 ) return oc;
+	for(int i=1;i<=GC_OWNER_CLASSES;i++)
+		if( gc_owner_table[i] == NULL ) {
+			gc_owner_table[i] = owner;
+			return i;
+		}
+	if( gc_overflow_count == gc_overflow_capacity ) {
+		int capacity = gc_overflow_capacity ? gc_overflow_capacity * 2 : 8;
+		void **owners = (void**)realloc(gc_overflow_owners,sizeof(void*) * capacity);
+		if( owners == NULL ) out_of_memory("allocation owners");
+		gc_overflow_owners = owners;
+		gc_overflow_capacity = capacity;
 	}
+	gc_overflow_owners[gc_overflow_count++] = owner;
+	if( !gc_overflow_warned ) {
+		gc_overflow_warned = true;
+		fprintf(stderr,"HL warning: more than %d allocation owners are live; the extra ones share pages, so they retire only when all of them are unreferenced\n",GC_OWNER_CLASSES);
+	}
+	return GC_OVERFLOW_CLASS;
 }
 
 static hl_threads_info gc_threads;
@@ -483,7 +524,7 @@ HL_API void hl_register_thread( void *stack_top ) {
 	hl_thread_info *t = (hl_thread_info*)malloc(sizeof(hl_thread_info));
 	memset(t, 0, sizeof(hl_thread_info));
 #	ifdef GC_TLAB
-	t->gc_tlab = calloc(GC_TLAB_SLOTS,sizeof(gc_tlab_slot));
+	t->gc_tlab = calloc(GC_TLAB_ALL_SLOTS,sizeof(gc_tlab_slot));
 	if( t->gc_tlab == NULL ) out_of_memory("thread allocation buffers");
 #	endif
 	t->thread_id = hl_thread_id();
@@ -567,7 +608,7 @@ static void gc_stop_world( bool b ) {
 		// buffers must be empty before that, or they would hand out blocks the free lists have again.
 		for(i=0;i<gc_threads.count;i++) {
 			hl_thread_info *t = gc_threads.threads[i];
-			if( t->gc_tlab ) memset(t->gc_tlab,0,GC_TLAB_SLOTS*sizeof(gc_tlab_slot));
+			if( t->gc_tlab ) memset(t->gc_tlab,0,GC_TLAB_ALL_SLOTS*sizeof(gc_tlab_slot));
 		}
 #		endif
 	} else {
@@ -950,8 +991,8 @@ HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data) { (void
 	GC_TLAB_TRACK_POLICY(X)
 #define GC_TLAB_ALLOWED(value, mask, bytes) && (((uint64)(value) & (mask)) == 0)
 // Shared policy for the ordinary allocator and its thin, ready-slot entry.
-static HL_INLINE hl_thread_info *gc_tlab_thread( int size, int flags, void *owner ) {
-	if( owner == NULL && size <= GC_SIZES[GC_FIXED_PARTS-1] && (flags & PAGE_KIND_MASK) != MEM_KIND_FINALIZER ) {
+static HL_INLINE hl_thread_info *gc_tlab_thread( int size, int flags ) {
+	if( size <= GC_SIZES[GC_FIXED_PARTS-1] && (flags & PAGE_KIND_MASK) != MEM_KIND_FINALIZER ) {
 		hl_thread_info *th = current_thread;
 		if( th && th->gc_tlab GC_TLAB_POLICY(GC_TLAB_ALLOWED)
 		) return th;
@@ -1010,12 +1051,12 @@ static HL_INLINE void gc_tlab_clear( unsigned char *ptr, int size, int flags, in
 
 // A small allocation out of the thread's buffer; an empty buffer is refilled under the global lock, which is also
 // where the collection trigger is checked and where the reserved bytes are counted.
-static void *gc_tlab_alloc( hl_thread_info *th, int size, int flags ) {
+static void *gc_tlab_alloc( hl_thread_info *th, int size, int flags, int oc ) {
 	int kind = flags & PAGE_KIND_MASK;
 	int rounded = size + ((-size) & (GC_ALIGN - 1));
 	int part = (rounded >> GC_ALIGN_BITS) - 1;
 	int block = GC_SIZES[part];
-	gc_tlab_slot *slot = (gc_tlab_slot*)th->gc_tlab + ((part << PAGE_KIND_BITS) | kind);
+	gc_tlab_slot *slot = (gc_tlab_slot*)th->gc_tlab + (oc * GC_TLAB_SLOTS + ((part << PAGE_KIND_BITS) | kind));
 	if( slot->cur >= slot->end ) {
 		// A buffer is refilled only once it is exactly used up (or emptied by a collection); a cursor past its end
 		// means blocks were handed out that the free lists never reserved.
@@ -1025,7 +1066,7 @@ static void *gc_tlab_alloc( hl_thread_info *th, int size, int flags ) {
 		unsigned char *run;
 		gc_global_lock(true);
 		gc_check_mark();
-		run = (unsigned char*)gc_alloc_fixed_run(part,kind,GC_TLAB_RUN / block,&got);
+		run = (unsigned char*)gc_alloc_fixed_run(oc,part,kind,GC_TLAB_RUN / block,&got);
 		gc_stats.allocation_count += got;
 		gc_stats.total_requested += (int64)got * block;
 		gc_stats.total_allocated += (int64)got * block;
@@ -1062,12 +1103,16 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 		return NULL;
 	if( size < 0 )
 		hl_error("Invalid allocation size");
+	// Owned allocations take the same paths as unowned ones, in their owner's pages. An owner that is not
+	// registered yet (-1) registers under the lock below.
+	int oc = owner == NULL ? 0 : gc_owner_class_lookup(owner);
 #	ifdef GC_TLAB
-	hl_thread_info *th = gc_tlab_thread(size,flags,owner);
-	if( th ) return gc_tlab_alloc(th,size,flags);
+	hl_thread_info *th = oc < 0 ? NULL : gc_tlab_thread(size,flags);
+	if( th ) return gc_tlab_alloc(th,size,flags,oc);
 #	endif
 	gc_global_lock(true);
 	gc_check_mark();
+	if( oc < 0 ) oc = gc_owner_class_register(owner);
 #	ifdef GC_MEMCHK
 	size += HL_WSIZE;
 #	endif
@@ -1101,7 +1146,7 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 			printf("%d\n",gc_stats.allocation_count);
 		}
 #		endif
-		ptr = gc_allocator_alloc(&allocated,flags & PAGE_KIND_MASK);
+		ptr = gc_allocator_alloc(&allocated,flags & PAGE_KIND_MASK,oc);
 		if( ptr == NULL ) {
 			if( allocated < 0 ) {
 				gc_global_lock(false);
@@ -1136,14 +1181,6 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 #	ifdef GC_MEMCHK
 	memset((char*)ptr+(allocated - HL_WSIZE),0xEE,HL_WSIZE);
 #	endif
-	if( owner != NULL ) {
-		gc_owned_alloc *owned = (gc_owned_alloc*)malloc(sizeof(gc_owned_alloc));
-		if( owned == NULL ) out_of_memory("allocation owner");
-		owned->ptr = ptr;
-		owned->owner = owner;
-		owned->next = gc_owned_allocs;
-		gc_owned_allocs = owned;
-	}
 	if( gc_incremental_active ) gc_incremental_allocated(ptr);
 	gc_global_lock(false);
 	if( census_sample && hl_get_thread() != NULL ) {
@@ -1170,13 +1207,14 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 #ifdef GC_ALLOC_FAST_SUPPORTED
 void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 	if( gc_alloc_fast && size > 0 ) {
-		hl_thread_info *th = gc_tlab_thread(size,flags,owner);
+		int oc = owner == NULL ? 0 : gc_owner_class_lookup(owner);
+		hl_thread_info *th = oc < 0 ? NULL : gc_tlab_thread(size,flags);
 		if( th ) {
 			int kind = flags & PAGE_KIND_MASK;
 			int rounded = size + ((-size) & (GC_ALIGN - 1));
 			int part = (rounded >> GC_ALIGN_BITS) - 1;
 			int block = GC_SIZES[part];
-			gc_tlab_slot *slot = (gc_tlab_slot*)th->gc_tlab + ((part << PAGE_KIND_BITS) | kind);
+			gc_tlab_slot *slot = (gc_tlab_slot*)th->gc_tlab + (oc * GC_TLAB_SLOTS + ((part << PAGE_KIND_BITS) | kind));
 			unsigned char *ptr = slot->cur;
 			if( ptr < slot->end ) {
 				slot->cur = ptr + block;
@@ -1185,7 +1223,7 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 			}
 		}
 	}
-	// Empty runs, profiling/census/tracking, ownership, finalizers and invalid sizes use the full path.
+	// Empty runs, profiling/census/tracking, unregistered owners, finalizers and invalid sizes use the full path.
 	return gc_alloc_gen_owner_full(t,size,flags,owner);
 }
 
@@ -1498,7 +1536,6 @@ static void gc_mark() {
 				hl_fatal("assert");
 		}
 	}
-	gc_sweep_owned_allocs();
 	gc_allocator_after_mark();
 }
 
@@ -1573,15 +1610,48 @@ HL_API void hl_gc_major() {
 	gc_global_lock(false);
 }
 
+HL_API void hl_gc_owner_register( void *owner ) {
+	if( owner == NULL ) return;
+	gc_global_lock(true);
+	gc_owner_class_register(owner);
+	gc_global_lock(false);
+}
+
 HL_API int hl_gc_owner_live_count( void *owner ) {
 	int count = 0;
 	if( owner == NULL ) return 0;
 	gc_global_lock(true);
 	gc_major();
-	for(gc_owned_alloc *owned=gc_owned_allocs;owned;owned=owned->next)
-		if( owned->owner == owner ) count++;
+	int oc = gc_owner_class_find(owner);
+	if( oc > 0 ) count = gc_allocator_class_live_blocks(oc);
 	gc_global_lock(false);
 	return count;
+}
+
+HL_API void hl_gc_owner_release( void *owner ) {
+	// Most modules have no class (not patchable); do not stop the world to find that out.
+	if( owner == NULL || (gc_owner_class_lookup(owner) < 0 && gc_overflow_count == 0) ) return;
+	gc_global_lock(true);
+	int oc = gc_owner_class_find(owner);
+	if( oc > 0 ) {
+		// Only an owner whose blocks are all dead gives its class back. Anything else keeps the class and its pages,
+		// so a block can never end up in a class that now belongs to someone else.
+		gc_major();
+		if( oc == GC_OVERFLOW_CLASS ) {
+			if( gc_allocator_class_live_blocks(oc) == 0 ) {
+				for(int i=0;i<gc_overflow_count;i++)
+					if( gc_overflow_owners[i] == owner ) {
+						gc_overflow_owners[i] = gc_overflow_owners[--gc_overflow_count];
+						break;
+					}
+				if( gc_overflow_count == 0 ) gc_allocator_release_class(oc);
+			}
+		} else if( gc_allocator_class_live_blocks(oc) == 0 ) {
+			gc_allocator_release_class(oc);
+			gc_owner_table[oc] = NULL;
+		}
+	}
+	gc_global_lock(false);
 }
 
 HL_API bool hl_is_gc_ptr( void *ptr ) {

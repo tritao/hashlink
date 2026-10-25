@@ -108,7 +108,7 @@ static void gc_inc_tracking_configure(void) {
 static bool gc_inc_tracking_begin(void) {
 	gc_software_dirty_head = gc_dirty_batch_head = NULL;
 	gc_software_dirty_count = 0;
-	for(int pid = 0; pid < GC_ALL_PAGES; pid++)
+	for(int pid = 0; pid < GC_PAGE_SLOTS; pid++)
 		for(gc_pheader *p = gc_pages[pid]; p; p = p->next_page) {
 			p->software_dirty = 0;
 			p->scan_dirty_sources = 0;
@@ -206,7 +206,7 @@ static bool gc_inc_capture_chunk(gc_pheader *p, int *offset, bool *dirty) {
 }
 
 static bool gc_inc_capture_all(void) {
-	for(int pid = 0; pid < GC_ALL_PAGES; pid++) {
+	for(int pid = 0; pid < GC_PAGE_SLOTS; pid++) {
 		for(gc_pheader *p = gc_pages[pid]; p; p = p->next_page) {
 			if( !MEM_HAS_PTR(p->page_kind) ) continue;
 			bool dirty = false;
@@ -225,7 +225,7 @@ static bool gc_inc_collect_dirty(double deadline, bool *complete) {
 		gc_inc_dirty_reset();
 		gc_inc_dirty_walk = true;
 	}
-	while( gc_inc_dirty_cursor || gc_inc_dirty_pid < GC_ALL_PAGES ) {
+	while( gc_inc_dirty_cursor || gc_inc_dirty_pid < GC_PAGE_SLOTS ) {
 		if( !gc_inc_dirty_cursor ) {
 			gc_inc_dirty_cursor = gc_pages[gc_inc_dirty_pid++];
 			if( !gc_inc_dirty_cursor ) continue;
