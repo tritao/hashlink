@@ -410,13 +410,20 @@ static unsigned char *next_chunk( prof_thread *t, unsigned int bytes, bool wait 
 	if( bytes + 16 > HL_PROF_CHUNK_SIZE ) return NULL;
 	while( index < 0 ) {
 		if( !wait || !hl_prof_on ) {
+			if( stall_started ) hl_blocking(false);
 			FETCH_ADD64(&lost_records,1);
 			return NULL;
 		}
-		if( !stall_started ) stall_started = now_ticks();
+		if( !stall_started ) {
+			stall_started = now_ticks();
+			/* The consumer may wait for a collection before it frees a chunk, and a collection waits for every thread that
+			   does not block: a stalled thread blocks, as it touches only the pool until it has a chunk. */
+			hl_blocking(true);
+		}
 		yield_thread();
 		index = pool_pop();
 	}
+	if( stall_started ) hl_blocking(false);
 	/* The finished chunk keeps any held ENTER records: they can no longer be taken back. */
 	t->held = NULL;
 	if( t->chunk >= 0 ) {
