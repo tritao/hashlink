@@ -31,6 +31,11 @@ int pftrace_close( pftrace *t );
 /* Names a thread (tid nonzero). Emits its thread track descriptor the first time; a later different name re-emits the descriptor. */
 void pftrace_thread( pftrace *t, uint32_t tid, const char *name );
 
+/* Makes tid's slices a track named name instead of a thread's, under the main thread (the thread named "main") or else the
+   process, in order of rank (lower first). For tracks that belong to no thread, such as frames. Call before its first
+   slice. */
+void pftrace_process_track( pftrace *t, uint32_t tid, const char *name, int rank );
+
 /* Nested slices on a thread track (thread track is created on demand with name "Thread <tid>" if not named yet). */
 void pftrace_slice_begin( pftrace *t, uint64_t ts_ns, uint32_t tid, const char *name, const char *category );   /* category may be NULL */
 void pftrace_slice_end( pftrace *t, uint64_t ts_ns, uint32_t tid );

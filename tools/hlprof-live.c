@@ -325,6 +325,8 @@ static int pf_event( pf_export *pf,double time,uint32_t tid,uint32_t event_id,co
 	case 0x484C2005U:if(!pf_stack_frame(pf,time,tid,"Idle"))return 0;break;
 	case 0x484C2003U:if(size==8){double end;memcpy(&end,payload,8);pftrace_slice_begin(pf->trace,ts,tid,"profiler stall","hl.profiler");pftrace_slice_end(pf->trace,pf_time(pf,end),tid);}break;
 	case PROFILE_EVENT_THREAD_NAME:if(!(text=pf_text(payload,size)))return 0;pftrace_thread(pf->trace,tid,text);free(text);break;
+	/* A track of the process, not of a thread (payload: its name): the frames track, above the main thread's calls. */
+	case 0x484C2006U:if(!(text=pf_text(payload,size)))return 0;pftrace_process_track(pf->trace,tid,text,-2);free(text);break;
 	case PROFILE_EVENT_MODULE_REVISION:pftrace_instant(pf->trace,ts,0,"module revision");break;
 	case PROFILE_EVENT_MODULE_LOADED:pftrace_instant(pf->trace,ts,0,"module loaded");break;
 	case PROFILE_EVENT_RECORDING:if(size>=4)pftrace_instant(pf->trace,ts,0,payload[0]?"recording resumed":"recording paused");break;
@@ -369,7 +371,7 @@ static int consume( symbols *s,unsigned char *pending,size_t *length,uint64_t *s
                 if(!perfetto_span_event(perfetto,perfetto_first,pid,tid,event_id,payload,payload_size,
                     (event_time-*time_origin)*1000000.0))return 0;
             }
-            else if(perfetto&&event_id==PROFILE_EVENT_THREAD_NAME){char *name=(char*)malloc((size_t)payload_size+1);if(!name)return 0;memcpy(name,payload,payload_size);name[payload_size]=0;perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"M\",\"name\":\"thread_name\",\"pid\":%u,\"tid\":%u,\"args\":{\"name\":",pid,tid);json_string(perfetto,name);fputs("}}",perfetto);free(name);}
+            else if(perfetto&&(event_id==PROFILE_EVENT_THREAD_NAME||event_id==0x484C2006U)){char *name=(char*)malloc((size_t)payload_size+1);if(!name)return 0;memcpy(name,payload,payload_size);name[payload_size]=0;perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"M\",\"name\":\"thread_name\",\"pid\":%u,\"tid\":%u,\"args\":{\"name\":",pid,tid);json_string(perfetto,name);fputs("}}",perfetto);free(name);}
 			else if(perfetto&&event_id==PROFILE_EVENT_GC_STATS&&payload_size==40){uint64_t allocated=u64(payload),allocations=u64(payload+8),heap=u64(payload+16),collections=u64(payload+24),mark=u64(payload+32);double seconds=perfetto_gc.valid?event_time-perfetto_gc.time:0,allocation_rate=seconds>0?(allocated-perfetto_gc.allocated)/seconds:0,collection_rate=seconds>0?(collections-perfetto_gc.collections)/seconds:0,mark_rate=seconds>0?(mark-perfetto_gc.mark_micros)/seconds:0;perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"C\",\"cat\":\"hl.gc\",\"name\":\"HashLink GC\",\"pid\":%u,\"tid\":0,\"ts\":%.3f,\"args\":{\"heap_bytes\":%llu,\"allocated_bytes\":%llu,\"allocation_bytes_per_second\":%.3f,\"allocations\":%llu,\"collections\":%llu,\"collections_per_second\":%.3f,\"mark_micros\":%llu,\"mark_micros_per_second\":%.3f}}",pid,(event_time-*time_origin)*1000000.0,(unsigned long long)heap,(unsigned long long)allocated,allocation_rate,(unsigned long long)allocations,(unsigned long long)collections,collection_rate,(unsigned long long)mark,mark_rate);perfetto_gc.allocated=allocated;perfetto_gc.allocations=allocations;perfetto_gc.collections=collections;perfetto_gc.mark_micros=mark;perfetto_gc.time=event_time;perfetto_gc.valid=1;}
 			else if(perfetto&&event_id==PROFILE_EVENT_ALLOCATION_SAMPLE&&payload_size>=32&&(payload_size-32)%8==0){uint32_t interval=u32(payload+16),type_kind=u32(payload+20),frames=u32(payload+24);char allocation_stack[4096];size_t allocation_len=0;allocation_stack[0]=0;if(frames!=(payload_size-32)/8)return 0;for(uint32_t i=frames;i>0;i--){uint64_t pc=u64(payload+32+(i-1)*8);symbol *x=resolve(s,pc);native_symbol *native=x?NULL:resolve_native(pc);char label[1024];if(x)snprintf(label,sizeof(label),"%s",x->name);else if(native)snprintf(label,sizeof(label),"%s+0x%llx",native->name,(unsigned long long)(pc-native->base));else snprintf(label,sizeof(label),"0x%llx",(unsigned long long)pc);size_t n=strlen(label);if(allocation_len+n+(allocation_len?1:0)>=sizeof(allocation_stack))break;if(allocation_len)allocation_stack[allocation_len++]=';';memcpy(allocation_stack+allocation_len,label,n+1);allocation_len+=n;}perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"i\",\"s\":\"t\",\"cat\":\"hl.alloc\",\"name\":\"allocation sample\",\"pid\":%u,\"tid\":%u,\"ts\":%.3f,\"args\":{\"requested_bytes\":%llu,\"allocated_bytes\":%llu,\"estimated_bytes\":%llu,\"sample_interval\":%u,\"type_kind\":%u,\"stack\":",pid,tid,(event_time-*time_origin)*1000000.0,(unsigned long long)u64(payload),(unsigned long long)u64(payload+8),(unsigned long long)(u64(payload+8)*interval),interval,type_kind);json_string(perfetto,allocation_stack);fputs("}}",perfetto);}
 			else if(perfetto&&event_id==PROFILE_EVENT_COUNTER&&payload_size>8){double value;uint64_t bits=u64(payload);char *name;memcpy(&value,&bits,sizeof(value));if(!(name=(char*)malloc((size_t)payload_size-7)))return 0;memcpy(name,payload+8,payload_size-8);name[payload_size-8]=0;perfetto_begin_event(perfetto,perfetto_first);fputs("{\"ph\":\"C\",\"cat\":\"hl.counter\",\"name\":",perfetto);json_string(perfetto,name);fprintf(perfetto,",\"pid\":%u,\"tid\":0,\"ts\":%.3f,\"args\":{\"value\":%.17g}}",pid,(event_time-*time_origin)*1000000.0,value);free(name);}
@@ -425,6 +427,8 @@ enum { R_ENTER=0x01, R_EXIT=0x02, R_UNWIND=0x03, R_SPAN_BEGIN=0x10, R_SPAN_END=0
 /* The main frame set's boundaries on the thread that marked them: a frame starts (payload: its name) or the thread idles. */
 #define EXPORT_FRAME_BEGIN 0x484C2004U
 #define EXPORT_FRAME_IDLE 0x484C2005U
+/* A process-level track (payload: its name) for the slices of a pseudo-thread. */
+#define EXPORT_PROCESS_TRACK 0x484C2006U
 #define FRAME_TRACK_TID 0x7FFFF000U
 #define TICK_MASK 0x00FFFFFFFFFFFFFFULL
 
@@ -515,7 +519,9 @@ static double clock_seconds( tick_clock *c,uint64_t ticks ) {
 	return ((double)a->ns-(double)c->origin_ns+((double)ticks-(double)a->ticks)*rate)/1e9;
 }
 
-typedef struct { uint32_t tid; int used; unsigned char *kinds; uint32_t count,capacity,calls,pause; } open_stack;
+/* A thread's open calls (kind 1), spans (2) and hidden calls (3: a thread-start wrapper, which counts as a call but has no
+   slice). named: the thread has a name, from the runtime or from its entry function. */
+typedef struct { uint32_t tid; int used,named; unsigned char *kinds; uint32_t count,capacity,calls,pause; } open_stack;
 static open_stack open_stacks[4096];
 static open_stack *stack_of( uint32_t tid ) {
 	uint32_t slot=(tid*2654435761U)&4095;
@@ -524,7 +530,7 @@ static open_stack *stack_of( uint32_t tid ) {
 }
 static int stack_push( open_stack *s,unsigned char kind ) {
 	if(s->count==s->capacity){uint32_t cap=s->capacity?s->capacity*2:64;unsigned char *k=(unsigned char*)realloc(s->kinds,cap);if(!k)return 0;s->kinds=k;s->capacity=cap;}
-	s->kinds[s->count++]=kind;if(kind==1)s->calls++;return 1;
+	s->kinds[s->count++]=kind;if(kind!=2)s->calls++;return 1;
 }
 static void stacks_free( void ){for(int i=0;i<4096;i++)free(open_stacks[i].kinds);memset(open_stacks,0,sizeof(open_stacks));}
 
@@ -533,6 +539,9 @@ static void stacks_free( void ){for(int i=0;i<4096;i++)free(open_stacks[i].kinds
 typedef struct { uint64_t ticks; uint32_t tid; int frames_closed; } recording_pause;
 static recording_pause *pauses;static uint32_t pause_count,pause_capacity;
 static int pause_compare( const void *a,const void *b ){uint64_t x=((const recording_pause*)a)->ticks,y=((const recording_pause*)b)->ticks;return x<y?-1:x>y?1:0;}
+/* Also from pass 1: the thread that marks the main frames, and the runtime's startup phases (PROFILE_EVENT_STARTUP). */
+static uint32_t frame_thread;
+static unsigned char *startup;static uint32_t startup_size;
 static int add_pause( uint64_t ticks,uint32_t tid ) {
 	if(pause_count==pause_capacity){uint32_t cap=pause_capacity?pause_capacity*2:16;recording_pause *p=(recording_pause*)realloc(pauses,cap*sizeof(*p));if(!p)return 0;pauses=p;pause_capacity=cap;}
 	pauses[pause_count].ticks=ticks;pauses[pause_count].tid=tid;pauses[pause_count].frames_closed=0;pause_count++;return 1;
@@ -553,6 +562,7 @@ static int synth( byte_buffer *o,int kind,int flags,double time,uint32_t tid,uin
 	o->length+=4+(size_t)body;return 1;
 }
 static int synth_event( byte_buffer *o,double time,uint32_t tid,uint32_t id,const void *payload,uint32_t size ){return synth(o,2,0,time,tid,id,payload,size,NULL,0);}
+static int synth_counter( byte_buffer *o,double time,uint32_t tid,const char *name,double value ){unsigned char v[8];uint64_t bits;memcpy(&bits,&value,8);put64(v,bits);return synth(o,2,0,time,tid,PROFILE_EVENT_COUNTER,v,8,name,(uint32_t)strlen(name));}
 
 /* Data frames arrive in drain order, one thread's segment at a time, so records of different threads interleave only
    roughly in time: a sample can arrive before the frame mark that precedes it. The reorder window holds synthesized
@@ -658,10 +668,28 @@ static frame_set_state frame_sets[16];
 static int close_slices( byte_buffer *o,open_stack *st,double time,uint32_t tid,uint32_t calls,int until_span ) {
 	while(st->count){unsigned char kind=st->kinds[st->count-1];
 		if(!until_span&&st->calls<=calls)break;
-		st->count--;if(kind==1)st->calls--;
-		if(!synth_event(o,time,tid,kind==1?EXPORT_CALL_END:PROFILE_EVENT_SPAN_END,NULL,0))return 0;
+		st->count--;if(kind!=2)st->calls--;
+		if(kind!=3&&!synth_event(o,time,tid,kind==1?EXPORT_CALL_END:PROFILE_EVENT_SPAN_END,NULL,0))return 0;
 		if(until_span&&kind==2)break;}
 	return 1;
+}
+
+/* A wrapper the C++ runtime runs a thread's function in. */
+static int thread_wrapper( const char *name ) {
+	return !strncmp(name,"std::thread::_Invoke<",21)||!strncmp(name,"std::__thread_proxy<",20)||!strncmp(name,"std::__1::__thread_proxy<",25);
+}
+/* Names a thread after its entry function's last two name components ("WorkerPool::worker_loop"), unless the function is a
+   hooked system call ("kernel32!Sleep"), which says nothing about the thread. */
+static int name_thread( byte_buffer *o,uint32_t tid,const char *function ) {
+	const char *start=function,*last=NULL,*previous=NULL;int angle=0;
+	if(strchr(function,'!'))return 1;
+	for(const char *c=function;*c;c++){
+		if(*c=='<')angle++;else if(*c=='>'&&angle)angle--;
+		else if(!angle&&(*c=='.'||(c[0]==':'&&c[1]==':'))){previous=last;last=c;if(*c==':')c++;}}
+	if(previous)start=previous+(*previous==':'?2:1);
+	while(*start=='`')start++;
+	if(!strncmp(start,"anonymous namespace'::",22))start+=22;
+	return synth_event(o,0,tid,PROFILE_EVENT_THREAD_NAME,start,(uint32_t)strlen(start));
 }
 
 static int decode_records( byte_buffer *o,symbols *s,tick_clock *c,uint32_t tid,const unsigned char *p,uint32_t length,uint64_t *malformed ) {
@@ -675,7 +703,11 @@ static int decode_records( byte_buffer *o,symbols *s,tick_clock *c,uint32_t tid,
 			for(uint32_t i=0;i<16;i++)if(frame_sets[i].open&&frame_sets[i].tid==tid){frame_sets[i].open=0;
 				if(!synth_event(o,at,FRAME_TRACK_TID+i,PROFILE_EVENT_SPAN_END,NULL,0)||(i==0&&!synth_event(o,at,tid,EXPORT_FRAME_IDLE,NULL,0)))return 0;}}
 		switch(kind){
-		case R_ENTER:{if(pos+16>length)goto bad;uint32_t n=call_name(s,u64(p+pos+8),name,sizeof(name));if(!stack_push(st,1)||!synth_event(o,time,tid,EXPORT_CALL_BEGIN,name,n))return 0;size=16;break;}
+		case R_ENTER:{if(pos+16>length)goto bad;uint32_t n=call_name(s,u64(p+pos+8),name,sizeof(name));size=16;
+			/* A thread's entry function names it if the runtime did not; a thread-start wrapper around it is hidden. */
+			if(!st->count&&thread_wrapper(name)){if(!stack_push(st,3))return 0;break;}
+			if(!st->named&&(!st->count||(st->count==1&&st->kinds[0]==3))){st->named=1;if(!name_thread(o,tid,name))return 0;}
+			if(!stack_push(st,1)||!synth_event(o,time,tid,EXPORT_CALL_BEGIN,name,n))return 0;break;}
 		case R_EXIT:if(st->calls&&!close_slices(o,st,time,tid,st->calls-1,0))return 0;break;
 		case R_UNWIND:if(pos+16>length)goto bad;{uint64_t skipped=u64(p+pos+8);if(!close_slices(o,st,time,tid,skipped<st->calls?st->calls-(uint32_t)skipped:0,0))return 0;}size=16;break;
 		case R_SPAN_BEGIN:{if(pos+16>length)goto bad;uint32_t units=u32(p+pos+8),encoding=u32(p+pos+12),bytes=units*(encoding==1?1:2);if(pos+16+((bytes+7)&~7u)>length)goto bad;
@@ -687,7 +719,9 @@ static int decode_records( byte_buffer *o,symbols *s,tick_clock *c,uint32_t tid,
 				if(set==0&&!synth_event(o,time,tid,EXPORT_FRAME_BEGIN,name,(uint32_t)n))return 0;}
 			else if(set==0&&!synth_event(o,time,tid,EXPORT_FRAME_IDLE,NULL,0))return 0;
 			break;}
-		case R_EVENT:{if(pos+16>length)goto bad;uint32_t id=u32(p+pos+8),n=u32(p+pos+12);if(pos+16+((n+7)&~7u)>length)goto bad;if(id==PROFILE_EVENT_DROPPED_CALLS){for(uint32_t i=0;i+16<=n;i+=16)if(!short_calls_add(u64(p+pos+16+i),u32(p+pos+24+i)))return 0;}else if(!synth_event(o,time,tid,id,p+pos+16,n))return 0;size=16+((n+7)&~7u);break;}
+		case R_EVENT:{if(pos+16>length)goto bad;uint32_t id=u32(p+pos+8),n=u32(p+pos+12);if(pos+16+((n+7)&~7u)>length)goto bad;if(id==PROFILE_EVENT_DROPPED_CALLS){uint64_t total=0;for(uint32_t i=0;i+16<=n;i+=16){total+=u32(p+pos+24+i);if(!short_calls_add(u64(p+pos+16+i),u32(p+pos+24+i)))return 0;}
+				/* The frame thread writes its counts at each frame mark: one value per frame. */
+				if(tid==frame_thread&&!synth_counter(o,time,tid,"Short calls dropped per frame",(double)total))return 0;}else if(!synth_event(o,time,tid,id,p+pos+16,n))return 0;size=16+((n+7)&~7u);break;}
 		case R_COUNTER:{if(pos+24>length)goto bad;uint32_t units=u32(p+pos+16),encoding=u32(p+pos+20),bytes=units*(encoding==1?1:2);if(pos+24+((bytes+7)&~7u)>length)goto bad;
 			uint32_t n=record_name(p+pos+24,units,encoding,name,sizeof(name));if(!synth(o,2,0,time,tid,PROFILE_EVENT_COUNTER,p+pos+8,8,name,n))return 0;size=24+((bytes+7)&~7u);break;}
 		case R_SAMPLE:{if(pos+16>length)goto bad;uint64_t w1=u64(p+pos+8);uint32_t sample_tid=(uint32_t)w1,frames=(uint32_t)((w1>>32)&0xFFFF),flags=(uint32_t)((w1>>48)&0xFF);if(pos+16+frames*8>length)goto bad;
@@ -700,7 +734,8 @@ bad:
 	(*malformed)++;return 1;
 }
 
-/* Pass 1 over one thread's records: registers the native symbols they name and collects the pauses. Natively
+/* Pass 1 over one thread's records: registers the native symbols they name, collects the pauses and finds the frame
+   thread and the startup phases. Natively
    instrumented calls are named by their key when they are decoded, and the runtime names a key on its consumer thread
    after the call, so every name is collected first; a pause applies to every thread, whichever recorded it. */
 static int scan_pass1( const unsigned char *p,uint32_t length,uint32_t tid ) {
@@ -709,6 +744,7 @@ static int scan_pass1( const unsigned char *p,uint32_t length,uint32_t tid ) {
 		uint32_t kind=(uint32_t)(u64(p+pos)>>56),size=8;
 		if(kind==R_EXIT||kind==R_SPAN_END){pos+=8;continue;}
 		if(pos+16>length)return 1;
+		if(kind==R_FRAME_MARK&&!frame_thread&&u64(p+pos+8)==0)frame_thread=tid;
 		switch(kind){
 		case R_ENTER:case R_UNWIND:case R_FRAME_MARK:case R_FRAME_IDLE:case R_STALL:size=16;break;
 		case R_SPAN_BEGIN:{uint32_t bytes=u32(p+pos+8)*(u32(p+pos+12)==1?1:2);size=16+((bytes+7)&~7u);break;}
@@ -717,6 +753,7 @@ static int scan_pass1( const unsigned char *p,uint32_t length,uint32_t tid ) {
 		case R_EVENT:{uint32_t id=u32(p+pos+8),n=u32(p+pos+12);const unsigned char *payload=p+pos+16;size=16+((n+7)&~7u);
 			if(pos+size>length)return 1;
 			if(id==PROFILE_EVENT_RECORDING&&n>=4&&payload[0]==0&&!add_pause(u64(p+pos)&TICK_MASK,tid))return 0;
+			if(id==PROFILE_EVENT_STARTUP&&!startup&&n>=8){if(!(startup=(unsigned char*)malloc(n)))return 0;memcpy(startup,payload,n);startup_size=n;}
 			if(id==PROFILE_EVENT_NATIVE_SYMBOL&&n>=24){uint32_t module_len=u32(payload+16),name_len=u32(payload+20);if(module_len+name_len==n-24&&!add_native(u64(payload),u64(payload+8),payload+24,module_len,payload+24+module_len,name_len))return 0;}
 			break;}
 		default:return 1;}
@@ -730,7 +767,7 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 	unsigned char record_header[16],*payload=NULL,*raw=NULL;uint32_t raw_cap=0;long data_start=ftell(file);tick_clock clock={0};byte_buffer out={0},fresh={0};reorder_buffer order={0};int code=0,have_metadata=0;uint64_t malformed=0;
 	unsigned char *names=NULL;uint32_t names_size=0;
 	memset(frame_sets,0,sizeof(frame_sets));
-	pause_count=0;
+	pause_count=0;frame_thread=0;free(startup);startup=NULL;startup_size=0;
 	/* pass 1: the last metadata snapshot (it lists retired regions too), clock pairs, session and thread names */
 	while(fread(record_header,1,16,file)==16){
 		uint32_t type=u32(record_header),size=u32(record_header+4);
@@ -749,9 +786,21 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 	}
 	if(!have_metadata){fprintf(stderr,"The capture holds no symbol metadata\n");goto done;}
 	if(pause_count)qsort(pauses,pause_count,sizeof(recording_pause),pause_compare);
+	/* Time 0 is the session's base tick, which a session started during the runtime's startup puts at its first phase,
+	   before the first clock pair. */
+	if(clock.count&&clock.nominal_hz)clock.origin_ns=clock.pairs[0].ns-(uint64_t)((double)clock.pairs[0].ticks*1e9/(double)clock.nominal_hz);
 	/* thread names, then the frame track names */
-	if(names_size>=4){uint32_t count=u32(names),pos=4;for(uint32_t i=0;i<count&&pos+8<=names_size;i++){uint32_t tid=u32(names+pos),n=u32(names+pos+4);if(pos+8+n>names_size)break;if(!synth_event(&out,0,tid,PROFILE_EVENT_THREAD_NAME,names+pos+8,n))goto done;pos+=8+n;}}
-	if(!synth_event(&out,0,FRAME_TRACK_TID,PROFILE_EVENT_THREAD_NAME,"Frames",6))goto done;
+	if(names_size>=4){uint32_t count=u32(names),pos=4;for(uint32_t i=0;i<count&&pos+8<=names_size;i++){uint32_t tid=u32(names+pos),n=u32(names+pos+4);open_stack *st=stack_of(tid);if(pos+8+n>names_size)break;if(!st||!synth_event(&out,0,tid,PROFILE_EVENT_THREAD_NAME,names+pos+8,n))goto done;st->named=1;pos+=8+n;}}
+	if(!synth_event(&out,0,FRAME_TRACK_TID,EXPORT_PROCESS_TRACK,"Frames",6))goto done;
+	/* The runtime's startup: its phases on the thread that ran them, and a "Startup" frame from the start of the session to
+	   the first frame, so the program's own startup (its entry point until the first frame) is a frame too. Only
+	   the Perfetto trace shows them: the other exports read spans and calls as the program's own. */
+	if(startup&&pf){uint32_t tid=u32(startup),count=u32(startup+4),pos=8,frames_tid=frame_thread?frame_thread:tid;
+		if(!synth_event(&out,0,FRAME_TRACK_TID,PROFILE_EVENT_SPAN_BEGIN,"Startup",7)||!synth_event(&out,0,frames_tid,EXPORT_FRAME_BEGIN,"Startup",7))goto done;
+		frame_sets[0].open=1;frame_sets[0].tid=frames_tid;
+		for(uint32_t i=0;i<count&&pos+24<=startup_size;i++){uint32_t n=u32(startup+pos+16);if(n>startup_size-pos-24)break;
+			if(!synth_event(&out,clock_seconds(&clock,u64(startup+pos)),tid,EXPORT_CALL_BEGIN,startup+pos+24,n)||!synth_event(&out,clock_seconds(&clock,u64(startup+pos+8)),tid,EXPORT_CALL_END,NULL,0))goto done;
+			pos+=24+((n+7)&~7u);}}
 	/* pass 2: the threads' records */
 	if(fseek(file,data_start,SEEK_SET)!=0)goto done;
 	while(fread(record_header,1,16,file)==16){
@@ -781,7 +830,7 @@ static int read_v2( FILE *file,symbols *table,uint64_t start_ns,uint64_t end_ns,
 malformed_stream:
 	fprintf(stderr,"Malformed profiler stream\n");
 done:
-	free(payload);free(raw);free(out.data);free(fresh.data);free(order.data.data);free(order.index);free(clock.pairs);free(names);stacks_free();
+	free(payload);free(raw);free(out.data);free(fresh.data);free(order.data.data);free(order.index);free(clock.pairs);free(names);free(startup);startup=NULL;stacks_free();
 	return code;
 }
 

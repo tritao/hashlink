@@ -286,6 +286,7 @@ typedef struct {
 	uint64_t stack_uuid;	/* the thread's call-stack track, 0 until used */
 	uint32_t tid;
 	int emitted;
+	int process_track, rank;	/* a process-level track (pftrace_process_track), not a thread */
 	char *name;
 } thread_entry;
 
@@ -445,17 +446,50 @@ static void ensure_process( pftrace *t, uint64_t ts ) {
 		emit_process(t, ts);
 }
 
+static thread_entry *thread_ready( pftrace *t, uint32_t tid, uint64_t ts );
+
+/* The thread named "main", with its descriptor emitted; NULL if no thread has that name yet. */
+static thread_entry *main_thread( pftrace *t, uint64_t ts ) {
+	size_t i;
+	for( i = 0; i < t->threads.n; i++ ) {
+		thread_entry *e = (thread_entry*)t->threads.p + i;
+		if( !e->process_track && e->name && strcmp(e->name, "main") == 0 )
+			return thread_ready(t, e->tid, ts);
+	}
+	return NULL;
+}
+
 static void emit_thread( pftrace *t, thread_entry *th, uint64_t ts ) {
 	size_t a, p;
+	int is_main = !th->process_track && strcmp(th->name, "main") == 0;
+	thread_entry *parent = th->process_track ? main_thread(t, ts) : NULL;
+	char main_name[48];
 	ensure_process(t, ts);
 	th->emitted = 1;
 	pkt_begin(t, ts);
 	a = pb_begin(&t->pk, F_PKT_TRACK_DESC);
 	pb_vi(&t->pk, 1, th->uuid);
+	if( th->process_track ) {
+		/* Under the main thread when there is one, which Perfetto lists first. */
+		pb_str(&t->pk, 2, th->name, strlen(th->name));
+		pb_vi(&t->pk, 5, parent ? parent->uuid : PROCESS_UUID);
+		pb_vi(&t->pk, 12, (uint64_t)(int64_t)th->rank);
+		pb_end(&t->pk, a);
+		pkt_finish(t, 0);
+		return;
+	}
 	p = pb_begin(&t->pk, 4);
 	pb_vi(&t->pk, 1, t->pid);
-	pb_vi(&t->pk, 2, th->tid);
-	pb_str(&t->pk, 5, th->name, strlen(th->name));
+	if( is_main ) {
+		/* Perfetto lists a process's threads by tid, except its main thread (tid == pid), which comes first. The main
+		   thread takes that tid, and its name keeps the real one. */
+		snprintf(main_name, sizeof(main_name), "main (thread %lu)", (unsigned long)th->tid);
+		pb_vi(&t->pk, 2, t->pid);
+		pb_str(&t->pk, 5, main_name, strlen(main_name));
+	} else {
+		pb_vi(&t->pk, 2, th->tid);
+		pb_str(&t->pk, 5, th->name, strlen(th->name));
+	}
 	pb_end(&t->pk, p);
 	pb_vi(&t->pk, 5, PROCESS_UUID);
 	/* sibling_order_rank: the main thread first, then named threads, then the rest */
@@ -583,6 +617,18 @@ void pftrace_thread( pftrace *t, uint32_t tid, const char *name ) {
 		emit_thread(t, e, t->last_ts);
 }
 
+void pftrace_process_track( pftrace *t, uint32_t tid, const char *name, int rank ) {
+	thread_entry *e;
+	if( !t || t->failed || !tid ) return;
+	e = thread_get(t, tid, 1);
+	if( !e || e->emitted ) return;
+	free(e->name);
+	e->name = dup_bytes(name, strlen(name));
+	if( !e->name ) { fail(t); return; }
+	e->process_track = 1;
+	e->rank = rank;
+}
+
 static uint64_t track_for( pftrace *t, uint32_t tid, uint64_t ts ) {
 	thread_entry *e;
 	if( !tid ) {
@@ -604,9 +650,10 @@ static uint64_t stack_track_for( pftrace *t, uint32_t tid, uint64_t ts ) {
 		a = pb_begin(&t->pk, F_PKT_TRACK_DESC);
 		pb_vi(&t->pk, 1, e->stack_uuid);
 		if( e->name && strcmp(e->name, "main") == 0 ) {
-			/* Perfetto lists a process's threads by tid and its own tracks after them, so the main thread's frames go on a
-			   top-level track, which it shows above every process. */
+			/* The main thread's calls, cut into frames: the trace's starting point, after the frames track. */
 			pb_str(&t->pk, 2, "Main thread frames", 18);
+			pb_vi(&t->pk, 5, e->uuid);
+			pb_vi(&t->pk, 12, (uint64_t)(int64_t)-1);
 		} else {
 			pb_str(&t->pk, 2, "Call stacks", 11);
 			pb_vi(&t->pk, 5, e->uuid);
