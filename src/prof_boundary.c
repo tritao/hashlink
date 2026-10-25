@@ -138,6 +138,10 @@ static const import_name blocking_imports[] = {
 	{"ws2_32.dll","select"}, {"ws2_32.dll","WSAPoll"}, {"ws2_32.dll","accept"}, {"ws2_32.dll","connect"},
 	{"ws2_32.dll","WSARecv"}, {"ws2_32.dll","WSASend"}, {"ws2_32.dll","WSAWaitForMultipleEvents"},
 	{"ws2_32.dll","getaddrinfo"}, {"ws2_32.dll","GetAddrInfoW"},
+	/* C++ waits: std::condition_variable, std::thread::join and std::this_thread::sleep_for wait inside the STL's DLL,
+	   whose own imports are not patched. */
+	{"msvcp140.dll","_Cnd_wait"}, {"msvcp140.dll","_Cnd_timedwait"}, {"msvcp140.dll","_Thrd_join"},
+	{"msvcp140.dll","_Thrd_sleep"}, {"msvcp140.dll","_Thrd_sleep_for"},
 	/* HashLink's file natives go through the C runtime's streams. */
 	{"ucrtbase.dll","fopen"}, {"ucrtbase.dll","_wfopen"}, {"ucrtbase.dll","fread"}, {"ucrtbase.dll","fwrite"},
 	{"ucrtbase.dll","fflush"}, {"ucrtbase.dll","fclose"}, {"ucrtbase.dll","system"}, {"ucrtbase.dll","_wsystem"},
