@@ -447,6 +447,7 @@ static void ensure_process( pftrace *t, uint64_t ts ) {
 }
 
 static thread_entry *thread_ready( pftrace *t, uint32_t tid, uint64_t ts );
+static void emit_stack_track( pftrace *t, thread_entry *e, uint64_t ts );
 
 /* The thread named "main", with its descriptor emitted; NULL if no thread has that name yet. */
 static thread_entry *main_thread( pftrace *t, uint64_t ts ) {
@@ -612,9 +613,12 @@ void pftrace_thread( pftrace *t, uint32_t tid, const char *name ) {
 	if( !nn ) { fail(t); return; }
 	free(e->name);
 	e->name = nn;
-	/* first emission is lazy (stamped with the first event); a rename re-emits right away */
+	/* first emission is lazy (stamped with the first event); a rename re-emits right away, with the call-stack track
+	   named after the thread */
 	if( e->emitted )
 		emit_thread(t, e, t->last_ts);
+	if( e->stack_uuid )
+		emit_stack_track(t, e, t->last_ts);
 }
 
 void pftrace_process_track( pftrace *t, uint32_t tid, const char *name, int rank ) {
@@ -640,26 +644,30 @@ static uint64_t track_for( pftrace *t, uint32_t tid, uint64_t ts ) {
 }
 
 /* The thread's call-stack track: a child of its thread track, so it shows inside the thread's group. */
+static void emit_stack_track( pftrace *t, thread_entry *e, uint64_t ts ) {
+	size_t a;
+	pkt_begin(t, ts);
+	a = pb_begin(&t->pk, F_PKT_TRACK_DESC);
+	pb_vi(&t->pk, 1, e->stack_uuid);
+	if( strcmp(e->name, "main") == 0 ) {
+		/* The main thread's calls, cut into frames: the trace's starting point, after the frames track. */
+		pb_str(&t->pk, 2, "Main thread frames", 18);
+		pb_vi(&t->pk, 12, (uint64_t)(int64_t)-1);
+	} else {
+		/* Named after the thread: a thread whose own track is empty shows only this one, under this name. */
+		pb_str(&t->pk, 2, e->name, strlen(e->name));
+	}
+	pb_vi(&t->pk, 5, e->uuid);
+	pb_end(&t->pk, a);
+	pkt_finish(t, 0);
+}
+
 static uint64_t stack_track_for( pftrace *t, uint32_t tid, uint64_t ts ) {
 	thread_entry *e = thread_ready(t, tid, ts);
-	size_t a;
 	if( !e ) return 0;
 	if( !e->stack_uuid ) {
 		e->stack_uuid = t->next_uuid++;
-		pkt_begin(t, ts);
-		a = pb_begin(&t->pk, F_PKT_TRACK_DESC);
-		pb_vi(&t->pk, 1, e->stack_uuid);
-		if( e->name && strcmp(e->name, "main") == 0 ) {
-			/* The main thread's calls, cut into frames: the trace's starting point, after the frames track. */
-			pb_str(&t->pk, 2, "Main thread frames", 18);
-			pb_vi(&t->pk, 5, e->uuid);
-			pb_vi(&t->pk, 12, (uint64_t)(int64_t)-1);
-		} else {
-			pb_str(&t->pk, 2, "Call stacks", 11);
-			pb_vi(&t->pk, 5, e->uuid);
-		}
-		pb_end(&t->pk, a);
-		pkt_finish(t, 0);
+		emit_stack_track(t, e, ts);
 	}
 	return e->stack_uuid;
 }

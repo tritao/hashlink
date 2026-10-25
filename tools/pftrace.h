@@ -40,7 +40,8 @@ void pftrace_process_track( pftrace *t, uint32_t tid, const char *name, int rank
 void pftrace_slice_begin( pftrace *t, uint64_t ts_ns, uint32_t tid, const char *name, const char *category );   /* category may be NULL */
 void pftrace_slice_end( pftrace *t, uint64_t ts_ns, uint32_t tid );
 
-/* Nested slices on the thread's "Call stacks" track, a child of its thread track: call stacks laid out over time. */
+/* Nested slices on the thread's call-stack track, a child of its thread track named after the thread ("Main thread frames"
+   for the thread named "main"): call stacks laid out over time. */
 void pftrace_stack_begin( pftrace *t, uint64_t ts_ns, uint32_t tid, const char *name );
 void pftrace_stack_end( pftrace *t, uint64_t ts_ns, uint32_t tid );
 
