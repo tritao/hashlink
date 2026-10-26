@@ -79,6 +79,7 @@ struct _hl_tls {
 #	include <unistd.h>
 #	include <sys/syscall.h>
 #	include <sys/time.h>
+#	include <errno.h>
 
 #ifdef __APPLE__
 #include <dispatch/dispatch.h>
@@ -232,7 +233,8 @@ HL_PRIM void hl_semaphore_acquire(hl_semaphore *sem) {
 	hl_blocking(false);
 #	else
 	hl_blocking(true);
-	sem_wait(&sem->sem);
+	// Waits run through signals (such as the profiler's SIGPROF) rather than returning without the semaphore.
+	while( sem_wait(&sem->sem) != 0 && errno == EINTR ) {}
 	hl_blocking(false);
 #	endif
 #	endif
@@ -273,7 +275,9 @@ HL_PRIM bool hl_semaphore_try_acquire(hl_semaphore *sem, vdynamic *timeout) {
 		delta -= idelta2 * 1e9;
 		t.tv_sec = tv.tv_sec + idelta + idelta2;
 		t.tv_nsec = (long)delta;
-		ret = sem_timedwait(&sem->sem, &t) == 0;
+		int status;
+		while( (status = sem_timedwait(&sem->sem, &t)) != 0 && errno == EINTR ) {}
+		ret = status == 0;
 	} else {
 		ret = sem_trywait(&sem->sem) == 0;
 	}

@@ -359,7 +359,8 @@ HL_PRIM void hl_sys_sleep( double f ) {
 	struct timespec t;
 	t.tv_sec = (int)f;
 	t.tv_nsec = (int)((f - t.tv_sec) * 1e9);
-	nanosleep(&t,NULL);
+	// A signal (such as the profiler's SIGPROF) interrupts the sleep; it resumes for the time that remained.
+	while( nanosleep(&t,&t) != 0 && errno == EINTR ) {}
 #endif
 	hl_blocking(false);
 }
