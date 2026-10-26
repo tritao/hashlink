@@ -356,6 +356,9 @@ static unsigned int hash_i32( unsigned int hash, int value ) {
 	return hash_bytes(hash,bytes,4);
 }
 
+static unsigned int hash_global_prefix( hl_code *code, int count ) {
+	unsigned int hash=2166136261U;for(int i=0;i<count;i++)hash=hash_i32(hash,(int)(code->globals[i]-code->types));return hash;
+}
 static unsigned int hash_int_prefix( hl_code *code, int count ) {
 	unsigned int hash=2166136261U;for(int i=0;i<count;i++)hash=hash_i32(hash,code->ints[i]);return hash;
 }
@@ -427,11 +430,18 @@ static int hash_type_index( hl_code *code, hl_type *type ) {
 }
 
 static int hash_type_global_index( hl_module *module, void **value ) {
-	int i;
+	int low = 0, high = module->code->nglobals;
+	ptrdiff_t offset;
 	if( value == NULL ) return 0;
-	for( i = 0; i < module->code->nglobals; i++ )
-		if( module->globals_data + module->globals_indexes[i] == (unsigned char*)value ) return i + 1;
-	return -1;
+	offset = (unsigned char*)value - module->globals_data;
+	// Globals are laid out in index order, so the offsets only grow. A module holds thousands of String constants and a hash
+	// asks for the global of every type that has one.
+	while( low < high ) {
+		int middle = low + (high - low) / 2;
+		if( module->globals_indexes[middle] < offset ) low = middle + 1;
+		else high = middle;
+	}
+	return low < module->code->nglobals && module->globals_indexes[low] == offset ? low + 1 : -1;
 }
 
 static unsigned int hash_type_prefix( hl_module *module, int count ) {
@@ -508,6 +518,8 @@ void hl_patch_free( hl_patch *patch ) {
 	free(patch->types);
 	for(i=0;i<patch->added_function_count;i++) free(patch->added_functions[i].name);
 	free(patch->added_functions);
+	for(i=0;i<patch->global_count;i++) free(patch->globals[i].fields);
+	free(patch->globals);
 	for(i=0;i<patch->debug_file_count;i++) free(patch->debug_files[i]);
 	for(i=0;i<patch->source_snapshot_count;i++) free(patch->source_snapshots[i].content);
 	free(patch->source_snapshots);
@@ -518,13 +530,13 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 	patch_reader r = { data, data + (size < 0 ? 0 : size), NULL };
 	hl_patch *patch = (hl_patch*)calloc(1,sizeof(hl_patch));
 	const unsigned char *p; int version, i, j, count, tag, section_count, section_length;
-	bool have_symbols = false, have_functions = false, have_debug = false, have_snapshots = false, have_added = false;
+	bool have_symbols = false, have_functions = false, have_debug = false, have_snapshots = false, have_added = false, have_globals = false;
 #define FAIL(msg) do { r.error = msg; goto fail; } while(0)
 	if( patch == NULL ) FAIL("Out of memory reading HLP");
 	if( !take(&r,3,&p) ) goto fail;
 	if( memcmp(p,"HLP",3) != 0 ) FAIL("Invalid HLP magic");
 	if( !read_byte(&r,&version) ) goto fail;
-	if( version != 8 ) FAIL("Unsupported HLP version");
+	if( version != 9 ) FAIL("Unsupported HLP version");
 	if( !take(&r,16,&p) ) goto fail;
 	memcpy(patch->module_id,p,16);
 	if( !read_count(&r,&patch->base_revision) || !read_count(&r,&patch->revision) ) goto fail;
@@ -611,6 +623,20 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 				added->name=(char*)malloc(count+1);if(!added->name)FAIL("Out of memory reading added functions");
 				memcpy(added->name,p,count);added->name[count]=0;
 				for(j=0;j<i;j++)if(patch->added_functions[j].stable_id==added->stable_id||patch->added_functions[j].findex==added->findex)FAIL("Duplicate HLP added function");
+			}
+		} else if( tag == 6 ) {
+			if( have_globals ) FAIL("Duplicate HLP globals section");
+			have_globals=true;
+			if(!read_hash(&s,&patch->global_prefix_hash)||!read_count(&s,&patch->base_global_count)||!read_count(&s,&patch->global_count))goto section_fail;
+			// Each global is at least a type and a field count, so the section bounds the count before anything is allocated.
+			if(patch->global_count<=0||patch->global_count>(s.end-s.p)/2)FAIL("Invalid HLP globals section");
+			patch->globals=(hl_patch_global*)calloc(patch->global_count,sizeof(hl_patch_global));if(!patch->globals)FAIL("Out of memory reading patch globals");
+			for(i=0;i<patch->global_count;i++){
+				hl_patch_global *global=patch->globals+i;
+				if(!read_count(&s,&global->type)||!read_count(&s,&global->field_count))goto section_fail;
+				if(global->field_count>s.end-s.p)FAIL("Truncated HLP data");
+				global->fields=(int*)calloc(global->field_count>0?global->field_count:1,sizeof(int));if(!global->fields)FAIL("Out of memory reading patch globals");
+				for(j=0;j<global->field_count;j++)if(!read_count(&s,global->fields+j))goto section_fail;
 			}
 		} else {
 			s.p = s.end;
@@ -775,10 +801,11 @@ static bool validate_function( hl_module *m, hl_patch *patch, patch_layout *layo
 			if(!valid_reg(f,p[0])||p[1]<0||p[1]>=type_count){*error="Invalid type literal";return false;}
 			break;
 		case OGetGlobal:
-			if(!valid_reg(f,p[0])||p[1]<0||p[1]>=m->code->nglobals){*error="Invalid global read";return false;}
+			if(!valid_reg(f,p[0])||p[1]<0||p[1]>=m->code->nglobals+patch->global_count){*error="Invalid global read";return false;}
 			break;
 		case OSetGlobal:
-			if(p[0]<0||p[0]>=m->code->nglobals||!valid_reg(f,p[1])){*error="Invalid global write";return false;}
+			// The globals a patch added hold constants the compiler never assigns; later code reads them without a barrier.
+			if(p[0]<0||p[0]>=m->code->nglobals-m->code->npatchglobals||!valid_reg(f,p[1])){*error="Invalid global write";return false;}
 			break;
 		case ONull:case OGetThis:case OSetThis:case OToDyn:case OToSFloat:case OToUFloat:case OToInt:case OSafeCast:case OUnsafeCast:case OToVirtual:
 			if(!valid_reg(f,p[0])||(op->operand_count>1&&!valid_reg(f,p[1]))){*error="Invalid unary operation";return false;}
@@ -829,6 +856,56 @@ static bool validate_patch_types( hl_module *m, hl_patch *patch, int string_coun
 		}
 	}
 	return true;
+}
+
+/* Checks the String constants a patch adds and finds the room for them after the module's last global. */
+static bool validate_patch_globals( hl_module *m, hl_patch *patch, int *size, const char **error ) {
+	int total_ints=patch->base_int_count+patch->int_count,total_floats=patch->base_float_count+patch->float_count,total_strings=patch->base_string_count+patch->string_count,total_types=patch->base_type_count+patch->type_count;
+	int used=m->globals_size;
+	*size=used;
+	if(patch->global_count==0)return true;
+	if(m->globals_data_capacity==0||patch->global_count>m->code->globals_capacity-m->code->nglobals){*error="Global capacity exceeded";return false;}
+	for(int i=0;i<patch->global_count;i++){
+		hl_patch_global *global=patch->globals+i;hl_type *t;
+		if(global->type<0||global->type>=patch->base_type_count){*error="Invalid patch global type";return false;}
+		t=m->code->types+global->type;
+		// Only objects built from plain fields, which is what a String is; anything else keeps the module from taking the patch.
+		if(t->kind!=HOBJ||t->obj->super!=NULL||t->obj->nfields!=global->field_count){*error="Invalid patch global type";return false;}
+		for(int j=0;j<global->field_count;j++){
+			int idx=global->fields[j];
+			switch(t->obj->fields[j].t->kind){
+			case HI32:if(idx>=total_ints){*error="Invalid patch global field";return false;}break;
+			case HF64:if(idx>=total_floats){*error="Invalid patch global field";return false;}break;
+			case HBYTES:if(idx>=total_strings){*error="Invalid patch global field";return false;}break;
+			case HBOOL:break;
+			case HTYPE:if(idx>=total_types){*error="Invalid patch global field";return false;}break;
+			default:*error="Unsupported patch global field";return false;
+			}
+		}
+		used+=hl_pad_size(used,t);used+=hl_type_size(t);
+		if(used>m->globals_data_capacity){*error="Global capacity exceeded";return false;}
+	}
+	*size=used;
+	return true;
+}
+
+/* Lays the new globals out after the module's last, where nothing refers to them until the patch commits. */
+static void stage_patch_globals( hl_module *m, hl_patch *patch ) {
+	int used=m->globals_size;
+	for(int i=0;i<patch->global_count;i++){
+		hl_type *t=m->code->types+patch->globals[i].type;int g=m->code->nglobals+i;
+		used+=hl_pad_size(used,t);
+		m->code->globals[g]=t;m->globals_indexes[g]=used;
+		used+=hl_type_size(t);
+	}
+}
+
+static void unstage_patch_globals( hl_module *m, hl_patch *patch ) {
+	for(int i=0;i<patch->global_count;i++){
+		int g=m->code->nglobals+i;
+		if(m->globals_indexes[g]>=0)memset(m->globals_data+m->globals_indexes[g],0,sizeof(void*));
+		m->code->globals[g]=NULL;m->globals_indexes[g]=-1;
+	}
 }
 
 /* Checks the functions a patch adds, and builds the layout its code is checked and compiled against. */
@@ -913,13 +990,15 @@ static bool stage_patch_types( hl_module *m, hl_patch *patch, uchar **strings, v
 }
 
 h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_msg ) {
-	const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;hl_code code;hl_module temp;patch_layout layout={0};bool staged_added=false;hl_patch_live *live_block=NULL;hl_patch_code *superseded=NULL;
+	const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;hl_code code;hl_module temp;patch_layout layout={0};bool staged_added=false;hl_patch_live *live_block=NULL;hl_patch_code *superseded=NULL;int globals_size=0;bool staged_globals=false;
 	if(!m||!patch||!m->patchable){error="Module is not patchable";goto fail;}
 	if(patch->function_count<=0){error="Patch contains no functions";goto fail;}
 	if(m->revision!=patch->base_revision||patch->revision<=patch->base_revision){error="Stale patch revision";goto fail;}
 	if(patch->base_int_count!=m->code->nints||patch->base_float_count!=m->code->nfloats||patch->base_string_count!=m->code->nstrings||patch->base_type_count!=m->code->ntypes){error="Patch symbol base does not match module";goto fail;}
 	if(patch->int_prefix_hash!=hash_int_prefix(m->code,patch->base_int_count)||patch->float_prefix_hash!=hash_float_prefix(m->code,patch->base_float_count)||patch->string_prefix_hash!=hash_string_prefix(m->code,patch->base_string_count)||patch->type_prefix_hash!=hash_type_prefix(m,patch->base_type_count)){error="Patch symbol prefix hash does not match module";goto fail;}
+	if(patch->global_count>0&&(patch->base_global_count!=m->code->nglobals||patch->global_prefix_hash!=hash_global_prefix(m->code,patch->base_global_count))){error="Patch global base does not match module";goto fail;}
 	if(!validate_patch_types(m,patch,patch->base_string_count+patch->string_count,&error))goto fail;
+	if(!validate_patch_globals(m,patch,&globals_size,&error))goto fail;
 	if(!stage_patch_layout(m,patch,&layout,&error))goto fail;
 	combined_functions=layout.functions; // owned through combined_functions from here
 	for(int i=0;i<patch->function_count;i++){for(int j=0;j<i;j++)if(patch->functions[j].findex==patch->functions[i].findex){error="Duplicate stable function slot";goto fail;}if(!validate_function(m,patch,&layout,patch->functions+i,&error))goto fail;}
@@ -951,7 +1030,9 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 		m->code->function_names[at]=patch->added_functions[i].name;m->code->function_names_lens[at]=(int)strlen(patch->added_functions[i].name);
 		m->ctx.functions_types[patch->added_functions[i].findex]=combined_functions[at].type;
 	}
-	memset(&code,0,sizeof(code));code.nints=patch->base_int_count+patch->int_count;code.ints=combined_ints;code.nfloats=patch->base_float_count+patch->float_count;code.floats=combined_floats;code.nstrings=patch->base_string_count+patch->string_count;code.strings=combined_strings;code.strings_lens=combined_string_lens;code.ustrings=combined_ustrings;code.ntypes=patch->base_type_count+patch->type_count;code.types_capacity=m->code->types_capacity;code.types=m->code->types;code.nfunctions=layout.count;code.functions_capacity=m->code->functions_capacity;code.nnatives=m->code->nnatives;code.natives=m->code->natives;code.functions=combined_functions;code.function_names=m->code->function_names;code.function_names_lens=m->code->function_names_lens;code.hasdebug=m->code->hasdebug;code.ndebugfiles=m->code->ndebugfiles;code.debugfiles=m->code->debugfiles;code.debugfiles_lens=m->code->debugfiles_lens;code.alloc=m->code->alloc;
+	// The JIT bakes the address of each global into code, so they are laid out before it runs. Nothing reads them until the commit.
+	if(patch->global_count>0){stage_patch_globals(m,patch);staged_globals=true;}
+	memset(&code,0,sizeof(code));code.globals=m->code->globals;code.nglobals=m->code->nglobals+patch->global_count;code.globals_capacity=m->code->globals_capacity;code.npatchglobals=m->code->npatchglobals+patch->global_count;code.nints=patch->base_int_count+patch->int_count;code.ints=combined_ints;code.nfloats=patch->base_float_count+patch->float_count;code.floats=combined_floats;code.nstrings=patch->base_string_count+patch->string_count;code.strings=combined_strings;code.strings_lens=combined_string_lens;code.ustrings=combined_ustrings;code.ntypes=patch->base_type_count+patch->type_count;code.types_capacity=m->code->types_capacity;code.types=m->code->types;code.nfunctions=layout.count;code.functions_capacity=m->code->functions_capacity;code.nnatives=m->code->nnatives;code.natives=m->code->natives;code.functions=combined_functions;code.function_names=m->code->function_names;code.function_names_lens=m->code->function_names_lens;code.hasdebug=m->code->hasdebug;code.ndebugfiles=m->code->ndebugfiles;code.debugfiles=m->code->debugfiles;code.debugfiles_lens=m->code->debugfiles_lens;code.alloc=m->code->alloc;
 	temp=*m;temp.code=&code;temp.functions_indexes=layout.indexes;temp.jit_code=NULL;temp.jit_debug=NULL;temp.jit_ctx=NULL;temp.staging_patch=true;
 #ifdef WIN64_UNWIND_TABLES
 	// The JIT records each function it emits in the module's unwind table; the live module's table is registered for its own code.
@@ -965,11 +1046,17 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	allocation->unwind_registered=true;
 #endif
 	live_block=patch_live_alloc(m);if(!live_block){error="Out of memory listing patch code";goto fail;}
+	// A constant must exist before any code can read its global; the strings it points to are the patch's, which outlive it.
+	for(int i=0;i<patch->global_count;i++){
+		hl_constant constant;constant.global=m->code->nglobals+i;constant.nfields=patch->globals[i].field_count;constant.fields=patch->globals[i].fields;
+		if(!hl_module_build_constant(m,&code,&constant)){error="Could not build patch global";goto fail;}
+	}
 	if(inject_patch_failure(m,3,&error))goto fail;
 	temp.jit_code=allocation->code;temp.codesize=allocation->code_size;temp.jit_debug=allocation->jit_debug;temp.gdb_jit_entry=NULL;hl_gdb_jit_register_patch(&temp);allocation->gdb_jit_entry=temp.gdb_jit_entry;free(combined_functions);combined_functions=NULL;
 	if(type_allocation_count){int needed=m->patch_type_allocation_count+type_allocation_count;if(needed>m->patch_type_allocation_capacity){int capacity=needed<16?16:needed*2;void **owners=(void**)realloc(m->patch_type_allocations,sizeof(void*)*capacity);if(!owners){error="Out of memory publishing patch types";goto fail;}m->patch_type_allocations=owners;m->patch_type_allocation_capacity=capacity;}}
 	for(int i=0;i<type_allocation_count;i++)m->patch_type_allocations[m->patch_type_allocation_count++]=type_allocations[i];
 	free(type_allocations);type_allocations=NULL;type_allocation_count=0;for(int i=m->code->ntypes;i<code.ntypes;i++)m->code->types[i].gc_owner=m;m->code->ntypes=code.ntypes;
+	m->code->nglobals+=patch->global_count;m->code->npatchglobals+=patch->global_count;m->globals_size=globals_size;staged_globals=false;
 	hl_module_crash_write_lock();
 	if(m->patch_lo==NULL||allocation->code<m->patch_lo)m->patch_lo=allocation->code;
 	if(m->patch_hi==NULL||(void*)((unsigned char*)allocation->code+allocation->code_size)>m->patch_hi)m->patch_hi=(unsigned char*)allocation->code+allocation->code_size;
@@ -989,6 +1076,7 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 fail:
 	if(jit) hl_jit_free(jit,false);
 	if(staged_added) unstage_added_functions(m,patch);
+	if(staged_globals) unstage_patch_globals(m,patch);
 	free(live_block);
 	free(layout.indexes);
 	free(combined_functions);

@@ -571,6 +571,7 @@ hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg ) {
 		hl_read_type(r, c->types + i);
 		CHK_ERROR();
 	}
+	c->globals_capacity = c->nglobals;
 	ALLOC(c->globals, hl_type*, c->nglobals);
 	for(i=0;i<c->nglobals;i++)
 		c->globals[i] = hl_get_type(r);
