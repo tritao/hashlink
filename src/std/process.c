@@ -19,6 +19,9 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#	define _GNU_SOURCE // pipe2
+#endif
 #include <hl.h>
 #include "hlsystem.h"
 
@@ -28,6 +31,7 @@
 #	include <sys/types.h>
 #	include <unistd.h>
 #	include <errno.h>
+#	include <fcntl.h>
 #	include <signal.h>
 #	if !defined(HL_MAC)
 #		if defined(HL_BSD) || defined (HL_IOS) || defined (HL_TVOS)
@@ -42,6 +46,22 @@
 #include <stdlib.h>
 
 typedef struct _vprocess vprocess;
+
+#if !defined(HL_WIN) && !defined(HL_CONSOLE)
+/* A pipe whose descriptors close when a process execs, so a child keeps only the ends it is given as its standard
+   streams (dup2 clears the flag on those), and a process started from another thread inherits none. A leaked end
+   held by a long-lived descendant would keep the parent from ever reading end-of-file. */
+static int cloexec_pipe( int fds[2] ) {
+#	if defined(__linux__)
+	return pipe2(fds, O_CLOEXEC);
+#	else
+	if( pipe(fds) ) return -1;
+	fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+	fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+	return 0;
+#	endif
+}
+#endif
 
 struct _vprocess {
 	void (*finalize)( vprocess * );
@@ -138,8 +158,20 @@ HL_PRIM vprocess *hl_process_run( vbyte *cmd, varray *vargs, bool detached ) {
 		argv[i+1] = NULL;
 	}
 	int input[2], output[2], error[2];
-	if( pipe(input) || pipe(output) || pipe(error) )
+	if( cloexec_pipe(input) )
 		return NULL;
+	if( cloexec_pipe(output) ) {
+		close(input[0]);
+		close(input[1]);
+		return NULL;
+	}
+	if( cloexec_pipe(error) ) {
+		close(input[0]);
+		close(input[1]);
+		close(output[0]);
+		close(output[1]);
+		return NULL;
+	}
 	p = (vprocess*)hl_gc_alloc_finalizer(sizeof(vprocess));
 #ifdef HL_TVOS
 	hl_error("hl_process_run() not available for this platform");
@@ -164,6 +196,10 @@ HL_PRIM vprocess *hl_process_run( vbyte *cmd, varray *vargs, bool detached ) {
 		dup2(input[0],0);
 		dup2(output[1],1);
 		dup2(error[1],2);
+		// The originals close at exec anyway; closing them here also covers exec failing.
+		if( input[0] > 2 ) close(input[0]);
+		if( output[1] > 2 ) close(output[1]);
+		if( error[1] > 2 ) close(error[1]);
 #ifdef HL_TVOS
 		hl_error("hl_process_run() not available for this platform");
 #else
