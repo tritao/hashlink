@@ -1046,16 +1046,17 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	allocation->unwind_registered=true;
 #endif
 	live_block=patch_live_alloc(m);if(!live_block){error="Out of memory listing patch code";goto fail;}
-	// A constant must exist before any code can read its global; the strings it points to are the patch's, which outlive it.
-	for(int i=0;i<patch->global_count;i++){
-		hl_constant constant;constant.global=m->code->nglobals+i;constant.nfields=patch->globals[i].field_count;constant.fields=patch->globals[i].fields;
-		if(!hl_module_build_constant(m,&code,&constant)){error="Could not build patch global";goto fail;}
-	}
 	if(inject_patch_failure(m,3,&error))goto fail;
 	temp.jit_code=allocation->code;temp.codesize=allocation->code_size;temp.jit_debug=allocation->jit_debug;temp.gdb_jit_entry=NULL;hl_gdb_jit_register_patch(&temp);allocation->gdb_jit_entry=temp.gdb_jit_entry;free(combined_functions);combined_functions=NULL;
 	if(type_allocation_count){int needed=m->patch_type_allocation_count+type_allocation_count;if(needed>m->patch_type_allocation_capacity){int capacity=needed<16?16:needed*2;void **owners=(void**)realloc(m->patch_type_allocations,sizeof(void*)*capacity);if(!owners){error="Out of memory publishing patch types";goto fail;}m->patch_type_allocations=owners;m->patch_type_allocation_capacity=capacity;}}
 	for(int i=0;i<type_allocation_count;i++)m->patch_type_allocations[m->patch_type_allocation_count++]=type_allocations[i];
 	free(type_allocations);type_allocations=NULL;type_allocation_count=0;for(int i=m->code->ntypes;i<code.ntypes;i++)m->code->types[i].gc_owner=m;m->code->ntypes=code.ntypes;
+	// A constant must exist before any code can read its global; the strings it points to are the patch's, which outlive it.
+	// They live in the module's arena, which frees nothing on its own, so they are built only once nothing below can fail.
+	for(int i=0;i<patch->global_count;i++){
+		hl_constant constant;constant.global=m->code->nglobals+i;constant.nfields=patch->globals[i].field_count;constant.fields=patch->globals[i].fields;
+		hl_module_build_constant(m,&code,&constant);
+	}
 	m->code->nglobals+=patch->global_count;m->code->npatchglobals+=patch->global_count;m->globals_size=globals_size;staged_globals=false;
 	hl_module_crash_write_lock();
 	if(m->patch_lo==NULL||allocation->code<m->patch_lo)m->patch_lo=allocation->code;

@@ -255,6 +255,10 @@ static volatile int gc_owner_hint = 1;
 static void **gc_overflow_owners = NULL;
 static int gc_overflow_count = 0, gc_overflow_capacity = 0;
 static bool gc_overflow_warned = false;
+// Marks the class of an owner that was released while some of its blocks were alive. No owner matches it, so nothing
+// allocates there again, and the class is given back once its last block dies.
+static char gc_retired_owner_marker;
+#define GC_RETIRED_OWNER	((void*)&gc_retired_owner_marker)
 
 // The class of a registered owner, or -1 when this owner has no class of its own (it must register, or is shared).
 static HL_INLINE int gc_owner_class_lookup( void *owner ) {
@@ -283,6 +287,13 @@ static int gc_owner_class_register( void *owner ) {
 	if( oc > 0 ) return oc;
 	for(int i=1;i<=GC_OWNER_CLASSES;i++)
 		if( gc_owner_table[i] == NULL ) {
+			gc_owner_table[i] = owner;
+			return i;
+		}
+	// A retired class gets no new blocks, so its count from the last collection is current: reuse one that is empty.
+	for(int i=1;i<=GC_OWNER_CLASSES;i++)
+		if( gc_owner_table[i] == GC_RETIRED_OWNER && gc_allocator_class_live_blocks(i) == 0 ) {
+			gc_allocator_release_class(i);
 			gc_owner_table[i] = owner;
 			return i;
 		}
@@ -1645,18 +1656,18 @@ HL_API void hl_gc_owner_release( void *owner ) {
 		// so a block can never end up in a class that now belongs to someone else.
 		gc_major();
 		if( oc == GC_OVERFLOW_CLASS ) {
-			if( gc_allocator_class_live_blocks(oc) == 0 ) {
-				for(int i=0;i<gc_overflow_count;i++)
-					if( gc_overflow_owners[i] == owner ) {
-						gc_overflow_owners[i] = gc_overflow_owners[--gc_overflow_count];
-						break;
-					}
-				if( gc_overflow_count == 0 ) gc_allocator_release_class(oc);
-			}
+			// The class is shared: the owner leaves the list either way, and the pages go once nothing in them lives.
+			for(int i=0;i<gc_overflow_count;i++)
+				if( gc_overflow_owners[i] == owner ) {
+					gc_overflow_owners[i] = gc_overflow_owners[--gc_overflow_count];
+					break;
+				}
+			if( gc_overflow_count == 0 && gc_allocator_class_live_blocks(oc) == 0 ) gc_allocator_release_class(oc);
 		} else if( gc_allocator_class_live_blocks(oc) == 0 ) {
 			gc_allocator_release_class(oc);
 			gc_owner_table[oc] = NULL;
-		}
+		} else
+			gc_owner_table[oc] = GC_RETIRED_OWNER;
 	}
 	gc_global_lock(false);
 }
