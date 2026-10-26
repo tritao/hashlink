@@ -40,6 +40,9 @@
 #define PROFILE_INPUT_POLLED_MOVE 4U
 #define PROFILE_INPUT_POLLED_BUTTON 5U
 #define PROFILE_INPUT_POLLED_KEY 6U
+/* The application polled a window or a surface resize: the age is unknown, and a and b are the new width and height. */
+#define PROFILE_INPUT_POLLED_WINDOW_RESIZE 7U
+#define PROFILE_INPUT_POLLED_SURFACE_RESIZE 8U
 #define PROFILE_INPUT_AGE_UNKNOWN 0xFFFFFFFFFFFFFFFFULL
 
 #endif

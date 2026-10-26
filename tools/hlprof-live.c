@@ -367,7 +367,8 @@ static int pf_sample( pf_export *pf,symbols *s,double time,uint32_t tid,const un
 }
 static const char *input_name( uint32_t kind ){
 	switch(kind){case PROFILE_INPUT_MOVE:return "input move";case PROFILE_INPUT_BUTTON:return "input button";case PROFILE_INPUT_KEY:return "input key";
-		case PROFILE_INPUT_POLLED_MOVE:return "input polled move";case PROFILE_INPUT_POLLED_BUTTON:return "input polled button";case PROFILE_INPUT_POLLED_KEY:return "input polled key";default:return "input";}
+		case PROFILE_INPUT_POLLED_MOVE:return "input polled move";case PROFILE_INPUT_POLLED_BUTTON:return "input polled button";case PROFILE_INPUT_POLLED_KEY:return "input polled key";
+		case PROFILE_INPUT_POLLED_WINDOW_RESIZE:return "resize polled window";case PROFILE_INPUT_POLLED_SURFACE_RESIZE:return "resize polled surface";default:return "input";}
 }
 /* The counter an input's age goes to: how long it waited until NativeKit's handler had it, or until the application polled it. */
 static const char *input_age_counter( uint32_t kind ){
