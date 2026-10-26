@@ -102,6 +102,9 @@ typedef struct {
 #define HL_PATCH_TYPE_RESERVE 65536
 /* Function slots reserved at load time for functions that patches add. */
 #define HL_PATCH_FUNCTION_RESERVE 4096
+/* Pointer globals reserved at load time, in a patchable module only, for the String constants that patches add. A patch
+   cannot move the globals once the JIT has baked their addresses into code, so the room is allocated up front. */
+#define HL_PATCH_GLOBAL_RESERVE 16384
 
 typedef struct {
 	int version;
@@ -112,6 +115,10 @@ typedef struct {
 	int ntypes;
 	int types_capacity;
 	int nglobals;
+	/* Entries allocated in `globals`; patches add constant globals after the loaded ones. */
+	int globals_capacity;
+	/* How many of the globals a patch added; the loaded ones come first and stay writable. */
+	int npatchglobals;
 	int nnatives;
 	int nfunctions;
 	/* Functions added by patches follow the loaded ones in `functions` and the tables beside it; their slots follow the
@@ -198,6 +205,13 @@ typedef struct {
 	char *name;
 } hl_patch_added_function;
 
+/* A global a patch adds: a constant object of `type`, built from `fields` as an HLB constant is. */
+typedef struct {
+	int type;
+	int field_count;
+	int *fields;
+} hl_patch_global;
+
 typedef struct {
 	unsigned char module_id[16];
 	int base_revision;
@@ -225,6 +239,10 @@ typedef struct {
 	int *debug_file_lens;
 	int source_snapshot_count;
 	hl_source_snapshot *source_snapshots;
+	unsigned int global_prefix_hash;
+	int base_global_count;
+	int global_count;
+	hl_patch_global *globals;
 } hl_patch;
 
 HL_EXTERN_C HL_EXPORT hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error_msg );
@@ -264,6 +282,8 @@ typedef struct {
 	hl_code *code;
 	int codesize;
 	int globals_size;
+	/* Bytes allocated in globals_data, which the globals a patch adds are laid out in after globals_size. */
+	int globals_data_capacity;
 	int *globals_indexes;
 	unsigned char *globals_data;
 	void **functions_ptrs;
@@ -362,6 +382,9 @@ HL_EXTERN_C void hl_module_redirect_slot( hl_module *m, int slot, void *code );
 HL_EXTERN_C bool hl_module_patch_entry_origin( void *pc, void **origin );
 /** Validate and redirect every bytecode function to a complete generation. */
 HL_EXTERN_C HL_EXPORT h_bool hl_module_patch_generation( hl_module *target, hl_module *generation );
+/* Builds the object of a constant in the module's arena and stores it in the constant's global; `code` supplies the tables
+   its fields index. Does not touch the GC roots. */
+HL_EXTERN_C vdynamic *hl_module_build_constant( hl_module *module, hl_code *code, hl_constant *constant );
 HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch( hl_module *module, hl_patch *patch, const char **error_msg );
 HL_EXTERN_C HL_EXPORT int hl_module_patch_allocation_count( hl_module *module );
 HL_EXTERN_C HL_EXPORT int hl_module_patch_retired_allocation_count( hl_module *module );

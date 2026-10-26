@@ -1149,8 +1149,8 @@ static void hl_module_init_natives( hl_module *m ) {
 	}
 }
 
-static void hl_module_init_constant( hl_module *m, hl_constant *c ) {
-	hl_type *t = m->code->globals[c->global];
+vdynamic *hl_module_build_constant( hl_module *m, hl_code *code, hl_constant *c ) {
+	hl_type *t = code->globals[c->global];
 	hl_runtime_obj *rt;
 	vdynamic **global = (vdynamic**)(m->globals_data + m->globals_indexes[c->global]);
 	vdynamic *v = NULL;
@@ -1166,19 +1166,19 @@ static void hl_module_init_constant( hl_module *m, hl_constant *c ) {
 			void *addr = (char*)v + rt->fields_indexes[i];
 			switch (ft->kind) {
 			case HI32:
-				*(int*)addr = m->code->ints[idx];
+				*(int*)addr = code->ints[idx];
 				break;
 			case HBOOL:
 				*(bool*)addr = idx != 0;
 				break;
 			case HF64:
-				*(double*)addr = m->code->floats[idx];
+				*(double*)addr = code->floats[idx];
 				break;
 			case HBYTES:
-				*(const void**)addr = hl_get_ustring(m->code, idx);
+				*(const void**)addr = hl_get_ustring(code, idx);
 				break;
 			case HTYPE:
-				*(hl_type**)addr = m->code->types + idx;
+				*(hl_type**)addr = code->types + idx;
 				break;
 			default:
 				*(void**)addr = *(void**)(m->globals_data + m->globals_indexes[idx]);
@@ -1190,7 +1190,39 @@ static void hl_module_init_constant( hl_module *m, hl_constant *c ) {
 		hl_fatal("assert");
 	}
 	*global = v;
-	hl_remove_root(global);
+	return v;
+}
+
+static void hl_module_init_constant( hl_module *m, hl_constant *c ) {
+	hl_module_build_constant(m, m->code, c);
+	hl_remove_root(m->globals_data + m->globals_indexes[c->global]);
+}
+
+/* Room for the String constants that patches add, allocated before the JIT bakes the globals' addresses into code. */
+static bool module_reserve_patch_globals( hl_module *m ) {
+	hl_code *c = m->code;
+	int capacity = c->nglobals + HL_PATCH_GLOBAL_RESERVE;
+	int data_capacity = m->globals_size + (int)sizeof(void*) * (HL_PATCH_GLOBAL_RESERVE + 1);
+	int *indexes = (int*)malloc(sizeof(int) * capacity);
+	unsigned char *data = (unsigned char*)calloc(1, data_capacity);
+	hl_type **types = (hl_type**)hl_zalloc(&c->alloc, sizeof(hl_type*) * capacity);
+	if( indexes == NULL || data == NULL || types == NULL ) {
+		free(indexes);
+		free(data);
+		return false;
+	}
+	memcpy(indexes, m->globals_indexes, sizeof(int) * c->nglobals);
+	memset(indexes + c->nglobals, 0xFF, sizeof(int) * HL_PATCH_GLOBAL_RESERVE);
+	memcpy(data, m->globals_data, m->globals_size);
+	memcpy(types, c->globals, sizeof(hl_type*) * c->nglobals);
+	free(m->globals_indexes);
+	free(m->globals_data);
+	m->globals_indexes = indexes;
+	m->globals_data = data;
+	m->globals_data_capacity = data_capacity;
+	c->globals = types;
+	c->globals_capacity = capacity;
+	return true;
 }
 
 static void hl_module_add( hl_module *m ) {
@@ -1232,6 +1264,8 @@ int hl_module_init( hl_module *m, int flags ) {
 		memset(m->globals_data,0,m->globals_size);
 		memset(m->globals_data + m->globals_size,0xFF,HOT_RELOAD_EXTRA_GLOBALS * sizeof(void*));
 	}
+	else if( (flags & HL_MODULE_PATCHABLE) != 0 && !module_reserve_patch_globals(m) )
+		return 0;
 	// RESET globals
 	for(i=0;i<m->code->nglobals;i++) {
 		hl_type *t = m->code->globals[i];
