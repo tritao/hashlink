@@ -175,7 +175,7 @@ static void gc_inc_prepare_page(gc_pheader *p, int ignored) {
 /* Lists only gain new heads while a cycle is active; those pages are born
  * prepared. No page is reclaimed until completion or cancellation. */
 static bool gc_inc_prepare_slice(double deadline) {
-	while( gc_inc_prepare_cursor || gc_inc_prepare_pid < GC_ALL_PAGES ) {
+	while( gc_inc_prepare_cursor || gc_inc_prepare_pid < GC_PAGE_SLOTS ) {
 		if( !gc_inc_prepare_cursor ) {
 			gc_inc_prepare_cursor = gc_pages[gc_inc_prepare_pid++];
 			if( !gc_inc_prepare_cursor ) continue;
@@ -567,7 +567,6 @@ static bool gc_incremental_step_unbudgeted_locked(double budget_micros) {
 			gc_inc_validate();
 			validated = gc_latency_stamp();
 			gc_iter_pages(gc_inc_publish_marks);
-			gc_sweep_owned_allocs();
 			// Finalizers remain synchronous. Empty page unmapping can continue
 			// after publication, once tracking is stopped and mutators may resume.
 			double finalizer_started = gc_latency_stamp();

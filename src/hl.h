@@ -846,6 +846,10 @@ HL_API void hl_tls_free( hl_tls *l );
 HL_API void *hl_gc_alloc_gen( hl_type *t, int size, int flags );
 HL_API void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner );
 HL_API int hl_gc_owner_live_count( void *owner );
+/* Gives an allocation owner pages of its own; allocating for an unregistered owner does it implicitly. Release returns the
+   pages and the slot once the owner has no live allocation. Owners beyond the sixteen slots share one set of pages. */
+HL_API void hl_gc_owner_register( void *owner );
+HL_API void hl_gc_owner_release( void *owner );
 HL_API void hl_add_root( void *ptr );
 HL_API void hl_add_root_owner( void *ptr, void *owner );
 HL_API void hl_remove_root( void *ptr );
