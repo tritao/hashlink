@@ -338,6 +338,14 @@ if (WITH_VM)
     endif()
 endif()
 
+# The function hooks linked into natively instrumented modules on Linux (see src/prof_hooks.c). Position independent, as
+# they end up in shared objects; their symbols are hidden, so each module calls its own copy.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_library(hlprof_hooks STATIC src/prof_hooks.c)
+    set_target_properties(hlprof_hooks PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_compile_options(hlprof_hooks PRIVATE -fvisibility=hidden)
+endif()
+
 # The /Gh /GH hooks linked into natively instrumented modules (see src/prof_penter.c). They use no C runtime, so
 # modules built with either CRT link them.
 if(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
