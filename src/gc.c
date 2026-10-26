@@ -601,7 +601,49 @@ HL_API hl_threads_info *hl_gc_threads_info() {
 	return &gc_threads;
 }
 
+/*
+	GC timeline: with HL_GC_TIMELINE naming a file, every stop-the-world pause writes `S <ticks>` when it begins and
+	`s <ticks>` when it ends. On Windows the ticks are QueryPerformanceCounter values, the clock NativeKit's input-latency
+	trace and an external input hook use, so pauses line up with input on one timeline.
+*/
+#ifndef HL_WIN
+#	include <time.h>
+#endif
+static FILE *gc_timeline;
+
+static void gc_timeline_open() {
+	const char *path = getenv("HL_GC_TIMELINE");
+	if( !path || !*path ) return;
+	gc_timeline = fopen(path,"w");
+	if( !gc_timeline ) return;
+#	ifdef HL_WIN
+	LARGE_INTEGER frequency;
+	QueryPerformanceFrequency(&frequency);
+	fprintf(gc_timeline,"# hashlink gc timeline clock=qpc frequency=%lld\n",(long long)frequency.QuadPart);
+#	else
+	fprintf(gc_timeline,"# hashlink gc timeline clock=steady frequency=1000000000\n");
+#	endif
+	fflush(gc_timeline);
+}
+
+static void gc_timeline_mark( char kind ) {
+	long long ticks;
+	if( !gc_timeline ) return;
+#	ifdef HL_WIN
+	LARGE_INTEGER now;
+	QueryPerformanceCounter(&now);
+	ticks = now.QuadPart;
+#	else
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC,&now);
+	ticks = (long long)now.tv_sec * 1000000000LL + now.tv_nsec;
+#	endif
+	fprintf(gc_timeline,"%c %lld 0 0\n",kind,ticks);
+	fflush(gc_timeline);
+}
+
 static void gc_stop_world( bool b ) {
+	if( b ) gc_timeline_mark('S');
 #	ifdef HL_THREADS
 	if( b ) {
 		int i;
@@ -631,6 +673,7 @@ static void gc_stop_world( bool b ) {
 #	else
 	if( b ) gc_save_context(current_thread,&b);
 #	endif
+	if( !b ) gc_timeline_mark('s');
 }
 
 // -------------------------  ALLOCATOR ----------------------------------------------------------
@@ -1759,6 +1802,7 @@ static int gc_inc_setting(const char *name, int fallback, int minimum, int maxim
 }
 
 static void hl_gc_init() {
+	gc_timeline_open();
 	const char *latency_trace = getenv("HL_GC_LATENCY_TRACE");
 	gc_latency_trace = latency_trace && strcmp(latency_trace,"1") == 0;
 #ifdef GC_INCREMENTAL_SOFTWARE
