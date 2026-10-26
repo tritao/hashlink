@@ -366,7 +366,12 @@ static int pf_sample( pf_export *pf,symbols *s,double time,uint32_t tid,const un
 	return 1;
 }
 static const char *input_name( uint32_t kind ){
-	switch(kind){case PROFILE_INPUT_MOVE:return "input move";case PROFILE_INPUT_BUTTON:return "input button";case PROFILE_INPUT_KEY:return "input key";default:return "input";}
+	switch(kind){case PROFILE_INPUT_MOVE:return "input move";case PROFILE_INPUT_BUTTON:return "input button";case PROFILE_INPUT_KEY:return "input key";
+		case PROFILE_INPUT_POLLED_MOVE:return "input polled move";case PROFILE_INPUT_POLLED_BUTTON:return "input polled button";case PROFILE_INPUT_POLLED_KEY:return "input polled key";default:return "input";}
+}
+/* The counter an input's age goes to: how long it waited until NativeKit's handler had it, or until the application polled it. */
+static const char *input_age_counter( uint32_t kind ){
+	return kind>=PROFILE_INPUT_POLLED_MOVE?"Input polled age":"Input age";
 }
 
 static int pf_event( pf_export *pf,double time,uint32_t tid,uint32_t event_id,const unsigned char *payload,uint32_t size ) {
@@ -387,7 +392,7 @@ static int pf_event( pf_export *pf,double time,uint32_t tid,uint32_t event_id,co
 	case 0x484C2006U:if(!(text=pf_text(payload,size)))return 0;pftrace_process_track(pf->trace,tid,text,-2);free(text);break;
 	/* Each dequeued input is an instant on its thread; its age, when the OS stamped it, is a process-wide counter. */
 	case PROFILE_EVENT_INPUT:if(size>=32){uint64_t age=u64(payload+8);pftrace_instant(pf->trace,ts,tid,input_name(u32(payload)));
-		if(age!=PROFILE_INPUT_AGE_UNKNOWN)pftrace_counter(pf->trace,ts,"Input age","ns",(double)age);}break;
+		if(age!=PROFILE_INPUT_AGE_UNKNOWN)pftrace_counter(pf->trace,ts,input_age_counter(u32(payload)),"ns",(double)age);}break;
 	case PROFILE_EVENT_MODULE_REVISION:pftrace_instant(pf->trace,ts,0,"module revision");break;
 	case PROFILE_EVENT_MODULE_LOADED:pftrace_instant(pf->trace,ts,0,"module loaded");break;
 	case PROFILE_EVENT_RECORDING:if(size>=4)pftrace_instant(pf->trace,ts,0,payload[0]?"recording resumed":"recording paused");break;
@@ -440,7 +445,7 @@ static int consume( symbols *s,unsigned char *pending,size_t *length,uint64_t *s
 			else if(perfetto&&event_id==PROFILE_EVENT_ALLOCATION_SAMPLE&&payload_size>=32&&(payload_size-32)%8==0){uint32_t interval=u32(payload+16),type_kind=u32(payload+20),frames=u32(payload+24);char allocation_stack[4096];size_t allocation_len=0;allocation_stack[0]=0;if(frames!=(payload_size-32)/8)return 0;for(uint32_t i=frames;i>0;i--){uint64_t pc=u64(payload+32+(i-1)*8);symbol *x=resolve(s,pc);native_symbol *native=x?NULL:resolve_native(pc);char label[1024];if(x)snprintf(label,sizeof(label),"%s",x->name);else if(native)snprintf(label,sizeof(label),"%s+0x%llx",native->name,(unsigned long long)(pc-native->base));else snprintf(label,sizeof(label),"0x%llx",(unsigned long long)pc);size_t n=strlen(label);if(allocation_len+n+(allocation_len?1:0)>=sizeof(allocation_stack))break;if(allocation_len)allocation_stack[allocation_len++]=';';memcpy(allocation_stack+allocation_len,label,n+1);allocation_len+=n;}perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"i\",\"s\":\"t\",\"cat\":\"hl.alloc\",\"name\":\"allocation sample\",\"pid\":%u,\"tid\":%u,\"ts\":%.3f,\"args\":{\"requested_bytes\":%llu,\"allocated_bytes\":%llu,\"estimated_bytes\":%llu,\"sample_interval\":%u,\"type_kind\":%u,\"stack\":",pid,tid,(event_time-*time_origin)*1000000.0,(unsigned long long)u64(payload),(unsigned long long)u64(payload+8),(unsigned long long)(u64(payload+8)*interval),interval,type_kind);json_string(perfetto,allocation_stack);fputs("}}",perfetto);}
 			else if(perfetto&&event_id==PROFILE_EVENT_COUNTER&&payload_size>8){double value;uint64_t bits=u64(payload);char *name;memcpy(&value,&bits,sizeof(value));if(!(name=(char*)malloc((size_t)payload_size-7)))return 0;memcpy(name,payload+8,payload_size-8);name[payload_size-8]=0;perfetto_begin_event(perfetto,perfetto_first);fputs("{\"ph\":\"C\",\"cat\":\"hl.counter\",\"name\":",perfetto);json_string(perfetto,name);fprintf(perfetto,",\"pid\":%u,\"tid\":0,\"ts\":%.3f,\"args\":{\"value\":%.17g}}",pid,(event_time-*time_origin)*1000000.0,value);free(name);}
 			else if(perfetto&&event_id==PROFILE_EVENT_INPUT&&payload_size>=32){uint64_t age=u64(payload+8);double at=(event_time-*time_origin)*1000000.0;perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"i\",\"s\":\"t\",\"cat\":\"hl.input\",\"name\":\"%s\",\"pid\":%u,\"tid\":%u,\"ts\":%.3f,\"args\":{\"a\":%lld,\"b\":%lld}}",input_name(u32(payload)),pid,tid,at,(long long)u64(payload+16),(long long)u64(payload+24));
-				if(age!=PROFILE_INPUT_AGE_UNKNOWN){perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"C\",\"cat\":\"hl.input\",\"name\":\"Input age\",\"pid\":%u,\"tid\":0,\"ts\":%.3f,\"args\":{\"ns\":%llu}}",pid,at,(unsigned long long)age);}}
+				if(age!=PROFILE_INPUT_AGE_UNKNOWN){perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"C\",\"cat\":\"hl.input\",\"name\":\"%s\",\"pid\":%u,\"tid\":0,\"ts\":%.3f,\"args\":{\"ns\":%llu}}",input_age_counter(u32(payload)),pid,at,(unsigned long long)age);}}
 			else if(perfetto&&event_id==PROFILE_EVENT_RECORDING){if(payload_size>=4){perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"i\",\"s\":\"g\",\"cat\":\"hl.profiler\",\"name\":\"%s\",\"pid\":%u,\"tid\":%u,\"ts\":%.3f}",payload[0]?"recording resumed":"recording paused",pid,tid,(event_time-*time_origin)*1000000.0);}}
 			else if(perfetto&&event_id!=PROFILE_EVENT_NATIVE_SYMBOL&&event_id!=PROFILE_EVENT_NATIVE_LOCATION&&event_id!=PROFILE_EVENT_MODULE_LOADED&&event_id!=PROFILE_EVENT_STARTUP&&event_id!=PROFILE_EVENT_DROPPED_CALLS&&(event_id<0x484C2004U||event_id>0x484C2008U)){perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"i\",\"s\":\"t\",\"cat\":\"hl.event\",\"name\":\"event %u\",\"pid\":%u,\"tid\":%u,\"ts\":%.3f,\"args\":{\"payload\":\"",event_id,pid,tid,(event_time-*time_origin)*1000000.0);for(uint32_t i=0;i<payload_size;i++)fprintf(perfetto,"%02x",payload[i]);fputs("\"}}",perfetto);}}
 		pos+=body+4;if(metadata_dirty&&*metadata_dirty)break;}

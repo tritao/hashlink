@@ -35,6 +35,11 @@
 #define PROFILE_INPUT_MOVE 1U
 #define PROFILE_INPUT_BUTTON 2U
 #define PROFILE_INPUT_KEY 3U
+/* The application polled the input from NativeKit's queue (the same kinds, later in its life): its age counts from the OS
+   stamp to the poll, and a and b are zero. A coalesced move carries the stamp of the oldest input it stands for. */
+#define PROFILE_INPUT_POLLED_MOVE 4U
+#define PROFILE_INPUT_POLLED_BUTTON 5U
+#define PROFILE_INPUT_POLLED_KEY 6U
 #define PROFILE_INPUT_AGE_UNKNOWN 0xFFFFFFFFFFFFFFFFULL
 
 #endif
