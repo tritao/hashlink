@@ -331,6 +331,11 @@ if (WITH_VM)
         )
     endif()
 
+    # The boundary hooks on Linux x86-64: their patcher, and the stubs and thunk (see src/prof_boundary_linux.c).
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+        target_sources(hl PRIVATE src/prof_boundary_linux.c src/prof_boundary_x64_sysv.c)
+    endif()
+
     target_link_libraries(hl libhl)
 
     if (WIN32)

@@ -1,5 +1,5 @@
 /*
- * Boundary hooks for instrumented builds (Windows x64): calls from the process's own modules into code nobody compiled
+ * Boundary hooks for instrumented builds (Windows x64; Linux x86-64 is in prof_boundary_linux.c): calls from the process's own modules into code nobody compiled
  * with instrumentation become slices. Import-table hooks cover a curated set of blocking and system calls (and any
  * extra `module!function` the configuration names); vtable hooks cover the DXGI swap chain and the D3D11 immediate
  * context; and Vulkan's proc-address lookups hand out hooked submit, present and wait functions.
@@ -478,7 +478,8 @@ void hl_prof_boundary_install( void ) {
 	refresh();
 }
 
-#else
+#elif !(defined(__linux__) && defined(__x86_64__))
+/* Linux x86-64 has its own: prof_boundary_linux.c. */
 
 void hl_prof_boundary_install( void ) {}
 void hl_prof_boundary_ignore_thread( void ) {}
