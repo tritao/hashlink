@@ -795,11 +795,16 @@ void hl_module_redirect_slot( hl_module *m, int slot, void *code ) {
 	// Everything that reaches the original entry (bytecode calls, static closures, prototypes) now follows the new code.
 #	ifdef HL_JIT_DIRECT_PATCHABLE_CALLS
 	// The entry jumps straight to the code when it is within reach, saving the hop through the stub, and to the stub
-	// (reachable, or the entry would not have been rewritten this way) when it is not.
+	// when it is not.
 	void *stub = (unsigned char*)m->patch_entry_code + slot * HL_JIT_PATCH_ENTRY_STRIDE;
 	if( hl_jit_patch_entry_jump(origin,code) || hl_jit_patch_entry_jump(origin,stub) ) return;
-#	endif
+	// Neither is in reach. An earlier patch may have pointed the entry straight at its own code, which is freed once
+	// nothing uses it, so from now on the entry must read patch_targets, whatever patch came before.
+	(void)first;
+	hl_jit_patch_method(origin,m->patch_targets + slot);
+#	else
 	if( first ) hl_jit_patch_method(origin,m->patch_targets + slot);
+#	endif
 }
 
 bool hl_module_patch_entry_origin( void *pc, void **origin ) {
