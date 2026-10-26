@@ -28,5 +28,13 @@
 #define PROFILE_EVENT_SPAN_END 0x484C1002U
 /* A program-defined counter sample: f64 value, then the UTF-8 counter name. Keep haxeon.ProfileCounter in sync. */
 #define PROFILE_EVENT_COUNTER 0x484C1003U
+/* A thread took an OS input off its queue: u32 kind (PROFILE_INPUT_*), u32 0, u64 age (ns from when the OS stamped
+   the input to the dequeue; all ones when unknown), i64 a, i64 b. A pointer move or button gives its screen position
+   in physical pixels; a key gives its platform key code and 1 pressed or 0 released. */
+#define PROFILE_EVENT_INPUT 0x484C1004U
+#define PROFILE_INPUT_MOVE 1U
+#define PROFILE_INPUT_BUTTON 2U
+#define PROFILE_INPUT_KEY 3U
+#define PROFILE_INPUT_AGE_UNKNOWN 0xFFFFFFFFFFFFFFFFULL
 
 #endif
