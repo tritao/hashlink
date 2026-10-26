@@ -853,6 +853,28 @@ static void toggle_unlock( void ) {
 	STORE_RELEASE_INT(&recording_toggle,0);
 }
 
+#ifndef HL_WIN
+/* The child of a fork has only the forking thread: the consumer that drains the pool and the threads that held records
+   or the registry are gone. It cannot record, as a full pool would never be freed and its writers would wait for it
+   forever, so it stops recording and forgets the session. The threads' states stay as they are: a session the child
+   starts later begins a new generation, and they are reset by it. */
+static void prof_fork_child( void ) {
+	pthread_mutex_init(&registry_lock,NULL);
+	recording_toggle = 0;
+	session_open = 0;
+	hl_prof_on = 0;
+}
+
+static void prof_fork_register( void ) {
+	static int registered;
+	if( registered ) return;
+	registered = 1;
+	pthread_atfork(NULL,NULL,prof_fork_child);
+}
+#else
+static void prof_fork_register( void ) {}
+#endif
+
 /* Startup phases: the runtime's work before the program's entry point, which a session started then replays as one
    PROFILE_EVENT_STARTUP event. Open until the entry point closes them; the first session started meanwhile takes them
    and begins its clock at the first phase. */
@@ -932,6 +954,7 @@ HL_PRIM bool hl_prof_start( unsigned int pool_mib ) {
 	if( session_open ) return false;
 	clock_init();
 	process_barrier_init();
+	prof_fork_register();
 	min_call_ticks = 0;
 	if( min_call_ns ) {
 		min_call_ticks = (unsigned long long)((double)min_call_ns * (double)nominal_hz / 1e9);
