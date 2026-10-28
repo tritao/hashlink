@@ -480,12 +480,30 @@ hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const
 			patch->functions[i].instructions[instruction].operands[1]=target;
 		}
 	}
+	for(int i=0;i<patch->migration_count;i++) {
+		patch->migrations[i].findex = resolve_patch_stable_id(runtime,patch,patch->migrations[i].stable_id);
+		if( patch->migrations[i].findex < 0 ) { hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE; }
+	}
 	applied = hl_module_apply_patch(runtime->module,patch,&error);
 	if( applied )
 		for(int i=0;i<patch->added_function_count;i++) {
 			runtime->stable_ids[runtime->identity_count] = patch->added_functions[i].stable_id;
 			runtime->slots[runtime->identity_count++] = patch->added_functions[i].findex;
 		}
+	// Instances made before the patch get the declaration initializers of the fields it added before any other code runs.
+	// A throwing initializer leaves its field at the zero value; the patch stays applied.
+	if( applied && patch->migration_count > 0 ) {
+		int failures = 0;
+		vdynamic *exception = NULL;
+		int migrated = hl_module_patch_migrate(runtime->module,patch,&failures,&exception);
+		if( failures > 0 ) {
+			uchar *message = exception == NULL ? NULL : hl_to_string(exception);
+			printf("hl: live patch initialized added fields of %d instances; %d initializers failed%s", migrated, failures, message == NULL ? "" : ": ");
+			if( message != NULL ) uprintf(USTR("%s"),message);
+			printf("\n");
+			fflush(stdout);
+		}
+	}
 	hl_patch_free(patch);
 	hl_mutex_release(runtime->lock);
 	if( applied ) {

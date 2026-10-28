@@ -212,6 +212,30 @@ typedef struct {
 	int *fields;
 } hl_patch_global;
 
+/*
+ * A field a patch adds to an existing class, in one of the class's reserved slots: an unnamed field of type Dynamic that
+ * a live build appends to the class's own fields. The slot keeps its offset, so instances made before the patch already
+ * have room for the field; the patch gives it a name and a type. `field` indexes the class's own fields, not the
+ * inherited ones.
+ */
+typedef struct {
+	int type;
+	int field;
+	int name;
+	int field_type;
+} hl_patch_object_field;
+
+/*
+ * Runs `findex`, a function of one argument returning Void, on every live instance of `type` and of its subclasses once
+ * the patch commits: it evaluates the declaration initializers of the fields the patch adds, which constructors already
+ * run for instances made later. The runtime resolves `stable_id` to `findex` before applying the patch.
+ */
+typedef struct {
+	int type;
+	int stable_id;
+	int findex;
+} hl_patch_migration;
+
 typedef struct {
 	unsigned char module_id[16];
 	int base_revision;
@@ -243,6 +267,10 @@ typedef struct {
 	int base_global_count;
 	int global_count;
 	hl_patch_global *globals;
+	int object_field_count;
+	hl_patch_object_field *object_fields;
+	int migration_count;
+	hl_patch_migration *migrations;
 } hl_patch;
 
 HL_EXTERN_C HL_EXPORT hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error_msg );
@@ -386,6 +414,13 @@ HL_EXTERN_C HL_EXPORT h_bool hl_module_patch_generation( hl_module *target, hl_m
    its fields index. Does not touch the GC roots. */
 HL_EXTERN_C vdynamic *hl_module_build_constant( hl_module *module, hl_code *code, hl_constant *constant );
 HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch( hl_module *module, hl_patch *patch, const char **error_msg );
+/**
+ * Runs the migrations of a patch `module` has committed (see `hl_patch_migration`), returning how many instances were
+ * migrated. Exceptions do not propagate: each failed call counts in `failures`, its instance keeps zero values in the
+ * added fields, and `first_exception` receives the first exception thrown. Call it after `hl_module_apply_patch`
+ * succeeds, before the module runs other code.
+ */
+HL_EXTERN_C HL_EXPORT int hl_module_patch_migrate( hl_module *module, hl_patch *patch, int *failures, vdynamic **first_exception );
 HL_EXTERN_C HL_EXPORT int hl_module_patch_allocation_count( hl_module *module );
 HL_EXTERN_C HL_EXPORT int hl_module_patch_retired_allocation_count( hl_module *module );
 /** Resolve a program counter owned by a live or retained hot-reload JIT block. */

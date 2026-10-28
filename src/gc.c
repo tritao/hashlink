@@ -2528,6 +2528,72 @@ HL_API int hl_gc_get_live_objects( hl_type *t, varray *arr ) {
 	return live_obj.count;
 }
 
+typedef struct {
+	hl_type **types;
+	int ntypes;
+	int min_size;
+	void **found;
+	int count;
+	int capacity;
+	bool failed;
+} gc_live_instances;
+static gc_live_instances live_instances;
+
+static void gc_collect_live_instance( void *block, int size ) {
+	hl_type *t;
+	if( size < live_instances.min_size ) return;
+	t = *(hl_type**)block;
+	for(int i=0;i<live_instances.ntypes;i++) {
+		if( live_instances.types[i] != t ) continue;
+		if( live_instances.count == live_instances.capacity ) {
+			int capacity = live_instances.capacity ? live_instances.capacity * 2 : 64;
+			void **found = (void**)realloc(live_instances.found,sizeof(void*) * capacity);
+			if( found == NULL ) { live_instances.failed = true; return; }
+			live_instances.found = found;
+			live_instances.capacity = capacity;
+		}
+		live_instances.found[live_instances.count++] = block;
+		return;
+	}
+}
+
+static void gc_collect_live_instance_page( gc_pheader *p, int private_data ) {
+	if( p->page_kind == MEM_KIND_DYNAMIC || p->page_kind == MEM_KIND_NOPTR )
+		gc_iter_live_blocks(p, gc_collect_live_instance);
+}
+
+/*
+ * Every live object whose type is one of `types`, after a full mark, in one pass over the heap. The objects go in a
+ * malloc'd array the caller frees; it is no GC root, so the caller must root them (copy them into a GC array) before it
+ * allocates. Returns the count, or -1 when out of memory.
+ */
+HL_API int hl_gc_live_instances( hl_type **types, int ntypes, void ***out ) {
+	int min_size = 0;
+	*out = NULL;
+	for(int i=0;i<ntypes;i++) {
+		if( types[i]->kind != HOBJ ) return -1;
+		// A smaller block cannot hold an instance; build the layout before the world stops.
+		int size = hl_get_obj_rt(types[i])->size;
+		if( min_size == 0 || size < min_size ) min_size = size;
+	}
+	gc_global_lock(true);
+	gc_stop_world(true);
+	gc_mark();
+	live_instances.types = types;
+	live_instances.ntypes = ntypes;
+	live_instances.min_size = min_size;
+	live_instances.found = NULL;
+	live_instances.count = 0;
+	live_instances.capacity = 0;
+	live_instances.failed = false;
+	gc_iter_pages(gc_collect_live_instance_page);
+	gc_stop_world(false);
+	gc_global_lock(false);
+	if( live_instances.failed ) { free(live_instances.found); return -1; }
+	*out = live_instances.found;
+	return live_instances.count;
+}
+
 #ifdef HL_VCC
 #	pragma optimize( "", off )
 #endif

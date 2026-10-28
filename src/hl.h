@@ -855,6 +855,8 @@ HL_API void hl_add_root_owner( void *ptr, void *owner );
 HL_API void hl_remove_root( void *ptr );
 HL_API int hl_gc_owner_root_count( void *owner );
 HL_API void hl_gc_major( void );
+/** Live objects of any of `types` (object types), in a malloc'd array the caller frees and must root before it allocates. */
+HL_API int hl_gc_live_instances( hl_type **types, int ntypes, void ***out );
 // Opt-in, best-effort microsecond budget. True means the cycle completed (including fallback).
 HL_API bool hl_gc_step( double budget_micros );
 // Shared soft allowance until the next host frame boundary; -1 records unlimited

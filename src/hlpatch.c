@@ -520,6 +520,8 @@ void hl_patch_free( hl_patch *patch ) {
 	free(patch->added_functions);
 	for(i=0;i<patch->global_count;i++) free(patch->globals[i].fields);
 	free(patch->globals);
+	free(patch->object_fields);
+	free(patch->migrations);
 	for(i=0;i<patch->debug_file_count;i++) free(patch->debug_files[i]);
 	for(i=0;i<patch->source_snapshot_count;i++) free(patch->source_snapshots[i].content);
 	free(patch->source_snapshots);
@@ -530,7 +532,7 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 	patch_reader r = { data, data + (size < 0 ? 0 : size), NULL };
 	hl_patch *patch = (hl_patch*)calloc(1,sizeof(hl_patch));
 	const unsigned char *p; int version, i, j, count, tag, section_count, section_length;
-	bool have_symbols = false, have_functions = false, have_debug = false, have_snapshots = false, have_added = false, have_globals = false;
+	bool have_symbols = false, have_functions = false, have_debug = false, have_snapshots = false, have_added = false, have_globals = false, have_object_fields = false, have_migrations = false;
 #define FAIL(msg) do { r.error = msg; goto fail; } while(0)
 	if( patch == NULL ) FAIL("Out of memory reading HLP");
 	if( !take(&r,3,&p) ) goto fail;
@@ -637,6 +639,30 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 				if(global->field_count>s.end-s.p)FAIL("Truncated HLP data");
 				global->fields=(int*)calloc(global->field_count>0?global->field_count:1,sizeof(int));if(!global->fields)FAIL("Out of memory reading patch globals");
 				for(j=0;j<global->field_count;j++)if(!read_count(&s,global->fields+j))goto section_fail;
+			}
+		} else if( tag == 7 ) {
+			if( have_object_fields ) FAIL("Duplicate HLP object fields section");
+			have_object_fields=true;
+			// Each entry is at least four one-byte indexes, so the section bounds the count before anything is allocated.
+			if(!read_count(&s,&patch->object_field_count))goto section_fail;
+			if(patch->object_field_count<=0||patch->object_field_count>(s.end-s.p)/4)FAIL("Invalid HLP object fields section");
+			patch->object_fields=(hl_patch_object_field*)calloc(patch->object_field_count,sizeof(hl_patch_object_field));if(!patch->object_fields)FAIL("Out of memory reading patch object fields");
+			for(i=0;i<patch->object_field_count;i++){
+				hl_patch_object_field *field=patch->object_fields+i;
+				if(!read_count(&s,&field->type)||!read_count(&s,&field->field)||!read_count(&s,&field->name)||!read_count(&s,&field->field_type))goto section_fail;
+				for(j=0;j<i;j++)if(patch->object_fields[j].type==field->type&&patch->object_fields[j].field==field->field)FAIL("Duplicate HLP object field");
+			}
+		} else if( tag == 8 ) {
+			if( have_migrations ) FAIL("Duplicate HLP migrations section");
+			have_migrations=true;
+			if(!read_count(&s,&patch->migration_count))goto section_fail;
+			if(patch->migration_count<=0||patch->migration_count>(s.end-s.p)/2)FAIL("Invalid HLP migrations section");
+			patch->migrations=(hl_patch_migration*)calloc(patch->migration_count,sizeof(hl_patch_migration));if(!patch->migrations)FAIL("Out of memory reading patch migrations");
+			for(i=0;i<patch->migration_count;i++){
+				hl_patch_migration *migration=patch->migrations+i;
+				if(!read_count(&s,&migration->type)||!read_count(&s,&migration->stable_id))goto section_fail;
+				migration->findex=-1;
+				for(j=0;j<i;j++)if(patch->migrations[j].type==migration->type)FAIL("Duplicate HLP migration");
 			}
 		} else {
 			s.p = s.end;
@@ -989,8 +1015,157 @@ static bool stage_patch_types( hl_module *m, hl_patch *patch, uchar **strings, v
 	return true;
 }
 
+/*
+ * Fields a patch adds to existing classes (see `hl_patch_object_field`). Staging names and types the reserved slots
+ * before the JIT runs, since it picks write barriers by field type, and builds each class's next field lookup; the commit
+ * publishes the lookups, and a failed patch puts the slots back. Offsets, sizes and GC mark bits never change: a reserved
+ * slot is a pointer slot, which the precise GC checks before following, so it can hold a field of any scalar type too.
+ */
+typedef struct {
+	hl_obj_field previous;
+	hl_obj_field *field;
+	hl_runtime_obj *rt;
+	hl_field_lookup *lookup;
+	int nlookup;
+} patch_object_field_stage;
+
+static bool object_field_fits( hl_type *t ) {
+	switch( t->kind ) {
+	case HVOID: case HPACKED: return false;
+	default: return hl_type_size(t) <= HL_WSIZE;
+	}
+}
+
+static bool validate_patch_object_fields( hl_module *m, hl_patch *patch, int string_count, const char **error ) {
+	int total_types=patch->base_type_count+patch->type_count;
+	for(int i=0;i<patch->object_field_count;i++){
+		hl_patch_object_field *f=patch->object_fields+i;hl_type *t;
+		if(f->type<0||f->type>=patch->base_type_count){*error="Invalid patch object field type";return false;}
+		t=m->code->types+f->type;
+		if(t->kind!=HOBJ||f->field<0||f->field>=t->obj->nfields){*error="Invalid patch object field";return false;}
+		if(t->obj->fields[f->field].name[0]!=0||t->obj->fields[f->field].t->kind!=HDYN){*error="Patch object field is not a reserved slot";return false;}
+		if(f->name<0||f->name>=string_count||f->field_type<0||f->field_type>=total_types){*error="Invalid patch object field";return false;}
+		// An appended type is only built when staged, and is checked then.
+		if(f->field_type<patch->base_type_count&&!object_field_fits(m->code->types+f->field_type)){*error="Patch object field type does not fit a reserved slot";return false;}
+	}
+	return true;
+}
+
+static void unstage_patch_object_fields( patch_object_field_stage *staged, int count ) {
+	for(int i=count-1;i>=0;i--){*staged[i].field=staged[i].previous;free(staged[i].lookup);}
+	free(staged);
+}
+
+static bool stage_patch_object_fields( hl_module *m, hl_patch *patch, uchar **strings, patch_object_field_stage **out, const char **error ) {
+	patch_object_field_stage *staged;
+	*out=NULL;
+	if(patch->object_field_count==0)return true;
+	staged=(patch_object_field_stage*)calloc(patch->object_field_count,sizeof(patch_object_field_stage));
+	if(!staged){*error="Out of memory staging patch object fields";return false;}
+	for(int i=0;i<patch->object_field_count;i++){
+		hl_patch_object_field *f=patch->object_fields+i;hl_type *t=m->code->types+f->type,*ft=m->code->types+f->field_type;
+		hl_runtime_obj *rt;const uchar *name=strings[f->name];int hash,nlookup,start;hl_field_lookup *previous;
+		if(!object_field_fits(ft)||name==NULL||name[0]==0){unstage_patch_object_fields(staged,i);*error="Patch object field does not fit a reserved slot";return false;}
+		// Build the layout from the fields instances were made with, before any of them changes.
+		rt=hl_get_obj_rt(t);
+		hash=hl_hash_gen(name,true);
+		previous=rt->lookup;nlookup=rt->nlookup;
+		for(int j=i-1;j>=0;j--)if(staged[j].rt==rt){previous=staged[j].lookup;nlookup=staged[j].nlookup;break;}
+		if(hl_lookup_find(previous,nlookup,hash)){unstage_patch_object_fields(staged,i);*error="Patch object field name already exists";return false;}
+		staged[i].lookup=(hl_field_lookup*)malloc(sizeof(hl_field_lookup)*(nlookup+1));
+		if(!staged[i].lookup){unstage_patch_object_fields(staged,i);*error="Out of memory staging patch object fields";return false;}
+		memcpy(staged[i].lookup,previous,sizeof(hl_field_lookup)*nlookup);
+		start=rt->parent?rt->parent->nfields:0;
+		hl_lookup_insert(staged[i].lookup,nlookup,hash,ft,rt->fields_indexes[start+f->field]);
+		staged[i].nlookup=nlookup+1;
+		staged[i].rt=rt;
+		staged[i].field=t->obj->fields+f->field;
+		staged[i].previous=*staged[i].field;
+		staged[i].field->name=name;
+		staged[i].field->t=ft;
+		staged[i].field->hashed_name=hash;
+	}
+	*out=staged;
+	return true;
+}
+
+/*
+ * Publishes the field lookups, which then belong to the module. A reader racing the commit sees the old lookup or the new
+ * one; the old one stays allocated.
+ */
+static void commit_patch_object_fields( hl_module *m, patch_object_field_stage *staged, int count ) {
+	for(int i=0;i<count;i++){
+		bool last=true;
+		for(int j=i+1;j<count;j++)if(staged[j].rt==staged[i].rt)last=false;
+		if(last){
+			patch_store(staged[i].rt->lookup,staged[i].lookup);
+			staged[i].rt->nlookup=staged[i].nlookup;
+		}
+		if(m->patch_type_allocation_count==m->patch_type_allocation_capacity){
+			int capacity=m->patch_type_allocation_capacity<16?16:m->patch_type_allocation_capacity*2;
+			void **owners=(void**)realloc(m->patch_type_allocations,sizeof(void*)*capacity);
+			// Out of memory only leaks the lookup, which stays in use either way.
+			if(owners){m->patch_type_allocations=owners;m->patch_type_allocation_capacity=capacity;}
+		}
+		if(m->patch_type_allocation_count<m->patch_type_allocation_capacity)m->patch_type_allocations[m->patch_type_allocation_count++]=staged[i].lookup;
+	}
+	free(staged);
+}
+
+/* A migration runs a function of one argument, of the migrated class, that returns Void. */
+static bool validate_patch_migrations( hl_module *m, hl_patch *patch, patch_layout *layout, const char **error ) {
+	for(int i=0;i<patch->migration_count;i++){
+		hl_patch_migration *migration=patch->migrations+i;hl_function *f;hl_type *t;
+		if(migration->type<0||migration->type>=patch->base_type_count||m->code->types[migration->type].kind!=HOBJ){*error="Invalid patch migration type";return false;}
+		t=m->code->types+migration->type;
+		f=layout_function(layout,migration->findex);
+		if(f==NULL||f->type->kind!=HFUN||f->type->fun->nargs!=1||f->type->fun->args[0]!=t||f->type->fun->ret->kind!=HVOID){*error="Invalid patch migration function";return false;}
+	}
+	return true;
+}
+
+static bool type_extends( hl_type *t, hl_type *base ) {
+	for(;t!=NULL&&t->kind==HOBJ;t=t->obj->super)if(t==base)return true;
+	return false;
+}
+
+int hl_module_patch_migrate( hl_module *m, hl_patch *patch, int *failures, vdynamic **first_exception ) {
+	int migrated=0;
+	if(failures)*failures=0;
+	if(first_exception)*first_exception=NULL;
+	if(m==NULL||patch==NULL)return 0;
+	for(int i=0;i<patch->migration_count;i++){
+		hl_patch_migration *migration=patch->migrations+i;hl_type *base=m->code->types+migration->type,**types;void **found=NULL;int ntypes=0,count;
+		varray *instances;vclosure closure;
+		types=(hl_type**)malloc(sizeof(hl_type*)*(m->code->ntypes>0?m->code->ntypes:1));
+		if(!types){if(failures)(*failures)++;continue;}
+		for(int j=0;j<m->code->ntypes;j++)if(m->code->types[j].kind==HOBJ&&type_extends(m->code->types+j,base))types[ntypes++]=m->code->types+j;
+		count=hl_gc_live_instances(types,ntypes,&found);
+		free(types);
+		if(count<0){if(failures)(*failures)++;continue;}
+		if(count==0){free(found);continue;}
+		// The objects were reachable when marked and nothing has run since, so they survive this allocation; the array then
+		// roots them while the migration runs code that allocates.
+		instances=hl_alloc_array(&hlt_dyn,count);
+		memcpy(hl_aptr(instances,void*),found,sizeof(void*)*count);
+		free(found);
+		closure.t=m->code->functions[m->functions_indexes[migration->findex]].type;
+		closure.fun=m->functions_ptrs[migration->findex];
+		closure.hasValue=0;
+		closure.value=NULL;
+		for(int j=0;j<count;j++){
+			vdynamic *args[1],*result;bool raised=false;
+			args[0]=hl_aptr(instances,vdynamic*)[j];
+			result=hl_dyn_call_safe(&closure,args,1,&raised);
+			if(raised){if(failures)(*failures)++;if(first_exception&&*first_exception==NULL)*first_exception=result;}
+			else migrated++;
+		}
+	}
+	return migrated;
+}
+
 h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_msg ) {
-	const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;hl_code code;hl_module temp;patch_layout layout={0};bool staged_added=false;hl_patch_live *live_block=NULL;hl_patch_code *superseded=NULL;int globals_size=0;bool staged_globals=false;
+	const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;hl_code code;hl_module temp;patch_layout layout={0};bool staged_added=false;hl_patch_live *live_block=NULL;hl_patch_code *superseded=NULL;int globals_size=0;bool staged_globals=false;patch_object_field_stage *staged_fields=NULL;
 	if(!m||!patch||!m->patchable){error="Module is not patchable";goto fail;}
 	if(patch->function_count<=0){error="Patch contains no functions";goto fail;}
 	if(m->revision!=patch->base_revision||patch->revision<=patch->base_revision){error="Stale patch revision";goto fail;}
@@ -999,14 +1174,17 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	if(patch->global_count>0&&(patch->base_global_count!=m->code->nglobals||patch->global_prefix_hash!=hash_global_prefix(m->code,patch->base_global_count))){error="Patch global base does not match module";goto fail;}
 	if(!validate_patch_types(m,patch,patch->base_string_count+patch->string_count,&error))goto fail;
 	if(!validate_patch_globals(m,patch,&globals_size,&error))goto fail;
+	if(!validate_patch_object_fields(m,patch,patch->base_string_count+patch->string_count,&error))goto fail;
 	if(!stage_patch_layout(m,patch,&layout,&error))goto fail;
 	combined_functions=layout.functions; // owned through combined_functions from here
+	if(!validate_patch_migrations(m,patch,&layout,&error))goto fail;
 	for(int i=0;i<patch->function_count;i++){for(int j=0;j<i;j++)if(patch->functions[j].findex==patch->functions[i].findex){error="Duplicate stable function slot";goto fail;}if(!validate_function(m,patch,&layout,patch->functions+i,&error))goto fail;}
 	combined_ints=(int*)malloc(sizeof(int)*(patch->base_int_count+patch->int_count));if(!combined_ints){error="Out of memory applying patch";goto fail;}memcpy(combined_ints,m->code->ints,sizeof(int)*patch->base_int_count);memcpy(combined_ints+patch->base_int_count,patch->ints,sizeof(int)*patch->int_count);
 	combined_floats=(double*)malloc(sizeof(double)*(patch->base_float_count+patch->float_count));if(!combined_floats){error="Out of memory applying patch";goto fail;}memcpy(combined_floats,m->code->floats,sizeof(double)*patch->base_float_count);memcpy(combined_floats+patch->base_float_count,patch->floats,sizeof(double)*patch->float_count);
 	{int total=patch->base_string_count+patch->string_count,bytes=0,pos=0;for(int i=0;i<patch->base_string_count;i++)bytes+=m->code->strings_lens[i]+1;for(int i=0;i<patch->string_count;i++)bytes+=patch->string_lens[i]+1;combined_strings=(char**)malloc(sizeof(char*)*total);combined_string_lens=(int*)malloc(sizeof(int)*total);combined_ustrings=(uchar**)calloc(total,sizeof(uchar*));combined_string_data=(char*)malloc(bytes);if((total>0)&&(!combined_strings||!combined_string_lens||!combined_ustrings||!combined_string_data)){error="Out of memory applying patch";goto fail;}for(int i=0;i<total;i++){const char *src;int length;if(i<patch->base_string_count){src=m->code->strings[i];length=m->code->strings_lens[i];combined_ustrings[i]=(uchar*)hl_get_ustring(m->code,i);}else{src=patch->strings[i-patch->base_string_count];length=patch->string_lens[i-patch->base_string_count];int usize=hl_utf8_length((vbyte*)src,0);combined_ustrings[i]=(uchar*)malloc((usize+1)*sizeof(uchar));if(!combined_ustrings[i]){error="Out of memory applying patch";goto fail;}hl_from_utf8(combined_ustrings[i],usize,src);}combined_strings[i]=combined_string_data+pos;combined_string_lens[i]=length;memcpy(combined_string_data+pos,src,length);combined_string_data[pos+length]=0;pos+=length+1;}}
 	if(inject_patch_failure(m,1,&error))goto fail;
 	if(!stage_patch_types(m,patch,combined_ustrings,&type_allocations,&type_allocation_count,&error))goto fail;
+	if(!stage_patch_object_fields(m,patch,combined_ustrings,&staged_fields,&error))goto fail;
 	if(inject_patch_failure(m,2,&error))goto fail;
 	allocation=(hl_patch_code*)calloc(1,sizeof(hl_patch_code));if(!allocation){error="Out of memory applying patch";goto fail;}
 	allocation->revision=patch->revision;
@@ -1058,6 +1236,7 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 		hl_module_build_constant(m,&code,&constant);
 	}
 	m->code->nglobals+=patch->global_count;m->code->npatchglobals+=patch->global_count;m->globals_size=globals_size;staged_globals=false;
+	if(staged_fields){commit_patch_object_fields(m,staged_fields,patch->object_field_count);staged_fields=NULL;}
 	hl_module_crash_write_lock();
 	if(m->patch_lo==NULL||allocation->code<m->patch_lo)m->patch_lo=allocation->code;
 	if(m->patch_hi==NULL||(void*)((unsigned char*)allocation->code+allocation->code_size)>m->patch_hi)m->patch_hi=(unsigned char*)allocation->code+allocation->code_size;
@@ -1078,6 +1257,7 @@ fail:
 	if(jit) hl_jit_free(jit,false);
 	if(staged_added) unstage_added_functions(m,patch);
 	if(staged_globals) unstage_patch_globals(m,patch);
+	if(staged_fields) unstage_patch_object_fields(staged_fields,patch->object_field_count);
 	free(live_block);
 	free(layout.indexes);
 	free(combined_functions);
