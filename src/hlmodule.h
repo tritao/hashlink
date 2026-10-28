@@ -170,6 +170,23 @@ typedef struct {
 	unsigned char *content;
 } hl_source_snapshot;
 
+/*
+ * An object, struct or virtual type a patch appends, in table indices as an HLB file has them. `fields` holds a name and a type
+ * per field, `protos` a name, function slot and prototype index per method, `bindings` a field and function slot per binding.
+ */
+typedef struct {
+	int name;
+	int super;
+	/* The global holding the type's value, plus one; 0 for none. It must be a global the same patch adds. */
+	int global;
+	int field_count;
+	int *fields;
+	int proto_count;
+	int *protos;
+	int binding_count;
+	int *bindings;
+} hl_patch_object_type;
+
 typedef struct {
 	int tag;
 	union {
@@ -180,6 +197,7 @@ typedef struct {
 		} fun;
 		int name;
 		int parameter;
+		hl_patch_object_type obj;
 	} data;
 } hl_patch_type;
 
@@ -205,7 +223,10 @@ typedef struct {
 	char *name;
 } hl_patch_added_function;
 
-/* A global a patch adds: a constant object of `type`, built from `fields` as an HLB constant is. */
+/*
+ * A global a patch adds: a constant object of `type`, built from `fields` as an HLB constant is, or, with a `field_count` of
+ * -1, the null value slot of an object type the patch adds.
+ */
 typedef struct {
 	int type;
 	int field_count;
