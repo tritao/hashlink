@@ -511,30 +511,52 @@ static int opcode_operands( int opcode ) {
  * built in place, linked to the module once its globals are staged, and published with the patch. Nothing here changes a type
  * the module already has.
  */
-static bool patch_type_is_object( int tag ) {
-	return tag == HOBJ || tag == HSTRUCT || tag == HVIRTUAL;
+/* Types with a prototype and a value slot: classes and structs. */
+static bool patch_type_is_class( int tag ) {
+	return tag == HOBJ || tag == HSTRUCT;
 }
 
-static bool read_patch_indexes( patch_reader *r, int count, int width, int **out ) {
+static bool patch_type_is_object( int tag ) {
+	return patch_type_is_class(tag) || tag == HVIRTUAL;
+}
+
+/* Room for `count` records of `width` indexes each, `size` bytes apiece. */
+static bool alloc_patch_records( patch_reader *r, int count, int width, size_t size, void **out ) {
 	// Every index takes a byte at least, so the section bounds the count before anything is allocated.
 	if( count > (int)(r->end - r->p) / width ) { r->error = "Truncated HLP data"; return false; }
-	*out = (int*)calloc(count * width > 0 ? count * width : 1, sizeof(int));
+	*out = calloc(count > 0 ? count : 1, size);
 	if( *out == NULL ) { r->error = "Out of memory reading patch types"; return false; }
-	for(int i=0;i<count*width;i++) if( !read_index(r,*out + i) ) return false;
 	return true;
 }
 
-/* In HLB order: name, super, global, the counts, then fields (name, type), methods (name, slot, prototype index) and bindings
-   (field, slot). A virtual has its fields only. */
+static bool read_patch_type_fields( patch_reader *r, int count, hl_patch_type_field **out ) {
+	if( !alloc_patch_records(r,count,2,sizeof(**out),(void**)out) ) return false;
+	for(int i=0;i<count;i++) if( !read_index(r,&(*out)[i].name) || !read_index(r,&(*out)[i].type) ) return false;
+	return true;
+}
+
+static bool read_patch_type_methods( patch_reader *r, int count, hl_patch_type_method **out ) {
+	if( !alloc_patch_records(r,count,3,sizeof(**out),(void**)out) ) return false;
+	for(int i=0;i<count;i++) if( !read_index(r,&(*out)[i].name) || !read_index(r,&(*out)[i].findex) || !read_index(r,&(*out)[i].pindex) ) return false;
+	return true;
+}
+
+static bool read_patch_type_bindings( patch_reader *r, int count, hl_patch_type_binding **out ) {
+	if( !alloc_patch_records(r,count,2,sizeof(**out),(void**)out) ) return false;
+	for(int i=0;i<count;i++) if( !read_index(r,&(*out)[i].field) || !read_index(r,&(*out)[i].findex) ) return false;
+	return true;
+}
+
+/* In HLB order: name, super, global, the counts, then fields, methods and bindings. A virtual has its fields only. */
 static bool read_patch_object_type( patch_reader *r, hl_patch_type *type ) {
 	hl_patch_object_type *o = &type->data.obj;
 	memset(o,0,sizeof(*o));
 	o->super = -1;
 	if( type->tag == HVIRTUAL )
-		return read_count(r,&o->field_count) && read_patch_indexes(r,o->field_count,2,&o->fields);
+		return read_count(r,&o->field_count) && read_patch_type_fields(r,o->field_count,&o->fields);
 	return read_index(r,&o->name) && read_index(r,&o->super) && read_count(r,&o->global) && read_count(r,&o->field_count)
-		&& read_count(r,&o->proto_count) && read_count(r,&o->binding_count) && read_patch_indexes(r,o->field_count,2,&o->fields)
-		&& read_patch_indexes(r,o->proto_count,3,&o->protos) && read_patch_indexes(r,o->binding_count,2,&o->bindings);
+		&& read_count(r,&o->proto_count) && read_count(r,&o->binding_count) && read_patch_type_fields(r,o->field_count,&o->fields)
+		&& read_patch_type_methods(r,o->proto_count,&o->protos) && read_patch_type_bindings(r,o->binding_count,&o->bindings);
 }
 
 void hl_patch_free( hl_patch *patch ) {
@@ -913,7 +935,7 @@ static bool validate_patch_object_type( hl_module *m, hl_patch *patch, int index
 	hl_patch_object_type *o = &type->data.obj;
 	int total = patch->base_type_count + patch->type_count;
 	for(int j=0;j<o->field_count;j++)
-		if( o->fields[j*2] < 0 || o->fields[j*2] >= string_count || o->fields[j*2+1] < 0 || o->fields[j*2+1] >= total ) { *error = "Invalid appended object field"; return false; }
+		if( o->fields[j].name < 0 || o->fields[j].name >= string_count || o->fields[j].type < 0 || o->fields[j].type >= total ) { *error = "Invalid appended object field"; return false; }
 	if( type->tag == HVIRTUAL ) return true;
 	if( o->name < 0 || o->name >= string_count ) { *error = "Invalid appended object name"; return false; }
 	// A base comes first, so building the runtime layout of a type never loops.
@@ -925,9 +947,9 @@ static bool validate_patch_object_type( hl_module *m, hl_patch *patch, int index
 		if( g < 0 || g >= patch->global_count || patch->globals[g].field_count >= 0 || patch->globals[g].type != index ) { *error = "Invalid appended object global"; return false; }
 	}
 	for(int j=0;j<o->proto_count;j++)
-		if( o->protos[j*3] < 0 || o->protos[j*3] >= string_count || o->protos[j*3+2] < -1 ) { *error = "Invalid appended object method"; return false; }
+		if( o->protos[j].name < 0 || o->protos[j].name >= string_count || o->protos[j].pindex < -1 ) { *error = "Invalid appended object method"; return false; }
 	for(int j=0;j<o->binding_count;j++)
-		if( o->bindings[j*2] < 0 ) { *error = "Invalid appended object binding"; return false; }
+		if( o->bindings[j].field < 0 ) { *error = "Invalid appended object binding"; return false; }
 	return true;
 }
 
@@ -935,11 +957,11 @@ static bool validate_patch_object_type( hl_module *m, hl_patch *patch, int index
 static bool validate_patch_object_methods( hl_patch *patch, patch_layout *layout, const char **error ) {
 	for(int i=0;i<patch->type_count;i++) {
 		hl_patch_type *type = patch->types + i;
-		if( type->tag != HOBJ && type->tag != HSTRUCT ) continue;
+		if( !patch_type_is_class(type->tag) ) continue;
 		for(int j=0;j<type->data.obj.proto_count;j++)
-			if( layout_function(layout,type->data.obj.protos[j*3+1]) == NULL ) { *error = "Invalid appended object method"; return false; }
+			if( layout_function(layout,type->data.obj.protos[j].findex) == NULL ) { *error = "Invalid appended object method"; return false; }
 		for(int j=0;j<type->data.obj.binding_count;j++)
-			if( layout_function(layout,type->data.obj.bindings[j*2+1]) == NULL ) { *error = "Invalid appended object binding"; return false; }
+			if( layout_function(layout,type->data.obj.bindings[j].findex) == NULL ) { *error = "Invalid appended object binding"; return false; }
 	}
 	return true;
 }
@@ -971,18 +993,22 @@ static bool stage_patch_object_type( hl_module *m, hl_patch_type *src, hl_type *
 		obj->bindings = (int*)(obj->proto + o->proto_count);
 		for(int j=0;j<o->proto_count;j++) {
 			hl_obj_proto *p = obj->proto + j;
-			p->name = strings[o->protos[j*3]];
+			p->name = strings[o->protos[j].name];
 			p->hashed_name = hl_hash_gen(p->name,true);
-			p->findex = o->protos[j*3+1];
-			p->pindex = o->protos[j*3+2];
+			p->findex = o->protos[j].findex;
+			p->pindex = o->protos[j].pindex;
 		}
-		memcpy(obj->bindings,o->bindings,sizeof(int) * 2 * o->binding_count);
+		// HashLink keeps bindings as (field, slot) pairs.
+		for(int j=0;j<o->binding_count;j++) {
+			obj->bindings[j*2] = o->bindings[j].field;
+			obj->bindings[j*2+1] = o->bindings[j].findex;
+		}
 		dst->obj = obj;
 	}
 	for(int j=0;j<o->field_count;j++) {
-		fields[j].name = strings[o->fields[j*2]];
+		fields[j].name = strings[o->fields[j].name];
 		fields[j].hashed_name = hl_hash_gen(fields[j].name,true);
-		fields[j].t = m->code->types + o->fields[j*2+1];
+		fields[j].t = m->code->types + o->fields[j].type;
 	}
 	return true;
 }
@@ -998,7 +1024,7 @@ static void link_patch_object_types( hl_module *m, hl_patch *patch ) {
 		hl_type *t = m->code->types + patch->base_type_count + i;
 		if( src->tag == HVIRTUAL )
 			hl_init_virtual(t,&m->ctx);
-		else if( src->tag == HOBJ || src->tag == HSTRUCT ) {
+		else if( patch_type_is_class(src->tag) ) {
 			t->obj->m = &m->ctx;
 			t->obj->global_value = src->data.obj.global ? (void**)(m->globals_data + m->globals_indexes[src->data.obj.global - 1]) : NULL;
 		}
@@ -1042,7 +1068,7 @@ static bool validate_patch_globals( hl_module *m, hl_patch *patch, int *size, co
 		if(global->field_count<0){
 			// The null value slot of an appended object type: a pointer, which nothing writes (see OSetGlobal).
 			int kind=global->type<0||global->type>=total_types?-1:patch_type_kind(m,patch,global->type);
-			if(global->type<patch->base_type_count||(kind!=HOBJ&&kind!=HSTRUCT)){*error="Invalid patch global type";return false;}
+			if(global->type<patch->base_type_count||!patch_type_is_class(kind)){*error="Invalid patch global type";return false;}
 			used+=(-used)&(int)(sizeof(void*)-1);used+=(int)sizeof(void*);
 			if(used>m->globals_data_capacity){*error="Global capacity exceeded";return false;}
 			continue;
@@ -1246,6 +1272,17 @@ static bool stage_patch_object_fields( hl_module *m, hl_patch *patch, uchar **st
 	return true;
 }
 
+/* Makes room for `extra` more allocations the module owns (`patch_type_allocations`); false when out of memory. */
+static bool reserve_patch_type_allocations( hl_module *m, int extra ) {
+	int needed=m->patch_type_allocation_count+extra,capacity;void **owners;
+	if(needed<=m->patch_type_allocation_capacity)return true;
+	capacity=needed<16?16:needed*2;
+	owners=(void**)realloc(m->patch_type_allocations,sizeof(void*)*capacity);
+	if(!owners)return false;
+	m->patch_type_allocations=owners;m->patch_type_allocation_capacity=capacity;
+	return true;
+}
+
 /*
  * Publishes the field lookups, which then belong to the module. A reader racing the commit sees the old lookup or the new
  * one; the old one stays allocated.
@@ -1258,13 +1295,8 @@ static void commit_patch_object_fields( hl_module *m, patch_object_field_stage *
 			patch_store(staged[i].rt->lookup,staged[i].lookup);
 			staged[i].rt->nlookup=staged[i].nlookup;
 		}
-		if(m->patch_type_allocation_count==m->patch_type_allocation_capacity){
-			int capacity=m->patch_type_allocation_capacity<16?16:m->patch_type_allocation_capacity*2;
-			void **owners=(void**)realloc(m->patch_type_allocations,sizeof(void*)*capacity);
-			// Out of memory only leaks the lookup, which stays in use either way.
-			if(owners){m->patch_type_allocations=owners;m->patch_type_allocation_capacity=capacity;}
-		}
-		if(m->patch_type_allocation_count<m->patch_type_allocation_capacity)m->patch_type_allocations[m->patch_type_allocation_count++]=staged[i].lookup;
+		// Out of memory only leaks the lookup, which stays in use either way.
+		if(reserve_patch_type_allocations(m,1))m->patch_type_allocations[m->patch_type_allocation_count++]=staged[i].lookup;
 	}
 	free(staged);
 }
@@ -1390,7 +1422,7 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 	live_block=patch_live_alloc(m);if(!live_block){error="Out of memory listing patch code";goto fail;}
 	if(inject_patch_failure(m,3,&error))goto fail;
 	temp.jit_code=allocation->code;temp.codesize=allocation->code_size;temp.jit_debug=allocation->jit_debug;temp.gdb_jit_entry=NULL;hl_gdb_jit_register_patch(&temp);allocation->gdb_jit_entry=temp.gdb_jit_entry;free(combined_functions);combined_functions=NULL;
-	if(type_allocation_count){int needed=m->patch_type_allocation_count+type_allocation_count;if(needed>m->patch_type_allocation_capacity){int capacity=needed<16?16:needed*2;void **owners=(void**)realloc(m->patch_type_allocations,sizeof(void*)*capacity);if(!owners){error="Out of memory publishing patch types";goto fail;}m->patch_type_allocations=owners;m->patch_type_allocation_capacity=capacity;}}
+	if(!reserve_patch_type_allocations(m,type_allocation_count)){error="Out of memory publishing patch types";goto fail;}
 	/*
 	 * Nothing below can fail. The commit and the migrations run with every other thread stopped, so a thread sees the
 	 * patch's functions all old or all new (a new constructor never meets an old reader of its fields), and never runs the
