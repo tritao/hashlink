@@ -434,14 +434,25 @@ HL_EXTERN_C HL_EXPORT h_bool hl_module_patch_generation( hl_module *target, hl_m
 /* Builds the object of a constant in the module's arena and stores it in the constant's global; `code` supplies the tables
    its fields index. Does not touch the GC roots. */
 HL_EXTERN_C vdynamic *hl_module_build_constant( hl_module *module, hl_code *code, hl_constant *constant );
-HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch( hl_module *module, hl_patch *patch, const char **error_msg );
-/**
- * Runs the migrations of a patch `module` has committed (see `hl_patch_migration`), returning how many instances were
- * migrated. Exceptions do not propagate: each failed call counts in `failures`, its instance keeps zero values in the
- * added fields, and `first_exception` receives the first exception thrown. Call it after `hl_module_apply_patch`
- * succeeds, before the module runs other code.
+/*
+ * What the migrations of an applied patch did (see `hl_patch_migration`): the initializer calls that returned, the ones
+ * that threw, and the first exception with the class whose migration threw it. An instance whose call threw keeps zero
+ * values in the fields the call had not set. `error` is set when the migrations could not run at all.
  */
-HL_EXTERN_C HL_EXPORT int hl_module_patch_migrate( hl_module *module, hl_patch *patch, int *failures, vdynamic **first_exception );
+typedef struct {
+	int migrated;
+	int failures;
+	vdynamic *first_exception;
+	hl_type *first_type;
+	const char *error;
+} hl_patch_migration_report;
+
+/**
+ * Validates, compiles and commits `patch`. A patch with migrations commits and runs them with every other thread stopped
+ * (`hl_gc_exclusive_begin`), so no thread runs the patch's code before the instances made earlier have the fields it
+ * adds. `report`, which may be NULL, receives what the migrations did; it is only filled when the patch applies.
+ */
+HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch( hl_module *module, hl_patch *patch, hl_patch_migration_report *report, const char **error_msg );
 HL_EXTERN_C HL_EXPORT int hl_module_patch_allocation_count( hl_module *module );
 HL_EXTERN_C HL_EXPORT int hl_module_patch_retired_allocation_count( hl_module *module );
 /** Resolve a program counter owned by a live or retained hot-reload JIT block. */
@@ -531,7 +542,9 @@ typedef struct _hl_runtime_module hl_runtime_module;
 typedef enum {
 	HL_RUNTIME_OK = 0, HL_RUNTIME_BAD_ARGUMENT, HL_RUNTIME_BAD_FORMAT,
 	HL_RUNTIME_STALE_PATCH, HL_RUNTIME_INCOMPATIBLE, HL_RUNTIME_JIT_FAILED,
-	HL_RUNTIME_BAD_FUNCTION, HL_RUNTIME_EXCEPTION, HL_RUNTIME_RETIRE_BLOCKED
+	HL_RUNTIME_BAD_FUNCTION, HL_RUNTIME_EXCEPTION, HL_RUNTIME_RETIRE_BLOCKED,
+	/* The patch applied, but initializers of the fields it added threw; `hl_runtime_module_patch_message` says which. */
+	HL_RUNTIME_MIGRATION_FAILED
 } hl_runtime_status;
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int stable_id, int *result, vdynamic **exception );
@@ -545,6 +558,8 @@ HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_object( hl_runtim
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32_object( hl_runtime_module *runtime, int stable_id, vdynamic *argument, int *result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_validate_call( hl_runtime_module *runtime, int stable_id, int shape );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const unsigned char *bytes, int length );
+/** Why the last `hl_runtime_module_apply_hlp` returned HL_RUNTIME_MIGRATION_FAILED, or NULL; owned by the runtime. */
+HL_EXTERN_C HL_EXPORT const uchar *hl_runtime_module_patch_message( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_debug_region_count( hl_runtime_module *runtime );
 /** Test hook: how a function's original entry was redirected: 0 untouched, 1 by the 12-byte writer, 2 by the atomic jump, -1 unknown. */

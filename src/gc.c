@@ -507,6 +507,17 @@ HL_PRIM void hl_remove_root( void *v ) {
 	gc_global_lock(false);
 }
 
+/*
+ * Arrays of objects every collection marks (`hl_gc_live_instances`). They are linked in while the world is stopped, so no
+ * collection can run between finding the objects and keeping them.
+ */
+typedef struct gc_pinned_list {
+	void **values;
+	int count;
+	struct gc_pinned_list *next;
+} gc_pinned_list;
+static gc_pinned_list *gc_pinned_lists = NULL;
+
 HL_API int hl_gc_owner_root_count( void *owner ) {
 	int count = 0;
 	if( owner == NULL ) return 0;
@@ -642,6 +653,9 @@ static void gc_timeline_mark( char kind ) {
 	fflush(gc_timeline);
 }
 
+// Depth of `hl_gc_exclusive_begin` sections; only the thread holding the global lock changes it.
+static int gc_exclusive_depth = 0;
+
 static void gc_stop_world( bool b ) {
 	if( b ) gc_timeline_mark('S');
 #	ifdef HL_THREADS
@@ -665,8 +679,8 @@ static void gc_stop_world( bool b ) {
 		}
 #		endif
 	} else {
-		// releasing global lock will release all threads
-		gc_threads.stopping_world = false;
+		// releasing global lock will release all threads; a collection inside an exclusive section leaves them stopped
+		if( gc_exclusive_depth == 0 ) gc_threads.stopping_world = false;
 		// The caller releases the lock right after; only GC_PROFILE output, a debug build's, can wait in between.
 		hl_prof_no_wait(false);
 	}
@@ -1572,6 +1586,9 @@ static void gc_mark() {
 	}
 
 	GC_STACK_END();
+
+	for(gc_pinned_list *l=gc_pinned_lists;l;l=l->next)
+		gc_mark_stack(l->values,l->values + l->count);
 
 	// scan threads stacks & registers
 	for(i=0;i<gc_threads.count;i++) {
@@ -2563,12 +2580,14 @@ static void gc_collect_live_instance_page( gc_pheader *p, int private_data ) {
 }
 
 /*
- * Every live object whose type is one of `types`, after a full mark, in one pass over the heap. The objects go in a
- * malloc'd array the caller frees; it is no GC root, so the caller must root them (copy them into a GC array) before it
- * allocates. Returns the count, or -1 when out of memory.
+ * Every live object whose type is one of `types`, after a full mark, in one pass over the heap. The array is linked into
+ * the pinned lists before the world restarts, so its objects survive whatever references other threads drop next, and
+ * whatever the caller's code overwrites; `hl_gc_live_instances_release` unpins and frees it. Returns the count, or -1
+ * when out of memory.
  */
 HL_API int hl_gc_live_instances( hl_type **types, int ntypes, void ***out ) {
 	int min_size = 0;
+	gc_pinned_list *pinned;
 	*out = NULL;
 	for(int i=0;i<ntypes;i++) {
 		if( types[i]->kind != HOBJ ) return -1;
@@ -2576,6 +2595,8 @@ HL_API int hl_gc_live_instances( hl_type **types, int ntypes, void ***out ) {
 		int size = hl_get_obj_rt(types[i])->size;
 		if( min_size == 0 || size < min_size ) min_size = size;
 	}
+	pinned = (gc_pinned_list*)malloc(sizeof(gc_pinned_list));
+	if( pinned == NULL ) return -1;
 	gc_global_lock(true);
 	gc_stop_world(true);
 	gc_mark();
@@ -2587,11 +2608,48 @@ HL_API int hl_gc_live_instances( hl_type **types, int ntypes, void ***out ) {
 	live_instances.capacity = 0;
 	live_instances.failed = false;
 	gc_iter_pages(gc_collect_live_instance_page);
+	if( !live_instances.failed ) {
+		pinned->values = live_instances.found;
+		pinned->count = live_instances.count;
+		pinned->next = gc_pinned_lists;
+		gc_pinned_lists = pinned;
+	}
 	gc_stop_world(false);
 	gc_global_lock(false);
-	if( live_instances.failed ) { free(live_instances.found); return -1; }
-	*out = live_instances.found;
+	if( live_instances.failed ) { free(live_instances.found); free(pinned); return -1; }
+	// An empty result still gets an array, so release has something to find.
+	if( pinned->values == NULL ) pinned->values = (void**)malloc(sizeof(void*));
+	*out = pinned->values;
 	return live_instances.count;
+}
+
+HL_API void hl_gc_live_instances_release( void **instances ) {
+	gc_pinned_list *found = NULL;
+	if( instances == NULL ) return;
+	gc_global_lock(true);
+	for(gc_pinned_list **l=&gc_pinned_lists;*l;l=&(*l)->next)
+		if( (*l)->values == instances ) {
+			found = *l;
+			*l = found->next;
+			break;
+		}
+	gc_global_lock(false);
+	if( found == NULL ) hl_fatal("Releasing instances that are not pinned");
+	free(found->values);
+	free(found);
+}
+
+HL_API void hl_gc_exclusive_begin() {
+	gc_global_lock(true);
+	gc_stop_world(true);
+	gc_exclusive_depth++;
+}
+
+HL_API void hl_gc_exclusive_end() {
+	if( gc_exclusive_depth <= 0 ) hl_fatal("Unbalanced exclusive GC section");
+	gc_exclusive_depth--;
+	gc_stop_world(false);
+	gc_global_lock(false);
 }
 
 #ifdef HL_VCC

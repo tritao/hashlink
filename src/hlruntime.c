@@ -14,6 +14,8 @@ struct _hl_runtime_module {
 	int identity_count;
 	int *stable_ids;
 	int *slots;
+	/* Why the last patch's migrations failed (HL_RUNTIME_MIGRATION_FAILED), or NULL. */
+	uchar *patch_message;
 	struct _hl_runtime_module *retirement_next;
 };
 
@@ -25,6 +27,7 @@ static void runtime_wrapper_free( hl_runtime_module *runtime ) {
 	hl_mutex_free(runtime->lock);
 	free(runtime->stable_ids);
 	free(runtime->slots);
+	free(runtime->patch_message);
 	free(runtime);
 }
 
@@ -183,6 +186,7 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 	runtime->identity_count = identity_count;
 	runtime->stable_ids = (int*)malloc(sizeof(int) * identity_count);
 	runtime->slots = (int*)malloc(sizeof(int) * identity_count);
+	runtime->patch_message = NULL;
 	runtime->retirement_next = NULL;
 	if( (identity_count > 0) && (runtime->stable_ids == NULL || runtime->slots == NULL) ) {
 		free(runtime->stable_ids);free(runtime->slots);free(runtime);hl_module_unload(module);return HL_RUNTIME_JIT_FAILED;
@@ -442,12 +446,36 @@ hl_runtime_status hl_runtime_module_call_i32_object( hl_runtime_module *runtime,
 	return status;
 }
 
+/*
+ * The message for migrations that failed: which class's initializers threw, how often, and the first exception. The
+ * patch stays applied, so the fields those calls did not set hold zero values until the module is reloaded.
+ */
+static uchar *migration_failure_message( hl_patch_migration_report *report ) {
+	const uchar *exception = report->first_exception == NULL ? NULL : hl_to_string(report->first_exception);
+	const uchar *owner = report->first_type == NULL ? USTR("?") : report->first_type->obj->name;
+	int size = 256 + ustrlen(owner) + (exception == NULL ? 0 : ustrlen(exception));
+	uchar *message = (uchar*)malloc(sizeof(uchar) * size);
+	if( message == NULL ) return NULL;
+	if( report->error != NULL ) {
+		int i = 0;
+		for(;report->error[i] && i < size - 1;i++) message[i] = (uchar)report->error[i];
+		message[i] = 0;
+	} else
+		usprintf(message,size,USTR("the initializers of the fields the patch added threw on %d of %d instances, first in %s: %s"),
+			report->failures,report->failures + report->migrated,owner,exception == NULL ? USTR("(no message)") : exception);
+	return message;
+}
+
 hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const unsigned char *bytes, int length ) {
 	const char *error = NULL;
 	hl_patch *patch;
 	h_bool applied;
+	hl_patch_migration_report migration;
+	bool migration_failed;
 	if( runtime == NULL || bytes == NULL || length <= 0 ) return HL_RUNTIME_BAD_ARGUMENT;
 	hl_mutex_acquire(runtime->lock);
+	free(runtime->patch_message);
+	runtime->patch_message = NULL;
 	patch = hl_patch_read(bytes,length,&error);
 	if( patch == NULL ) {
 		hl_mutex_release(runtime->lock);
@@ -484,35 +512,35 @@ hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const
 		patch->migrations[i].findex = resolve_patch_stable_id(runtime,patch,patch->migrations[i].stable_id);
 		if( patch->migrations[i].findex < 0 ) { hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE; }
 	}
-	applied = hl_module_apply_patch(runtime->module,patch,&error);
+	applied = hl_module_apply_patch(runtime->module,patch,&migration,&error);
 	if( applied )
 		for(int i=0;i<patch->added_function_count;i++) {
 			runtime->stable_ids[runtime->identity_count] = patch->added_functions[i].stable_id;
 			runtime->slots[runtime->identity_count++] = patch->added_functions[i].findex;
 		}
-	// Instances made before the patch get the declaration initializers of the fields it added before any other code runs.
-	// A throwing initializer leaves its field at the zero value; the patch stays applied.
-	if( applied && patch->migration_count > 0 ) {
-		int failures = 0;
-		vdynamic *exception = NULL;
-		int migrated = hl_module_patch_migrate(runtime->module,patch,&failures,&exception);
-		if( failures > 0 ) {
-			uchar *message = exception == NULL ? NULL : hl_to_string(exception);
-			printf("hl: live patch initialized added fields of %d instances; %d initializers failed%s", migrated, failures, message == NULL ? "" : ": ");
-			if( message != NULL ) uprintf(USTR("%s"),message);
-			printf("\n");
-			fflush(stdout);
-		}
-	}
+	// Instances made before the patch ran the initializers of the fields it added before any other code did. One that threw
+	// leaves zero values behind while the patch stays applied: the module runs the new revision, and the caller decides
+	// whether it can keep running it.
+	migration_failed = applied && (migration.failures > 0 || migration.error != NULL);
+	if( migration_failed ) runtime->patch_message = migration_failure_message(&migration);
 	hl_patch_free(patch);
 	hl_mutex_release(runtime->lock);
 	if( applied ) {
 		hl_profile_stream_notify_revision(runtime->module->diagnostics_id,runtime->module->revision);
 		hl_debug_notify_revision(runtime->module);
-		return HL_RUNTIME_OK;
+		return migration_failed ? HL_RUNTIME_MIGRATION_FAILED : HL_RUNTIME_OK;
 	}
 	if( error != NULL && strcmp(error,"Stale patch revision") == 0 ) return HL_RUNTIME_STALE_PATCH;
 	return HL_RUNTIME_INCOMPATIBLE;
+}
+
+const uchar *hl_runtime_module_patch_message( hl_runtime_module *runtime ) {
+	const uchar *result;
+	if( runtime == NULL ) return NULL;
+	hl_mutex_acquire(runtime->lock);
+	result = runtime->patch_message;
+	hl_mutex_release(runtime->lock);
+	return result;
 }
 
 hl_runtime_status hl_runtime_hlp_summary( const unsigned char *bytes, int length, int *base_revision, int *revision, int *function_count ) {

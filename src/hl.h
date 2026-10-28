@@ -855,8 +855,19 @@ HL_API void hl_add_root_owner( void *ptr, void *owner );
 HL_API void hl_remove_root( void *ptr );
 HL_API int hl_gc_owner_root_count( void *owner );
 HL_API void hl_gc_major( void );
-/** Live objects of any of `types` (object types), in a malloc'd array the caller frees and must root before it allocates. */
+/**
+ * Live objects of any of `types` (object types), after a full mark. The array is pinned: every collection marks the
+ * objects in it, from the moment the world restarts, until `hl_gc_live_instances_release` frees it.
+ */
 HL_API int hl_gc_live_instances( hl_type **types, int ntypes, void ***out );
+HL_API void hl_gc_live_instances_release( void **instances );
+/**
+ * Stops every other thread until `hl_gc_exclusive_end`, while the calling thread keeps running managed code: it
+ * allocates and collects as usual, and collections keep the others stopped. The caller must not wait for another
+ * thread inside the section, which could not run to answer.
+ */
+HL_API void hl_gc_exclusive_begin( void );
+HL_API void hl_gc_exclusive_end( void );
 // Opt-in, best-effort microsecond budget. True means the cycle completed (including fallback).
 HL_API bool hl_gc_step( double budget_micros );
 // Shared soft allowance until the next host frame boundary; -1 records unlimited

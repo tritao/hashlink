@@ -148,6 +148,7 @@ static void gc_inc_roots_range(void *start, void *end) {
 
 static void gc_inc_roots(void) {
 	for(int i = 0; i < gc_roots_count; i++) gc_inc_visit(*gc_roots[i],true);
+	for(gc_pinned_list *l = gc_pinned_lists; l; l = l->next) gc_inc_roots_range(l->values,l->values + l->count);
 	for(int i = 0; i < gc_threads.count; i++) {
 		hl_thread_info *t = gc_threads.threads[i];
 		gc_inc_roots_range(t->stack_cur,t->stack_top);
@@ -397,6 +398,7 @@ static void gc_inc_validate(void) {
 	gc_validation_first_missing = NULL;
 	gc_iter_pages(gc_validation_prepare);
 	for(int i = 0; i < gc_roots_count; i++) gc_validation_visit(*gc_roots[i],true);
+	for(gc_pinned_list *l = gc_pinned_lists; l; l = l->next) gc_validation_range(l->values,l->values + l->count,true);
 	for(int i = 0; i < gc_threads.count; i++) {
 		hl_thread_info *t = gc_threads.threads[i];
 		gc_validation_range(t->stack_cur,t->stack_top,true);
