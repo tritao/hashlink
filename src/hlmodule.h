@@ -322,6 +322,10 @@ typedef struct {
 	hl_patch_migration *migrations;
 	int guard_count;
 	hl_patch_guard *guards;
+	/* The names of the module's globals (its static fields), sent with the guards so a refusal can name a holder. */
+	int global_name_count;
+	int *global_name_indexes;
+	char **global_names;
 } hl_patch;
 
 HL_EXTERN_C HL_EXPORT hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error_msg );

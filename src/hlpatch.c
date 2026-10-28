@@ -582,6 +582,9 @@ void hl_patch_free( hl_patch *patch ) {
 	free(patch->migrations);
 	for(i=0;i<patch->guard_count;i++) free(patch->guards[i].description);
 	free(patch->guards);
+	for(i=0;i<patch->global_name_count;i++) free(patch->global_names[i]);
+	free(patch->global_names);
+	free(patch->global_name_indexes);
 	for(i=0;i<patch->debug_file_count;i++) free(patch->debug_files[i]);
 	for(i=0;i<patch->source_snapshot_count;i++) free(patch->source_snapshots[i].content);
 	free(patch->source_snapshots);
@@ -739,6 +742,18 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 				guard->findex=-1;
 				guard->description=(char*)malloc(count+1);if(!guard->description)FAIL("Out of memory reading patch guards");
 				memcpy(guard->description,p,count);guard->description[count]=0;
+			}
+			if(!read_count(&s,&patch->global_name_count))goto section_fail;
+			if(patch->global_name_count<0||patch->global_name_count>(s.end-s.p)/2)FAIL("Invalid HLP guards section");
+			if(patch->global_name_count>0){
+				patch->global_names=(char**)calloc(patch->global_name_count,sizeof(char*));
+				patch->global_name_indexes=(int*)calloc(patch->global_name_count,sizeof(int));
+				if(!patch->global_names||!patch->global_name_indexes)FAIL("Out of memory reading patch guards");
+			}
+			for(i=0;i<patch->global_name_count;i++){
+				if(!read_count(&s,patch->global_name_indexes+i)||!read_count(&s,&count)||!take(&s,count,&p))goto section_fail;
+				patch->global_names[i]=(char*)malloc(count+1);if(!patch->global_names[i])FAIL("Out of memory reading patch guards");
+				memcpy(patch->global_names[i],p,count);patch->global_names[i][count]=0;
 			}
 		} else {
 			s.p = s.end;
@@ -1382,11 +1397,19 @@ static void patch_ascii( const uchar *text, char *out, int size ) {
  * element holding it, walked back through what holds those. False when no heap block holds it (a root may: a thread's stack,
  * a native root).
  */
-static bool patch_holder_path( void *value, char *out, int size, int depth ) {
+static bool patch_holder_path( hl_module *m, hl_patch *patch, void *value, char *out, int size, int depth ) {
 	int offset; bool typed;
 	char parent[256], name[128];
 	void *block = hl_gc_find_referrer(value,NULL,&offset,&typed);
-	if( block == NULL ) return false;
+	if( block == NULL ) {
+		// Held by no heap block: a static field, a global the module keeps outside the heap, may hold it.
+		for(int i=0;i<patch->global_name_count;i++) {
+			int global = patch->global_name_indexes[i];
+			if( global < 0 || global >= m->code->nglobals ) continue;
+			if( *(void**)(m->globals_data + m->globals_indexes[global]) == value ) { snprintf(out,size,"%s",patch->global_names[i]); return true; }
+		}
+		return false;
+	}
 	if( !typed ) { snprintf(out,size,"a native structure"); return true; }
 	hl_type *t = *(hl_type**)block;
 	switch( t->kind ) {
@@ -1402,7 +1425,7 @@ static bool patch_holder_path( void *value, char *out, int size, int depth ) {
 		if( name[0] == '$' ) { snprintf(out,size,"%s.%s",name + 1,field); return true; }
 		// An Array keeps its elements in a native array; its path is the Array's.
 		bool storage = strcmp(field,"array") == 0 && strncmp(name,"hl.types.Array",14) == 0;
-		if( depth > 0 && patch_holder_path(block,parent,sizeof(parent),depth - 1) ) {
+		if( depth > 0 && patch_holder_path(m,patch,block,parent,sizeof(parent),depth - 1) ) {
 			if( storage ) snprintf(out,size,"%s",parent); else snprintf(out,size,"%s.%s",parent,field);
 		} else
 			snprintf(out,size,"a %s's %s",name,field);
@@ -1412,12 +1435,12 @@ static bool patch_holder_path( void *value, char *out, int size, int depth ) {
 		// A native array keeps its elements in a storage block of its own, which starts with the array type too: the array's
 		// path is its storage's, and an element's index counts from after the storage's type word.
 		if( *(hl_type**)value == &hlt_array && offset == (int)offsetof(varray,data) ) {
-			if( depth > 0 && patch_holder_path(block,out,size,depth - 1) ) return true;
+			if( depth > 0 && patch_holder_path(m,patch,block,out,size,depth - 1) ) return true;
 			snprintf(out,size,"an array");
 			return true;
 		}
 		int index = (offset - HL_WSIZE) / HL_WSIZE;
-		if( depth > 0 && patch_holder_path(block,parent,sizeof(parent),depth - 1) ) snprintf(out,size,"%s[%d]",parent,index);
+		if( depth > 0 && patch_holder_path(m,patch,block,parent,sizeof(parent),depth - 1) ) snprintf(out,size,"%s[%d]",parent,index);
 		else snprintf(out,size,"an array's element %d",index);
 		return true;
 	}
@@ -1475,7 +1498,7 @@ static bool check_patch_guards( hl_module *m, hl_patch *patch, const char **erro
 		if( owner != refused ) continue;
 		held++;
 		if( named < 3 ) {
-			if( !patch_holder_path(c,path,sizeof(path),6) ) snprintf(path,sizeof(path),"a running thread or a native root");
+			if( !patch_holder_path(m,patch,c,path,sizeof(path),6) ) snprintf(path,sizeof(path),"a running thread or a native root");
 			if( named ) strncat(holders,", ",sizeof(holders) - strlen(holders) - 1);
 			strncat(holders,path,sizeof(holders) - strlen(holders) - 1);
 			named++;
@@ -1487,7 +1510,7 @@ static bool check_patch_guards( hl_module *m, hl_patch *patch, const char **erro
 		vclosure *c = m->static_closures[i];
 		int owner = -1;
 		for(int j=0;j<nentries&&owner<0;j++) if( c->fun == entries[j] ) owner = owners[j];
-		if( owner < 0 || (refused >= 0 && owner != refused) || !patch_holder_path(c,path,sizeof(path),6) ) continue;
+		if( owner < 0 || (refused >= 0 && owner != refused) || !patch_holder_path(m,patch,c,path,sizeof(path),6) ) continue;
 		if( refused < 0 ) refused = owner;
 		held++;
 		if( named < 3 ) {
