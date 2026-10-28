@@ -448,9 +448,10 @@ typedef struct {
 } hl_patch_migration_report;
 
 /**
- * Validates, compiles and commits `patch`. A patch with migrations commits and runs them with every other thread stopped
- * (`hl_gc_exclusive_begin`), so no thread runs the patch's code before the instances made earlier have the fields it
- * adds. `report`, which may be NULL, receives what the migrations did; it is only filled when the patch applies.
+ * Validates, compiles and commits `patch`. The commit and the migrations run with every other thread stopped
+ * (`hl_gc_exclusive_begin`): other threads see all of the patch's functions at once, and none runs the patch's code before
+ * the instances made earlier have the fields it adds. `report`, which may be NULL, receives what the migrations did; it
+ * is only filled when the patch applies.
  */
 HL_EXTERN_C HL_EXPORT h_bool hl_module_apply_patch( hl_module *module, hl_patch *patch, hl_patch_migration_report *report, const char **error_msg );
 HL_EXTERN_C HL_EXPORT int hl_module_patch_allocation_count( hl_module *module );

@@ -1324,7 +1324,7 @@ static void migrate_patch_instances( hl_module *m, hl_patch *patch, hl_patch_mig
 }
 
 h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_report *report, const char **error_msg ) {
-	hl_patch_migration_report ignored;bool exclusive=false;const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;hl_code code;hl_module temp;patch_layout layout={0};bool staged_added=false;hl_patch_live *live_block=NULL;hl_patch_code *superseded=NULL;int globals_size=0;bool staged_globals=false;patch_object_field_stage *staged_fields=NULL;
+	hl_patch_migration_report ignored;const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;hl_code code;hl_module temp;patch_layout layout={0};bool staged_added=false;hl_patch_live *live_block=NULL;hl_patch_code *superseded=NULL;int globals_size=0;bool staged_globals=false;patch_object_field_stage *staged_fields=NULL;
 	if(report==NULL)report=&ignored;
 	memset(report,0,sizeof(*report));
 	if(!m||!patch||!m->patchable){error="Module is not patchable";goto fail;}
@@ -1392,10 +1392,11 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 	temp.jit_code=allocation->code;temp.codesize=allocation->code_size;temp.jit_debug=allocation->jit_debug;temp.gdb_jit_entry=NULL;hl_gdb_jit_register_patch(&temp);allocation->gdb_jit_entry=temp.gdb_jit_entry;free(combined_functions);combined_functions=NULL;
 	if(type_allocation_count){int needed=m->patch_type_allocation_count+type_allocation_count;if(needed>m->patch_type_allocation_capacity){int capacity=needed<16?16:needed*2;void **owners=(void**)realloc(m->patch_type_allocations,sizeof(void*)*capacity);if(!owners){error="Out of memory publishing patch types";goto fail;}m->patch_type_allocations=owners;m->patch_type_allocation_capacity=capacity;}}
 	/*
-	 * Nothing below can fail. A patch with migrations commits and migrates with every other thread stopped: its code reads
-	 * the fields it adds, and no thread may run that code on an instance the migrations have not reached yet.
+	 * Nothing below can fail. The commit and the migrations run with every other thread stopped, so a thread sees the
+	 * patch's functions all old or all new (a new constructor never meets an old reader of its fields), and never runs the
+	 * new code on an instance the migrations have not reached yet. A thread stopped inside an old function finishes it.
 	 */
-	if(patch->migration_count>0){hl_gc_exclusive_begin();exclusive=true;}
+	hl_gc_exclusive_begin();
 	for(int i=0;i<type_allocation_count;i++)m->patch_type_allocations[m->patch_type_allocation_count++]=type_allocations[i];
 	free(type_allocations);type_allocations=NULL;type_allocation_count=0;for(int i=m->code->ntypes;i<code.ntypes;i++)m->code->types[i].gc_owner=m;m->code->ntypes=code.ntypes;
 	// A constant must exist before any code can read its global; the strings it points to are the patch's, which outlive it.
@@ -1422,7 +1423,8 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 	m->code->ints=combined_ints;m->code->nints=code.nints;m->code->floats=combined_floats;m->code->nfloats=code.nfloats;m->code->strings=combined_strings;m->code->strings_lens=combined_string_lens;m->code->ustrings=combined_ustrings;m->code->nstrings=code.nstrings;
 	combined_ints=NULL;combined_floats=NULL;combined_strings=NULL;combined_string_lens=NULL;combined_ustrings=NULL;combined_string_data=NULL;
 	m->revision=patch->revision;m->patch_jit_count+=patch->function_count;hl_module_crash_write_unlock();free(offsets);
-	if(exclusive){migrate_patch_instances(m,patch,report);hl_gc_exclusive_end();}
+	if(patch->migration_count>0)migrate_patch_instances(m,patch,report);
+	hl_gc_exclusive_end();
 	if(error_msg)*error_msg=NULL;return true;
 fail:
 	if(jit) hl_jit_free(jit,false);
