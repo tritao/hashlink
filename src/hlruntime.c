@@ -446,6 +446,15 @@ hl_runtime_status hl_runtime_module_call_i32_object( hl_runtime_module *runtime,
 	return status;
 }
 
+/* A refusal reason, ASCII text, as the UTF-16 the runtime hands out. */
+static uchar *ascii_message( const char *text ) {
+	int size = (int)strlen(text) + 1;
+	uchar *message = (uchar*)malloc(sizeof(uchar) * size);
+	if( message == NULL ) return NULL;
+	for(int i=0;i<size;i++) message[i] = (uchar)(unsigned char)text[i];
+	return message;
+}
+
 /*
  * The message for migrations that failed: which class's initializers threw, how often, and the first exception. The
  * patch stays applied, so the fields those calls did not set hold zero values until the module is reloaded.
@@ -534,14 +543,6 @@ hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const
 	}
 	if( error != NULL && strcmp(error,"Stale patch revision") == 0 ) return HL_RUNTIME_STALE_PATCH;
 	return HL_RUNTIME_INCOMPATIBLE;
-}
-
-static uchar *ascii_message( const char *text ) {
-	int size = (int)strlen(text) + 1;
-	uchar *message = (uchar*)malloc(sizeof(uchar) * size);
-	if( message == NULL ) return NULL;
-	for(int i=0;i<size;i++) message[i] = (uchar)(unsigned char)text[i];
-	return message;
 }
 
 const uchar *hl_runtime_module_patch_message( hl_runtime_module *runtime ) {
