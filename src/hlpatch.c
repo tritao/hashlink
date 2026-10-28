@@ -1445,9 +1445,14 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 	for(int i=0;i<patch->function_count;i++){int slot=allocation->functions[i].findex;hl_patch_code *old=m->patch_owners[slot];void *target=(unsigned char*)allocation->code+offsets[i];hl_module_redirect_slot(m,slot,target);m->patch_owners[slot]=allocation;allocation->references++;if(old&&--old->references==0){if(m->patch_targets){old->next_retired=superseded;superseded=old;}else{old->next_retired=m->retired_patch_code;patch_store(m->retired_patch_code,old);}}}
 	publish_added_functions(m,patch);staged_added=false;
 	patch_live_publish(m,live_block);live_block=NULL;
-	// Stable dispatch no longer reaches superseded code; only a concurrent reader may still hold it.
-	if(superseded&&patch_readers_get()==0)while(superseded){hl_patch_code *next=superseded->next_retired;patch_code_free(superseded);superseded=next;}
-	while(superseded){hl_patch_code *next=superseded->next_retired;superseded->next_retired=m->retired_patch_code;patch_store(m->retired_patch_code,superseded);superseded=next;}
+	// Stable dispatch no longer reaches superseded code. A concurrent reader may still hold it, and so may a thread stopped
+	// inside it, which returns there once the world restarts: code a stopped thread's stack points into is retired, not freed.
+	while(superseded){
+		hl_patch_code *next=superseded->next_retired;
+		if(patch_readers_get()==0&&!hl_gc_threads_reference(superseded->code,(unsigned char*)superseded->code+superseded->code_size))patch_code_free(superseded);
+		else{superseded->next_retired=m->retired_patch_code;patch_store(m->retired_patch_code,superseded);}
+		superseded=next;
+	}
 	free(layout.indexes);layout.indexes=NULL;
 	if(m->patch_ustrings==NULL)m->patch_initial_string_count=patch->base_string_count;
 	free(m->patch_ints);free(m->patch_floats);free(m->patch_strings);free(m->patch_string_lens);free(m->patch_ustrings);free(m->patch_string_data);

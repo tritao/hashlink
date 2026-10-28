@@ -2645,6 +2645,29 @@ HL_API void hl_gc_exclusive_begin() {
 	gc_exclusive_depth++;
 }
 
+static bool gc_range_references( void **start, void **end, void *lo, void *hi ) {
+	for(void **p = start; p < end; p++)
+		if( (unsigned char*)*p >= (unsigned char*)lo && (unsigned char*)*p < (unsigned char*)hi ) return true;
+	return false;
+}
+
+/*
+ * Whether a stopped thread other than the caller may hold an address in [lo,hi): a word of its stack, saved registers or
+ * saved stack data, which hold its return addresses. Only meaningful inside an exclusive section, where every other
+ * thread is stopped with its context saved.
+ */
+HL_API bool hl_gc_threads_reference( void *lo, void *hi ) {
+	for(int i=0;i<gc_threads.count;i++) {
+		hl_thread_info *t = gc_threads.threads[i];
+		if( t == current_thread ) continue;
+		if( gc_range_references((void**)t->stack_cur,(void**)t->stack_top,lo,hi)
+			|| gc_range_references((void**)&t->gc_regs,(void**)&t->gc_regs + (sizeof(jmp_buf) / sizeof(void*) - 1),lo,hi)
+			|| gc_range_references((void**)&t->extra_stack_data,(void**)&t->extra_stack_data + t->extra_stack_size,lo,hi) )
+			return true;
+	}
+	return false;
+}
+
 HL_API void hl_gc_exclusive_end() {
 	if( gc_exclusive_depth <= 0 ) hl_fatal("Unbalanced exclusive GC section");
 	gc_exclusive_depth--;

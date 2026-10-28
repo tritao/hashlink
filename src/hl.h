@@ -868,6 +868,8 @@ HL_API void hl_gc_live_instances_release( void **instances );
  */
 HL_API void hl_gc_exclusive_begin( void );
 HL_API void hl_gc_exclusive_end( void );
+/** Inside an exclusive section: whether another thread's stack or saved registers hold an address in [lo,hi). */
+HL_API bool hl_gc_threads_reference( void *lo, void *hi );
 // Opt-in, best-effort microsecond budget. True means the cycle completed (including fallback).
 HL_API bool hl_gc_step( double budget_micros );
 // Shared soft allowance until the next host frame boundary; -1 records unlimited
