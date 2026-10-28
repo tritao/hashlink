@@ -2787,6 +2787,35 @@ HL_API bool hl_gc_threads_reference( void *lo, void *hi ) {
 	return false;
 }
 
+static bool gc_range_holds( void **start, void **end, void *value ) {
+	for(void **p = start; p < end; p++)
+		if( *p == value ) return true;
+	return false;
+}
+
+/*
+ * What outside the heap holds `value`: 1 for a root (`hl_add_root`: a native's, or a module global), with `*root` the
+ * root's address; 2 for a thread's stack, saved registers or saved stack data; 0 for neither. The calling thread counts
+ * only for its frames above `stack_floor`, its callers'. Only meaningful inside an exclusive section.
+ */
+HL_API int hl_gc_root_holder( void *value, void *stack_floor, void ***root ) {
+	*root = NULL;
+	for(int i=0;i<gc_roots_count;i++)
+		if( *gc_roots[i] == value ) { *root = gc_roots[i]; return 1; }
+	for(int i=0;i<gc_threads.count;i++) {
+		hl_thread_info *t = gc_threads.threads[i];
+		if( t == current_thread ) {
+			if( stack_floor && gc_range_holds((void**)stack_floor,(void**)t->stack_top,value) ) return 2;
+			continue;
+		}
+		if( gc_range_holds((void**)t->stack_cur,(void**)t->stack_top,value)
+			|| gc_range_holds((void**)&t->gc_regs,(void**)&t->gc_regs + (sizeof(jmp_buf) / sizeof(void*) - 1),value)
+			|| gc_range_holds((void**)&t->extra_stack_data,(void**)&t->extra_stack_data + t->extra_stack_size,value) )
+			return 2;
+	}
+	return 0;
+}
+
 HL_API void hl_gc_exclusive_end() {
 	if( gc_exclusive_depth <= 0 ) hl_fatal("Unbalanced exclusive GC section");
 	gc_exclusive_depth--;

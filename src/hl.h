@@ -870,6 +870,8 @@ HL_API void hl_gc_exclusive_begin( void );
 HL_API void hl_gc_exclusive_end( void );
 /** Inside an exclusive section: whether another thread's stack or saved registers hold an address in [lo,hi). */
 HL_API bool hl_gc_threads_reference( void *lo, void *hi );
+/** Inside an exclusive section: 1 when a root holds `value` (`*root` is where), 2 when a thread's stack or registers do (the caller's above `stack_floor`), else 0. */
+HL_API int hl_gc_root_holder( void *value, void *stack_floor, void ***root );
 /** Live closures whose code is one of `funs`, pinned until `hl_gc_live_instances_release`; the count, or -1. */
 HL_API int hl_gc_live_closures( void **funs, int nfuns, void ***out );
 /** A live block other than `skip` holding `target`, with the offset of the word, and whether the block is typed; or NULL. */

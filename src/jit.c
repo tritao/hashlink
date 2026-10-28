@@ -66,7 +66,7 @@ void hl_jit_assert() {
 void hl_emit_alloc( jit_ctx *jit );
 void hl_emit_free( jit_ctx *jit );
 void hl_emit_function( jit_ctx *jit );
-void hl_emit_final( jit_ctx *jit );
+bool hl_emit_final( jit_ctx *jit );
 
 void hl_regs_alloc( jit_ctx *jit );
 void hl_regs_free( jit_ctx *jit );
@@ -454,7 +454,13 @@ static void *hl_jit_code_finalize( jit_ctx *ctx, hl_module *m, int *codesize, hl
 	*codesize = size;
 	*debug = m->jit_debug;
 	ctx->final_code = code;
-	hl_emit_final(ctx);
+	if( !hl_emit_final(ctx) ) {
+		// Out of memory listing the code's static closures: no code rather than code the patch guard cannot see.
+		hl_jit_write_end(code,size);
+		hl_free_executable_memory(code,size);
+		ctx->final_code = NULL;
+		return NULL;
+	}
 		hl_codegen_final(ctx);
 	hl_jit_write_end(code,size);
 	if( publish_wrappers ) {
