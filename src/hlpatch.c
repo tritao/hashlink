@@ -1409,7 +1409,14 @@ static bool patch_holder_path( void *value, char *out, int size, int depth ) {
 		return true;
 	}
 	case HARRAY: {
-		int index = (offset - (int)sizeof(varray)) / (int)sizeof(void*);
+		// A native array keeps its elements in a storage block of its own, which starts with the array type too: the array's
+		// path is its storage's, and an element's index counts from after the storage's type word.
+		if( *(hl_type**)value == &hlt_array && offset == (int)offsetof(varray,data) ) {
+			if( depth > 0 && patch_holder_path(block,out,size,depth - 1) ) return true;
+			snprintf(out,size,"an array");
+			return true;
+		}
+		int index = (offset - HL_WSIZE) / HL_WSIZE;
 		if( depth > 0 && patch_holder_path(block,parent,sizeof(parent),depth - 1) ) snprintf(out,size,"%s[%d]",parent,index);
 		else snprintf(out,size,"an array's element %d",index);
 		return true;
