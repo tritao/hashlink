@@ -1130,25 +1130,30 @@ static bool type_extends( hl_type *t, hl_type *base ) {
 }
 
 int hl_module_patch_migrate( hl_module *m, hl_patch *patch, int *failures, vdynamic **first_exception ) {
-	int migrated=0;
+	int migrated=0,ntypes=0,count;hl_type **types;void **found=NULL;varray *instances;
 	if(failures)*failures=0;
 	if(first_exception)*first_exception=NULL;
-	if(m==NULL||patch==NULL)return 0;
+	if(m==NULL||patch==NULL||patch->migration_count==0)return 0;
+	// One mark finds the instances of every migrated class: each mark walks the whole heap.
+	types=(hl_type**)malloc(sizeof(hl_type*)*(m->code->ntypes>0?m->code->ntypes:1));
+	if(!types){if(failures)*failures=patch->migration_count;return 0;}
+	for(int j=0;j<m->code->ntypes;j++){
+		hl_type *t=m->code->types+j;
+		if(t->kind!=HOBJ)continue;
+		for(int i=0;i<patch->migration_count;i++)if(type_extends(t,m->code->types+patch->migrations[i].type)){types[ntypes++]=t;break;}
+	}
+	count=hl_gc_live_instances(types,ntypes,&found);
+	free(types);
+	if(count<0){if(failures)*failures=patch->migration_count;return 0;}
+	if(count==0){free(found);return 0;}
+	// The objects were reachable when marked and nothing has run since, so they survive this allocation; the array then
+	// roots them while the migrations run code that allocates. Objects that code makes ran their constructors.
+	instances=hl_alloc_array(&hlt_dyn,count);
+	memcpy(hl_aptr(instances,void*),found,sizeof(void*)*count);
+	free(found);
+	// The compiler orders migrations bases first, so a subclass's initializers see its base's added fields set.
 	for(int i=0;i<patch->migration_count;i++){
-		hl_patch_migration *migration=patch->migrations+i;hl_type *base=m->code->types+migration->type,**types;void **found=NULL;int ntypes=0,count;
-		varray *instances;vclosure closure;
-		types=(hl_type**)malloc(sizeof(hl_type*)*(m->code->ntypes>0?m->code->ntypes:1));
-		if(!types){if(failures)(*failures)++;continue;}
-		for(int j=0;j<m->code->ntypes;j++)if(m->code->types[j].kind==HOBJ&&type_extends(m->code->types+j,base))types[ntypes++]=m->code->types+j;
-		count=hl_gc_live_instances(types,ntypes,&found);
-		free(types);
-		if(count<0){if(failures)(*failures)++;continue;}
-		if(count==0){free(found);continue;}
-		// The objects were reachable when marked and nothing has run since, so they survive this allocation; the array then
-		// roots them while the migration runs code that allocates.
-		instances=hl_alloc_array(&hlt_dyn,count);
-		memcpy(hl_aptr(instances,void*),found,sizeof(void*)*count);
-		free(found);
+		hl_patch_migration *migration=patch->migrations+i;hl_type *base=m->code->types+migration->type;vclosure closure;
 		closure.t=m->code->functions[m->functions_indexes[migration->findex]].type;
 		closure.fun=m->functions_ptrs[migration->findex];
 		closure.hasValue=0;
@@ -1156,6 +1161,7 @@ int hl_module_patch_migrate( hl_module *m, hl_patch *patch, int *failures, vdyna
 		for(int j=0;j<count;j++){
 			vdynamic *args[1],*result;bool raised=false;
 			args[0]=hl_aptr(instances,vdynamic*)[j];
+			if(!type_extends(args[0]->t,base))continue;
 			result=hl_dyn_call_safe(&closure,args,1,&raised);
 			if(raised){if(failures)(*failures)++;if(first_exception&&*first_exception==NULL)*first_exception=result;}
 			else migrated++;
