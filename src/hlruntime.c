@@ -523,6 +523,8 @@ hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const
 	// whether it can keep running it.
 	migration_failed = applied && (migration.failures > 0 || migration.error != NULL);
 	if( migration_failed ) runtime->patch_message = migration_failure_message(&migration);
+	// A patch the module refused says why, for the caller to report.
+	if( !applied && error != NULL ) runtime->patch_message = ascii_message(error);
 	hl_patch_free(patch);
 	hl_mutex_release(runtime->lock);
 	if( applied ) {
@@ -532,6 +534,14 @@ hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const
 	}
 	if( error != NULL && strcmp(error,"Stale patch revision") == 0 ) return HL_RUNTIME_STALE_PATCH;
 	return HL_RUNTIME_INCOMPATIBLE;
+}
+
+static uchar *ascii_message( const char *text ) {
+	int size = (int)strlen(text) + 1;
+	uchar *message = (uchar*)malloc(sizeof(uchar) * size);
+	if( message == NULL ) return NULL;
+	for(int i=0;i<size;i++) message[i] = (uchar)(unsigned char)text[i];
+	return message;
 }
 
 const uchar *hl_runtime_module_patch_message( hl_runtime_module *runtime ) {
