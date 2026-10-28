@@ -1177,7 +1177,6 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	if(!validate_patch_object_fields(m,patch,patch->base_string_count+patch->string_count,&error))goto fail;
 	if(!stage_patch_layout(m,patch,&layout,&error))goto fail;
 	combined_functions=layout.functions; // owned through combined_functions from here
-	if(!validate_patch_migrations(m,patch,&layout,&error))goto fail;
 	for(int i=0;i<patch->function_count;i++){for(int j=0;j<i;j++)if(patch->functions[j].findex==patch->functions[i].findex){error="Duplicate stable function slot";goto fail;}if(!validate_function(m,patch,&layout,patch->functions+i,&error))goto fail;}
 	combined_ints=(int*)malloc(sizeof(int)*(patch->base_int_count+patch->int_count));if(!combined_ints){error="Out of memory applying patch";goto fail;}memcpy(combined_ints,m->code->ints,sizeof(int)*patch->base_int_count);memcpy(combined_ints+patch->base_int_count,patch->ints,sizeof(int)*patch->int_count);
 	combined_floats=(double*)malloc(sizeof(double)*(patch->base_float_count+patch->float_count));if(!combined_floats){error="Out of memory applying patch";goto fail;}memcpy(combined_floats,m->code->floats,sizeof(double)*patch->base_float_count);memcpy(combined_floats+patch->base_float_count,patch->floats,sizeof(double)*patch->float_count);
@@ -1185,6 +1184,8 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, const char **error_
 	if(inject_patch_failure(m,1,&error))goto fail;
 	if(!stage_patch_types(m,patch,combined_ustrings,&type_allocations,&type_allocation_count,&error))goto fail;
 	if(!stage_patch_object_fields(m,patch,combined_ustrings,&staged_fields,&error))goto fail;
+	// A migration's function type may be one the patch appends, which exists once staged.
+	if(!validate_patch_migrations(m,patch,&layout,&error))goto fail;
 	if(inject_patch_failure(m,2,&error))goto fail;
 	allocation=(hl_patch_code*)calloc(1,sizeof(hl_patch_code));if(!allocation){error="Out of memory applying patch";goto fail;}
 	allocation->revision=patch->revision;
