@@ -1365,8 +1365,16 @@ void hl_emit_final( jit_ctx *jit ) {
 	vclosure *l = ctx->closure_list;
 	while( l ) {
 		vclosure *n = (vclosure*)l->value;
+		hl_module *m = jit->mod;
 		l->value = NULL;
 		l->fun = jit->final_code + (int_val)jit->mod->functions_ptrs[(int_val)l->fun];
+		// A patch that drops a function checks no stored closure reaches it, these included (`hl_patch_guard`).
+		if( m->static_closure_count == m->static_closure_capacity ) {
+			int capacity = m->static_closure_capacity ? m->static_closure_capacity * 2 : 64;
+			vclosure **list = (vclosure**)realloc(m->static_closures,sizeof(vclosure*) * capacity);
+			if( list != NULL ) { m->static_closures = list; m->static_closure_capacity = capacity; }
+		}
+		if( m->static_closure_count < m->static_closure_capacity ) m->static_closures[m->static_closure_count++] = l;
 		l = n;
 	}
 	ctx->closure_list = NULL;

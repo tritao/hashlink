@@ -580,6 +580,8 @@ void hl_patch_free( hl_patch *patch ) {
 	free(patch->globals);
 	free(patch->object_fields);
 	free(patch->migrations);
+	for(i=0;i<patch->guard_count;i++) free(patch->guards[i].description);
+	free(patch->guards);
 	for(i=0;i<patch->debug_file_count;i++) free(patch->debug_files[i]);
 	for(i=0;i<patch->source_snapshot_count;i++) free(patch->source_snapshots[i].content);
 	free(patch->source_snapshots);
@@ -590,7 +592,7 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 	patch_reader r = { data, data + (size < 0 ? 0 : size), NULL };
 	hl_patch *patch = (hl_patch*)calloc(1,sizeof(hl_patch));
 	const unsigned char *p; int version, i, j, count, tag, section_count, section_length;
-	bool have_symbols = false, have_functions = false, have_debug = false, have_snapshots = false, have_added = false, have_globals = false, have_object_fields = false, have_migrations = false;
+	bool have_symbols = false, have_functions = false, have_debug = false, have_snapshots = false, have_added = false, have_globals = false, have_object_fields = false, have_migrations = false, have_guards = false;
 #define FAIL(msg) do { r.error = msg; goto fail; } while(0)
 	if( patch == NULL ) FAIL("Out of memory reading HLP");
 	if( !take(&r,3,&p) ) goto fail;
@@ -724,6 +726,19 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 				if(!read_count(&s,&migration->type)||!read_count(&s,&migration->stable_id))goto section_fail;
 				migration->findex=-1;
 				for(j=0;j<i;j++)if(patch->migrations[j].type==migration->type)FAIL("Duplicate HLP migration");
+			}
+		} else if( tag == 9 ) {
+			if( have_guards ) FAIL("Duplicate HLP guards section");
+			have_guards=true;
+			if(!read_count(&s,&patch->guard_count))goto section_fail;
+			if(patch->guard_count<=0||patch->guard_count>(s.end-s.p)/2)FAIL("Invalid HLP guards section");
+			patch->guards=(hl_patch_guard*)calloc(patch->guard_count,sizeof(hl_patch_guard));if(!patch->guards)FAIL("Out of memory reading patch guards");
+			for(i=0;i<patch->guard_count;i++){
+				hl_patch_guard *guard=patch->guards+i;
+				if(!read_count(&s,&guard->stable_id)||!read_count(&s,&count)||!take(&s,count,&p))goto section_fail;
+				guard->findex=-1;
+				guard->description=(char*)malloc(count+1);if(!guard->description)FAIL("Out of memory reading patch guards");
+				memcpy(guard->description,p,count);guard->description[count]=0;
 			}
 		} else {
 			s.p = s.end;
@@ -1355,6 +1370,125 @@ static void migrate_patch_instances( hl_module *m, hl_patch *patch, hl_patch_mig
 	hl_gc_live_instances_release(found);
 }
 
+/* `text`, UTF-16, as ASCII into `out`; anything else becomes '?'. */
+static void patch_ascii( const uchar *text, char *out, int size ) {
+	int i = 0;
+	for(;text && text[i] && i < size - 1;i++) out[i] = text[i] < 128 ? (char)text[i] : '?';
+	out[i] = 0;
+}
+
+/*
+ * Where `value` is held, as a path a person can follow, like `App.keyHandlers[3]`: the static field, object field or array
+ * element holding it, walked back through what holds those. False when no heap block holds it (a root may: a thread's stack,
+ * a native root).
+ */
+static bool patch_holder_path( void *value, char *out, int size, int depth ) {
+	int offset; bool typed;
+	char parent[256], name[128];
+	void *block = hl_gc_find_referrer(value,NULL,&offset,&typed);
+	if( block == NULL ) return false;
+	if( !typed ) { snprintf(out,size,"a native structure"); return true; }
+	hl_type *t = *(hl_type**)block;
+	switch( t->kind ) {
+	case HOBJ:
+	case HSTRUCT: {
+		hl_runtime_obj *rt = hl_get_obj_rt(t);
+		const char *field = "?";
+		char fieldName[128];
+		patch_ascii(t->obj->name,name,sizeof(name));
+		for(int i=0;i<rt->nfields;i++)
+			if( rt->fields_indexes[i] == offset ) { patch_ascii(hl_obj_field_fetch(t,i)->name,fieldName,sizeof(fieldName)); field = fieldName; break; }
+		// A class's static fields are the fields of its global object, `$Class`.
+		if( name[0] == '$' ) { snprintf(out,size,"%s.%s",name + 1,field); return true; }
+		// An Array keeps its elements in a native array; its path is the Array's.
+		bool storage = strcmp(field,"array") == 0 && strncmp(name,"hl.types.Array",14) == 0;
+		if( depth > 0 && patch_holder_path(block,parent,sizeof(parent),depth - 1) ) {
+			if( storage ) snprintf(out,size,"%s",parent); else snprintf(out,size,"%s.%s",parent,field);
+		} else
+			snprintf(out,size,"a %s's %s",name,field);
+		return true;
+	}
+	case HARRAY: {
+		int index = (offset - (int)sizeof(varray)) / (int)sizeof(void*);
+		if( depth > 0 && patch_holder_path(block,parent,sizeof(parent),depth - 1) ) snprintf(out,size,"%s[%d]",parent,index);
+		else snprintf(out,size,"an array's element %d",index);
+		return true;
+	}
+	case HDYNOBJ:
+	case HVIRTUAL:
+		snprintf(out,size,"an anonymous object");
+		return true;
+	default:
+		snprintf(out,size,"a value of kind %d",t->kind);
+		return true;
+	}
+}
+
+/* The code addresses a closure of `slot` may hold: the slot's entry and stub, and the code patches put behind them. */
+static int patch_slot_entries( hl_module *m, int slot, void **out ) {
+	void *candidates[4];
+	int count = 0;
+	candidates[0] = m->functions_ptrs[slot];
+	candidates[1] = m->patch_origin ? m->patch_origin[slot] : NULL;
+	candidates[2] = m->patch_entry_code ? (unsigned char*)m->patch_entry_code + slot * HL_JIT_PATCH_ENTRY_STRIDE : NULL;
+	candidates[3] = m->patch_targets ? m->patch_targets[slot] : NULL;
+	for(int i=0;i<4;i++) {
+		bool seen = candidates[i] == NULL;
+		for(int j=0;j<count&&!seen;j++) seen = out[j] == candidates[i];
+		if( !seen ) out[count++] = candidates[i];
+	}
+	return count;
+}
+
+/*
+ * Whether the stored closures leave every guarded function of `patch` unreachable (`hl_patch_guard`). Runs with every
+ * other thread stopped, before anything commits, so no closure can be made between the check and the commit, and a
+ * refused patch leaves the module as it was. On refusal `*error` says which function, how many closures and where.
+ */
+static bool check_patch_guards( hl_module *m, hl_patch *patch, const char **error ) {
+	for(int g=0;g<patch->guard_count;g++) {
+		hl_patch_guard *guard = patch->guards + g;
+		void *entries[4], **found = NULL;
+		int nentries = patch_slot_entries(m,guard->findex,entries), held = 0, named = 0;
+		char holders[512] = "", path[256];
+		int count = hl_gc_live_closures(entries,nentries,&found);
+		if( count < 0 ) { *error = "Out of memory checking stored closures"; return false; }
+		for(int i=0;i<count;i++) {
+			held++;
+			if( named < 3 ) {
+				if( !patch_holder_path(found[i],path,sizeof(path),6) ) snprintf(path,sizeof(path),"a running thread or a native root");
+				if( named ) strncat(holders,", ",sizeof(holders) - strlen(holders) - 1);
+				strncat(holders,path,sizeof(holders) - strlen(holders) - 1);
+				named++;
+			}
+		}
+		hl_gc_live_instances_release(found);
+		// The closures the module made at load are not GC blocks: they count only when something stores them.
+		for(int i=0;i<m->static_closure_count;i++) {
+			vclosure *c = m->static_closures[i];
+			bool match = false;
+			for(int j=0;j<nentries&&!match;j++) match = c->fun == entries[j];
+			if( !match || !patch_holder_path(c,path,sizeof(path),6) ) continue;
+			held++;
+			if( named < 3 ) {
+				if( named ) strncat(holders,", ",sizeof(holders) - strlen(holders) - 1);
+				strncat(holders,path,sizeof(holders) - strlen(holders) - 1);
+				named++;
+			}
+		}
+		if( held == 0 ) continue;
+		free(m->patch_refusal);
+		int size = (int)strlen(guard->description) + (int)strlen(holders) + 128;
+		m->patch_refusal = (char*)malloc(size);
+		if( m->patch_refusal == NULL ) { *error = "Stored closures still reach a function the patch drops"; return false; }
+		snprintf(m->patch_refusal,size,"%s; %d stored closure%s still reference%s it (held by %s%s)",guard->description,held,held == 1 ? "" : "s",
+			held == 1 ? "s" : "",holders,held > named ? ", ..." : "");
+		*error = m->patch_refusal;
+		return false;
+	}
+	return true;
+}
+
 h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_report *report, const char **error_msg ) {
 	hl_patch_migration_report ignored;const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;hl_code code;hl_module temp;patch_layout layout={0};bool staged_added=false;hl_patch_live *live_block=NULL;hl_patch_code *superseded=NULL;int globals_size=0;bool staged_globals=false;patch_object_field_stage *staged_fields=NULL;
 	if(report==NULL)report=&ignored;
@@ -1429,6 +1563,9 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 	 * new code on an instance the migrations have not reached yet. A thread stopped inside an old function finishes it.
 	 */
 	hl_gc_exclusive_begin();
+	// The last check: closures the program stored may still reach a function this patch drops. Every other thread is stopped,
+	// so none can be made before the commit, and a refusal leaves the module untouched.
+	if(patch->guard_count>0&&!check_patch_guards(m,patch,&error)){hl_gc_exclusive_end();goto fail;}
 	for(int i=0;i<type_allocation_count;i++)m->patch_type_allocations[m->patch_type_allocation_count++]=type_allocations[i];
 	free(type_allocations);type_allocations=NULL;type_allocation_count=0;for(int i=m->code->ntypes;i<code.ntypes;i++)m->code->types[i].gc_owner=m;m->code->ntypes=code.ntypes;
 	// A constant must exist before any code can read its global; the strings it points to are the patch's, which outlive it.

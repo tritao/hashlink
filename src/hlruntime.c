@@ -521,6 +521,10 @@ hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const
 		patch->migrations[i].findex = resolve_patch_stable_id(runtime,patch,patch->migrations[i].stable_id);
 		if( patch->migrations[i].findex < 0 ) { hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE; }
 	}
+	for(int i=0;i<patch->guard_count;i++) {
+		patch->guards[i].findex = resolve_stable_id(runtime,patch->guards[i].stable_id);
+		if( patch->guards[i].findex < 0 ) { hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE; }
+	}
 	applied = hl_module_apply_patch(runtime->module,patch,&migration,&error);
 	if( applied )
 		for(int i=0;i<patch->added_function_count;i++) {
@@ -542,6 +546,7 @@ hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const
 		return migration_failed ? HL_RUNTIME_MIGRATION_FAILED : HL_RUNTIME_OK;
 	}
 	if( error != NULL && strcmp(error,"Stale patch revision") == 0 ) return HL_RUNTIME_STALE_PATCH;
+	if( error != NULL && error == runtime->module->patch_refusal ) return HL_RUNTIME_CLOSURES_HELD;
 	return HL_RUNTIME_INCOMPATIBLE;
 }
 

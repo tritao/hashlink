@@ -273,6 +273,18 @@ typedef struct {
 	int findex;
 } hl_patch_migration;
 
+/*
+ * A function the patch leaves behind that closures the running program stored may still reach: one the edit removed, or
+ * one whose signature changed with no adapter to bridge the old calls. The patch applies only when no live closure refers
+ * to it (`hl_module_apply_patch`); `description` says what happened to it, for the refusal. The runtime resolves
+ * `stable_id` to `findex` before applying the patch.
+ */
+typedef struct {
+	int stable_id;
+	int findex;
+	char *description;
+} hl_patch_guard;
+
 typedef struct {
 	unsigned char module_id[16];
 	int base_revision;
@@ -308,6 +320,8 @@ typedef struct {
 	hl_patch_object_field *object_fields;
 	int migration_count;
 	hl_patch_migration *migrations;
+	int guard_count;
+	hl_patch_guard *guards;
 } hl_patch;
 
 HL_EXTERN_C HL_EXPORT hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error_msg );
@@ -402,6 +416,12 @@ typedef struct {
 	void *patch_hi;
 	/* The distinct allocations patch_owners refers to, ordered by code address; replaced when a patch commits. */
 	hl_patch_live *patch_live;
+	/* The closures the module's own code makes once, at load (OStaticClosure): module memory, not the GC heap. */
+	vclosure **static_closures;
+	int static_closure_count;
+	int static_closure_capacity;
+	/* Why the last patch was refused because stored closures still reach a guarded function (`hl_patch_guard`). */
+	char *patch_refusal;
 } hl_module;
 
 HL_EXTERN_C HL_EXPORT hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg );
@@ -561,7 +581,9 @@ typedef enum {
 	HL_RUNTIME_STALE_PATCH, HL_RUNTIME_INCOMPATIBLE, HL_RUNTIME_JIT_FAILED,
 	HL_RUNTIME_BAD_FUNCTION, HL_RUNTIME_EXCEPTION, HL_RUNTIME_RETIRE_BLOCKED,
 	/* The patch applied, but initializers of the fields it added threw; `hl_runtime_module_patch_message` says which. */
-	HL_RUNTIME_MIGRATION_FAILED
+	HL_RUNTIME_MIGRATION_FAILED,
+	/* Nothing applied: stored closures still reach a function the patch removes or cannot adapt; the message says which. */
+	HL_RUNTIME_CLOSURES_HELD
 } hl_runtime_status;
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int stable_id, int *result, vdynamic **exception );
@@ -575,7 +597,7 @@ HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_object( hl_runtim
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32_object( hl_runtime_module *runtime, int stable_id, vdynamic *argument, int *result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_validate_call( hl_runtime_module *runtime, int stable_id, int shape );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const unsigned char *bytes, int length );
-/** Why the last `hl_runtime_module_apply_hlp` returned HL_RUNTIME_MIGRATION_FAILED, or NULL; owned by the runtime. */
+/** Why the last `hl_runtime_module_apply_hlp` did not return HL_RUNTIME_OK, when it says, or NULL; owned by the runtime. */
 HL_EXTERN_C HL_EXPORT const uchar *hl_runtime_module_patch_message( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_debug_region_count( hl_runtime_module *runtime );

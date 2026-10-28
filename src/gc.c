@@ -2623,6 +2623,125 @@ HL_API int hl_gc_live_instances( hl_type **types, int ntypes, void ***out ) {
 	return live_instances.count;
 }
 
+typedef struct {
+	void **funs;
+	int nfuns;
+	void **found;
+	int count;
+	int capacity;
+	bool failed;
+} gc_live_closures;
+static gc_live_closures live_closures;
+
+static void gc_collect_live_closure( void *block, int size ) {
+	vclosure *c = (vclosure*)block;
+	if( size < (int)sizeof(vclosure) ) return;
+	for(int i=0;i<live_closures.nfuns;i++) {
+		if( c->fun != live_closures.funs[i] ) continue;
+		// Every block of a dynamic page starts with its type, so only now that the code matches is it read.
+		if( c->t == NULL || c->t->kind != HFUN ) return;
+		if( live_closures.count == live_closures.capacity ) {
+			int capacity = live_closures.capacity ? live_closures.capacity * 2 : 16;
+			void **found = (void**)realloc(live_closures.found,sizeof(void*) * capacity);
+			if( found == NULL ) { live_closures.failed = true; return; }
+			live_closures.found = found;
+			live_closures.capacity = capacity;
+		}
+		live_closures.found[live_closures.count++] = block;
+		return;
+	}
+}
+
+static void gc_collect_live_closure_page( gc_pheader *p, int private_data ) {
+	if( p->page_kind == MEM_KIND_DYNAMIC )
+		gc_iter_live_blocks(p, gc_collect_live_closure);
+}
+
+/*
+ * Every live closure whose code is one of `funs`, after a full mark, pinned like `hl_gc_live_instances` until
+ * `hl_gc_live_instances_release`. Closures the module made at load (OStaticClosure) are module memory, not GC blocks;
+ * the module lists them itself. Returns the count, or -1 when out of memory.
+ */
+HL_API int hl_gc_live_closures( void **funs, int nfuns, void ***out ) {
+	gc_pinned_list *pinned = (gc_pinned_list*)malloc(sizeof(gc_pinned_list));
+	*out = NULL;
+	if( pinned == NULL ) return -1;
+	gc_global_lock(true);
+	gc_stop_world(true);
+	gc_mark();
+	live_closures.funs = funs;
+	live_closures.nfuns = nfuns;
+	live_closures.found = NULL;
+	live_closures.count = 0;
+	live_closures.capacity = 0;
+	live_closures.failed = false;
+	gc_iter_pages(gc_collect_live_closure_page);
+	if( !live_closures.failed ) {
+		pinned->values = live_closures.found;
+		pinned->count = live_closures.count;
+		pinned->next = gc_pinned_lists;
+		gc_pinned_lists = pinned;
+	}
+	gc_stop_world(false);
+	gc_global_lock(false);
+	if( live_closures.failed ) { free(live_closures.found); free(pinned); return -1; }
+	if( pinned->values == NULL ) pinned->values = (void**)malloc(sizeof(void*));
+	*out = pinned->values;
+	return live_closures.count;
+}
+
+static struct {
+	void *target;
+	void *skip;
+	void *block;
+	int offset;
+	bool typed;
+	bool page_typed;
+} gc_referrer;
+
+static void gc_find_referrer_block( void *block, int size ) {
+	void **words = (void**)block;
+	if( gc_referrer.block != NULL || block == gc_referrer.skip ) return;
+	for(int i=0;i<size/(int)sizeof(void*);i++)
+		if( words[i] == gc_referrer.target ) {
+			gc_referrer.block = block;
+			gc_referrer.offset = i * (int)sizeof(void*);
+			gc_referrer.typed = gc_referrer.page_typed;
+			return;
+		}
+}
+
+static void gc_find_referrer_page( gc_pheader *p, int private_data ) {
+	if( gc_referrer.block != NULL || p->page_kind == MEM_KIND_NOPTR ) return;
+	gc_referrer.page_typed = p->page_kind == MEM_KIND_DYNAMIC;
+	gc_iter_live_blocks(p, gc_find_referrer_block);
+}
+
+/*
+ * A live block other than `skip` that holds `target` in one of its words, after a full mark: `offset` is where, and
+ * `typed` says whether the block starts with its type (a dynamic page) or is raw storage. NULL when no block holds it,
+ * though a root (a global, a thread's stack, a native root) may. Meant for describing what keeps something alive; it scans
+ * the whole heap.
+ */
+HL_API void *hl_gc_find_referrer( void *target, void *skip, int *offset, bool *typed ) {
+	void *block;
+	gc_global_lock(true);
+	gc_stop_world(true);
+	gc_mark();
+	gc_referrer.target = target;
+	gc_referrer.skip = skip;
+	gc_referrer.block = NULL;
+	gc_referrer.offset = 0;
+	gc_referrer.typed = false;
+	gc_iter_pages(gc_find_referrer_page);
+	block = gc_referrer.block;
+	*offset = gc_referrer.offset;
+	*typed = gc_referrer.typed;
+	gc_stop_world(false);
+	gc_global_lock(false);
+	return block;
+}
+
 HL_API void hl_gc_live_instances_release( void **instances ) {
 	gc_pinned_list *found = NULL;
 	if( instances == NULL ) return;

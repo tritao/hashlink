@@ -1746,6 +1746,8 @@ void hl_module_free_shutdown( hl_module *m ) {
 	if( m->patch_entry_code ) hl_free_executable_memory(m->patch_entry_code,m->patch_entry_code_size);
 	free(m->patch_targets);
 	free(m->patch_origin);
+	free(m->static_closures);
+	free(m->patch_refusal);
 	hl_free_executable_memory(m->jit_code, m->codesize);
 	if( m->hash ) hl_code_hash_free(m->hash);
 	free(m->functions_indexes);
