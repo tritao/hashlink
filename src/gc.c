@@ -2626,6 +2626,9 @@ HL_API int hl_gc_live_instances( hl_type **types, int ntypes, void ***out ) {
 typedef struct {
 	void **funs;
 	int nfuns;
+	void *types_lo;
+	void *types_hi;
+	bool noptr;
 	void **found;
 	int count;
 	int capacity;
@@ -2638,8 +2641,13 @@ static void gc_collect_live_closure( void *block, int size ) {
 	if( size < (int)sizeof(vclosure) ) return;
 	for(int i=0;i<live_closures.nfuns;i++) {
 		if( c->fun != live_closures.funs[i] ) continue;
-		// Every block of a dynamic page starts with its type, so only now that the code matches is it read.
-		if( c->t == NULL || c->t->kind != HFUN ) return;
+		if( live_closures.noptr ) {
+			// A closure without a value (`hl_alloc_closure_void`, which patch code calls for OStaticClosure) lives on a page
+			// of raw data, whose blocks need not start with a type: it counts only when it looks like one, its type one of
+			// the module's, which is never read.
+			if( c->hasValue || c->value != NULL || (void*)c->t < live_closures.types_lo || (void*)c->t >= live_closures.types_hi ) return;
+		} else if( c->t == NULL || c->t->kind != HFUN )
+			return; // every block of a dynamic page starts with its type, so only now that the code matches is it read
 		if( live_closures.count == live_closures.capacity ) {
 			int capacity = live_closures.capacity ? live_closures.capacity * 2 : 16;
 			void **found = (void**)realloc(live_closures.found,sizeof(void*) * capacity);
@@ -2653,16 +2661,18 @@ static void gc_collect_live_closure( void *block, int size ) {
 }
 
 static void gc_collect_live_closure_page( gc_pheader *p, int private_data ) {
-	if( p->page_kind == MEM_KIND_DYNAMIC )
-		gc_iter_live_blocks(p, gc_collect_live_closure);
+	if( p->page_kind != MEM_KIND_DYNAMIC && p->page_kind != MEM_KIND_NOPTR ) return;
+	live_closures.noptr = p->page_kind == MEM_KIND_NOPTR;
+	gc_iter_live_blocks(p, gc_collect_live_closure);
 }
 
 /*
  * Every live closure whose code is one of `funs`, after a full mark, pinned like `hl_gc_live_instances` until
  * `hl_gc_live_instances_release`. Closures the module made at load (OStaticClosure) are module memory, not GC blocks;
- * the module lists them itself. Returns the count, or -1 when out of memory.
+ * the module lists them itself. A closure without a value is raw data; it counts when its type is in
+ * [types_lo,types_hi), the module's types. Returns the count, or -1 when out of memory.
  */
-HL_API int hl_gc_live_closures( void **funs, int nfuns, void ***out ) {
+HL_API int hl_gc_live_closures( void **funs, int nfuns, void *types_lo, void *types_hi, void ***out ) {
 	gc_pinned_list *pinned = (gc_pinned_list*)malloc(sizeof(gc_pinned_list));
 	*out = NULL;
 	if( pinned == NULL ) return -1;
@@ -2671,6 +2681,8 @@ HL_API int hl_gc_live_closures( void **funs, int nfuns, void ***out ) {
 	gc_mark();
 	live_closures.funs = funs;
 	live_closures.nfuns = nfuns;
+	live_closures.types_lo = types_lo;
+	live_closures.types_hi = types_hi;
 	live_closures.found = NULL;
 	live_closures.count = 0;
 	live_closures.capacity = 0;

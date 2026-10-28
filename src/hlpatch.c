@@ -1487,7 +1487,7 @@ static bool check_patch_guards( hl_module *m, hl_patch *patch, void *stack_floor
 		for(int i=0;i<added;i++) owners[nentries + i] = g;
 		nentries += added;
 	}
-	count = hl_gc_live_closures(entries,nentries,&found);
+	count = hl_gc_live_closures(entries,nentries,m->code->types,m->code->types + m->code->types_capacity,&found);
 	if( count < 0 ) { free(entries); free(owners); *error = "Out of memory checking stored closures"; return false; }
 	// The first guard a stored closure reaches is the one reported, with up to three of what hold its closures.
 	for(int i=0;i<count;i++) {
