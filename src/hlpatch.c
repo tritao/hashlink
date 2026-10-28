@@ -1446,47 +1446,61 @@ static int patch_slot_entries( hl_module *m, int slot, void **out ) {
  * refused patch leaves the module as it was. On refusal `*error` says which function, how many closures and where.
  */
 static bool check_patch_guards( hl_module *m, hl_patch *patch, const char **error ) {
+	// One heap scan finds the closures of every guarded function: their code addresses, each with its guard.
+	void **entries = (void**)malloc(sizeof(void*) * 4 * patch->guard_count), **found = NULL;
+	int *owners = (int*)malloc(sizeof(int) * 4 * patch->guard_count), nentries = 0, count, refused = -1, held = 0, named = 0;
+	char holders[512] = "", path[256];
+	if( entries == NULL || owners == NULL ) { free(entries); free(owners); *error = "Out of memory checking stored closures"; return false; }
 	for(int g=0;g<patch->guard_count;g++) {
-		hl_patch_guard *guard = patch->guards + g;
-		void *entries[4], **found = NULL;
-		int nentries = patch_slot_entries(m,guard->findex,entries), held = 0, named = 0;
-		char holders[512] = "", path[256];
-		int count = hl_gc_live_closures(entries,nentries,&found);
-		if( count < 0 ) { *error = "Out of memory checking stored closures"; return false; }
-		for(int i=0;i<count;i++) {
-			held++;
-			if( named < 3 ) {
-				if( !patch_holder_path(found[i],path,sizeof(path),6) ) snprintf(path,sizeof(path),"a running thread or a native root");
-				if( named ) strncat(holders,", ",sizeof(holders) - strlen(holders) - 1);
-				strncat(holders,path,sizeof(holders) - strlen(holders) - 1);
-				named++;
-			}
-		}
-		hl_gc_live_instances_release(found);
-		// The closures the module made at load are not GC blocks: they count only when something stores them.
-		for(int i=0;i<m->static_closure_count;i++) {
-			vclosure *c = m->static_closures[i];
-			bool match = false;
-			for(int j=0;j<nentries&&!match;j++) match = c->fun == entries[j];
-			if( !match || !patch_holder_path(c,path,sizeof(path),6) ) continue;
-			held++;
-			if( named < 3 ) {
-				if( named ) strncat(holders,", ",sizeof(holders) - strlen(holders) - 1);
-				strncat(holders,path,sizeof(holders) - strlen(holders) - 1);
-				named++;
-			}
-		}
-		if( held == 0 ) continue;
-		free(m->patch_refusal);
-		int size = (int)strlen(guard->description) + (int)strlen(holders) + 128;
-		m->patch_refusal = (char*)malloc(size);
-		if( m->patch_refusal == NULL ) { *error = "Stored closures still reach a function the patch drops"; return false; }
-		snprintf(m->patch_refusal,size,"%s; %d stored closure%s still reference%s it (held by %s%s)",guard->description,held,held == 1 ? "" : "s",
-			held == 1 ? "s" : "",holders,held > named ? ", ..." : "");
-		*error = m->patch_refusal;
-		return false;
+		int added = patch_slot_entries(m,patch->guards[g].findex,entries + nentries);
+		for(int i=0;i<added;i++) owners[nentries + i] = g;
+		nentries += added;
 	}
-	return true;
+	count = hl_gc_live_closures(entries,nentries,&found);
+	if( count < 0 ) { free(entries); free(owners); *error = "Out of memory checking stored closures"; return false; }
+	// The first guard a stored closure reaches is the one reported, with up to three of what hold its closures.
+	for(int i=0;i<count;i++) {
+		vclosure *c = (vclosure*)found[i];
+		int owner = -1;
+		for(int j=0;j<nentries&&owner<0;j++) if( c->fun == entries[j] ) owner = owners[j];
+		if( owner < 0 ) continue;
+		if( refused < 0 ) refused = owner;
+		if( owner != refused ) continue;
+		held++;
+		if( named < 3 ) {
+			if( !patch_holder_path(c,path,sizeof(path),6) ) snprintf(path,sizeof(path),"a running thread or a native root");
+			if( named ) strncat(holders,", ",sizeof(holders) - strlen(holders) - 1);
+			strncat(holders,path,sizeof(holders) - strlen(holders) - 1);
+			named++;
+		}
+	}
+	hl_gc_live_instances_release(found);
+	// The closures the module made at load are not GC blocks: they count only when something stores them.
+	for(int i=0;i<m->static_closure_count;i++) {
+		vclosure *c = m->static_closures[i];
+		int owner = -1;
+		for(int j=0;j<nentries&&owner<0;j++) if( c->fun == entries[j] ) owner = owners[j];
+		if( owner < 0 || (refused >= 0 && owner != refused) || !patch_holder_path(c,path,sizeof(path),6) ) continue;
+		if( refused < 0 ) refused = owner;
+		held++;
+		if( named < 3 ) {
+			if( named ) strncat(holders,", ",sizeof(holders) - strlen(holders) - 1);
+			strncat(holders,path,sizeof(holders) - strlen(holders) - 1);
+			named++;
+		}
+	}
+	free(entries);
+	free(owners);
+	if( refused < 0 ) return true;
+	hl_patch_guard *guard = patch->guards + refused;
+	int size = (int)strlen(guard->description) + (int)strlen(holders) + 128;
+	free(m->patch_refusal);
+	m->patch_refusal = (char*)malloc(size);
+	if( m->patch_refusal == NULL ) { *error = "Stored closures still reach a function the patch drops"; return false; }
+	snprintf(m->patch_refusal,size,"%s; %d stored closure%s still reference%s it (held by %s%s)",guard->description,held,held == 1 ? "" : "s",
+		held == 1 ? "s" : "",holders,held > named ? ", ..." : "");
+	*error = m->patch_refusal;
+	return false;
 }
 
 h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_report *report, const char **error_msg ) {
