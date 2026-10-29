@@ -1306,6 +1306,10 @@ int hl_module_init( hl_module *m, int flags ) {
 		if( dump ) hl_emit_dump(ctx);
 	}
 	m->jit_code = hl_jit_code(ctx, m, &m->codesize, &m->jit_debug, NULL);
+	if( m->jit_code == NULL ) {
+		hl_jit_free(ctx, false);
+		return 0;
+	}
 	for(i=0;i<m->code->nfunctions;i++) {
 		hl_function *f = m->code->functions + i;
 		m->functions_ptrs[f->findex] = ((unsigned char*)m->jit_code) + ((int_val)m->functions_ptrs[f->findex]);

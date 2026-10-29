@@ -1360,24 +1360,34 @@ void hl_emit_free( jit_ctx *jit ) {
 	jit->emit = NULL;
 }
 
-void hl_emit_final( jit_ctx *jit ) {
+/*
+ * Points the static closures the code made at their functions and lists them in the module. False, with nothing changed,
+ * when the list cannot grow: a patch that drops a function checks no stored closure reaches it, these included
+ * (`check_patch_guards`), so a closure left off the list would let a patch strand it.
+ */
+bool hl_emit_final( jit_ctx *jit ) {
 	emit_ctx *ctx = jit->emit;
+	hl_module *m = jit->mod;
+	int count = 0;
+	for(vclosure *l = ctx->closure_list; l; l = (vclosure*)l->value) count++;
+	if( m->static_closure_count + count > m->static_closure_capacity ) {
+		int capacity = m->static_closure_capacity ? m->static_closure_capacity : 64;
+		while( capacity < m->static_closure_count + count ) capacity *= 2;
+		vclosure **list = (vclosure**)realloc(m->static_closures,sizeof(vclosure*) * capacity);
+		if( list == NULL ) return false;
+		m->static_closures = list;
+		m->static_closure_capacity = capacity;
+	}
 	vclosure *l = ctx->closure_list;
 	while( l ) {
 		vclosure *n = (vclosure*)l->value;
-		hl_module *m = jit->mod;
 		l->value = NULL;
-		l->fun = jit->final_code + (int_val)jit->mod->functions_ptrs[(int_val)l->fun];
-		// A patch that drops a function checks no stored closure reaches it, these included (`hl_patch_guard`).
-		if( m->static_closure_count == m->static_closure_capacity ) {
-			int capacity = m->static_closure_capacity ? m->static_closure_capacity * 2 : 64;
-			vclosure **list = (vclosure**)realloc(m->static_closures,sizeof(vclosure*) * capacity);
-			if( list != NULL ) { m->static_closures = list; m->static_closure_capacity = capacity; }
-		}
-		if( m->static_closure_count < m->static_closure_capacity ) m->static_closures[m->static_closure_count++] = l;
+		l->fun = jit->final_code + (int_val)m->functions_ptrs[(int_val)l->fun];
+		m->static_closures[m->static_closure_count++] = l;
 		l = n;
 	}
 	ctx->closure_list = NULL;
+	return true;
 }
 
 static bool seal_block_rec( emit_ctx *ctx, emit_block *b, int target ) {

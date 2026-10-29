@@ -2626,6 +2626,9 @@ HL_API int hl_gc_live_instances( hl_type **types, int ntypes, void ***out ) {
 typedef struct {
 	void **funs;
 	int nfuns;
+	void *types_lo;
+	void *types_hi;
+	bool noptr;
 	void **found;
 	int count;
 	int capacity;
@@ -2638,8 +2641,13 @@ static void gc_collect_live_closure( void *block, int size ) {
 	if( size < (int)sizeof(vclosure) ) return;
 	for(int i=0;i<live_closures.nfuns;i++) {
 		if( c->fun != live_closures.funs[i] ) continue;
-		// Every block of a dynamic page starts with its type, so only now that the code matches is it read.
-		if( c->t == NULL || c->t->kind != HFUN ) return;
+		if( live_closures.noptr ) {
+			// A closure without a value (`hl_alloc_closure_void`, which patch code calls for OStaticClosure) lives on a page
+			// of raw data, whose blocks need not start with a type: it counts only when it looks like one, its type one of
+			// the module's, which is never read.
+			if( c->hasValue || c->value != NULL || (void*)c->t < live_closures.types_lo || (void*)c->t >= live_closures.types_hi ) return;
+		} else if( c->t == NULL || c->t->kind != HFUN )
+			return; // every block of a dynamic page starts with its type, so only now that the code matches is it read
 		if( live_closures.count == live_closures.capacity ) {
 			int capacity = live_closures.capacity ? live_closures.capacity * 2 : 16;
 			void **found = (void**)realloc(live_closures.found,sizeof(void*) * capacity);
@@ -2653,16 +2661,18 @@ static void gc_collect_live_closure( void *block, int size ) {
 }
 
 static void gc_collect_live_closure_page( gc_pheader *p, int private_data ) {
-	if( p->page_kind == MEM_KIND_DYNAMIC )
-		gc_iter_live_blocks(p, gc_collect_live_closure);
+	if( p->page_kind != MEM_KIND_DYNAMIC && p->page_kind != MEM_KIND_NOPTR ) return;
+	live_closures.noptr = p->page_kind == MEM_KIND_NOPTR;
+	gc_iter_live_blocks(p, gc_collect_live_closure);
 }
 
 /*
  * Every live closure whose code is one of `funs`, after a full mark, pinned like `hl_gc_live_instances` until
  * `hl_gc_live_instances_release`. Closures the module made at load (OStaticClosure) are module memory, not GC blocks;
- * the module lists them itself. Returns the count, or -1 when out of memory.
+ * the module lists them itself. A closure without a value is raw data; it counts when its type is in
+ * [types_lo,types_hi), the module's types. Returns the count, or -1 when out of memory.
  */
-HL_API int hl_gc_live_closures( void **funs, int nfuns, void ***out ) {
+HL_API int hl_gc_live_closures( void **funs, int nfuns, void *types_lo, void *types_hi, void ***out ) {
 	gc_pinned_list *pinned = (gc_pinned_list*)malloc(sizeof(gc_pinned_list));
 	*out = NULL;
 	if( pinned == NULL ) return -1;
@@ -2671,6 +2681,8 @@ HL_API int hl_gc_live_closures( void **funs, int nfuns, void ***out ) {
 	gc_mark();
 	live_closures.funs = funs;
 	live_closures.nfuns = nfuns;
+	live_closures.types_lo = types_lo;
+	live_closures.types_hi = types_hi;
 	live_closures.found = NULL;
 	live_closures.count = 0;
 	live_closures.capacity = 0;
@@ -2785,6 +2797,35 @@ HL_API bool hl_gc_threads_reference( void *lo, void *hi ) {
 			return true;
 	}
 	return false;
+}
+
+static bool gc_range_holds( void **start, void **end, void *value ) {
+	for(void **p = start; p < end; p++)
+		if( *p == value ) return true;
+	return false;
+}
+
+/*
+ * What outside the heap holds `value`: 1 for a root (`hl_add_root`: a native's, or a module global), with `*root` the
+ * root's address; 2 for a thread's stack, saved registers or saved stack data; 0 for neither. The calling thread counts
+ * only for its frames above `stack_floor`, its callers'. Only meaningful inside an exclusive section.
+ */
+HL_API int hl_gc_root_holder( void *value, void *stack_floor, void ***root ) {
+	*root = NULL;
+	for(int i=0;i<gc_roots_count;i++)
+		if( *gc_roots[i] == value ) { *root = gc_roots[i]; return 1; }
+	for(int i=0;i<gc_threads.count;i++) {
+		hl_thread_info *t = gc_threads.threads[i];
+		if( t == current_thread ) {
+			if( stack_floor && gc_range_holds((void**)stack_floor,(void**)t->stack_top,value) ) return 2;
+			continue;
+		}
+		if( gc_range_holds((void**)t->stack_cur,(void**)t->stack_top,value)
+			|| gc_range_holds((void**)&t->gc_regs,(void**)&t->gc_regs + (sizeof(jmp_buf) / sizeof(void*) - 1),value)
+			|| gc_range_holds((void**)&t->extra_stack_data,(void**)&t->extra_stack_data + t->extra_stack_size,value) )
+			return 2;
+	}
+	return 0;
 }
 
 HL_API void hl_gc_exclusive_end() {

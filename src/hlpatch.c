@@ -1474,8 +1474,9 @@ static int patch_slot_entries( hl_module *m, int slot, void **out ) {
  * Whether the stored closures leave every guarded function of `patch` unreachable (`hl_patch_guard`). Runs with every
  * other thread stopped, before anything commits, so no closure can be made between the check and the commit, and a
  * refused patch leaves the module as it was. On refusal `*error` says which function, how many closures and where.
+ * `stack_floor` is where the calling thread's own frames end: only the frames above it, its callers', can hold a closure.
  */
-static bool check_patch_guards( hl_module *m, hl_patch *patch, const char **error ) {
+static bool check_patch_guards( hl_module *m, hl_patch *patch, void *stack_floor, const char **error ) {
 	// One heap scan finds the closures of every guarded function: their code addresses, each with its guard.
 	void **entries = (void**)malloc(sizeof(void*) * 4 * patch->guard_count), **found = NULL;
 	int *owners = (int*)malloc(sizeof(int) * 4 * patch->guard_count), nentries = 0, count, refused = -1, held = 0, named = 0;
@@ -1486,7 +1487,7 @@ static bool check_patch_guards( hl_module *m, hl_patch *patch, const char **erro
 		for(int i=0;i<added;i++) owners[nentries + i] = g;
 		nentries += added;
 	}
-	count = hl_gc_live_closures(entries,nentries,&found);
+	count = hl_gc_live_closures(entries,nentries,m->code->types,m->code->types + m->code->types_capacity,&found);
 	if( count < 0 ) { free(entries); free(owners); *error = "Out of memory checking stored closures"; return false; }
 	// The first guard a stored closure reaches is the one reported, with up to three of what hold its closures.
 	for(int i=0;i<count;i++) {
@@ -1505,12 +1506,22 @@ static bool check_patch_guards( hl_module *m, hl_patch *patch, const char **erro
 		}
 	}
 	hl_gc_live_instances_release(found);
-	// The closures the module made at load are not GC blocks: they count only when something stores them.
+	// The closures the module made at load are not GC blocks: they count only when something stores them, a GC block or a
+	// global, or what keeps GC closures alive too: a native root, or a running thread's stack or registers.
 	for(int i=0;i<m->static_closure_count;i++) {
 		vclosure *c = m->static_closures[i];
 		int owner = -1;
+		void **root = NULL;
 		for(int j=0;j<nentries&&owner<0;j++) if( c->fun == entries[j] ) owner = owners[j];
-		if( owner < 0 || (refused >= 0 && owner != refused) || !patch_holder_path(m,patch,c,path,sizeof(path),6) ) continue;
+		if( owner < 0 || (refused >= 0 && owner != refused) ) continue;
+		if( !patch_holder_path(m,patch,c,path,sizeof(path),6) ) {
+			int holder = hl_gc_root_holder(c,stack_floor,&root);
+			if( holder == 0 ) continue;
+			if( holder == 2 ) snprintf(path,sizeof(path),"a running thread");
+			else if( m->globals_data && (unsigned char*)root >= m->globals_data && (unsigned char*)root < m->globals_data + m->globals_size )
+				snprintf(path,sizeof(path),"a global");
+			else snprintf(path,sizeof(path),"a native root");
+		}
 		if( refused < 0 ) refused = owner;
 		held++;
 		if( named < 3 ) {
@@ -1534,7 +1545,7 @@ static bool check_patch_guards( hl_module *m, hl_patch *patch, const char **erro
 }
 
 h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_report *report, const char **error_msg ) {
-	hl_patch_migration_report ignored;const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;hl_code code;hl_module temp;patch_layout layout={0};bool staged_added=false;hl_patch_live *live_block=NULL;hl_patch_code *superseded=NULL;int globals_size=0;bool staged_globals=false;patch_object_field_stage *staged_fields=NULL;
+	hl_patch_migration_report ignored;const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;hl_code code;hl_module temp;patch_layout layout={0};bool staged_added=false;hl_patch_live *live_block=NULL;hl_patch_code *superseded=NULL;int globals_size=0;bool staged_globals=false;patch_object_field_stage *staged_fields=NULL;bool temp_ready=false;
 	if(report==NULL)report=&ignored;
 	memset(report,0,sizeof(*report));
 	if(!m||!patch||!m->patchable){error="Module is not patchable";goto fail;}
@@ -1585,14 +1596,18 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 	if(patch->global_count>0){stage_patch_globals(m,patch);staged_globals=true;}
 	link_patch_object_types(m,patch);
 	memset(&code,0,sizeof(code));code.globals=m->code->globals;code.nglobals=m->code->nglobals+patch->global_count;code.globals_capacity=m->code->globals_capacity;code.npatchglobals=m->code->npatchglobals+patch->global_count;code.nints=patch->base_int_count+patch->int_count;code.ints=combined_ints;code.nfloats=patch->base_float_count+patch->float_count;code.floats=combined_floats;code.nstrings=patch->base_string_count+patch->string_count;code.strings=combined_strings;code.strings_lens=combined_string_lens;code.ustrings=combined_ustrings;code.ntypes=patch->base_type_count+patch->type_count;code.types_capacity=m->code->types_capacity;code.types=m->code->types;code.nfunctions=layout.count;code.functions_capacity=m->code->functions_capacity;code.nnatives=m->code->nnatives;code.natives=m->code->natives;code.functions=combined_functions;code.function_names=m->code->function_names;code.function_names_lens=m->code->function_names_lens;code.hasdebug=m->code->hasdebug;code.ndebugfiles=m->code->ndebugfiles;code.debugfiles=m->code->debugfiles;code.debugfiles_lens=m->code->debugfiles_lens;code.alloc=m->code->alloc;
-	temp=*m;temp.code=&code;temp.functions_indexes=layout.indexes;temp.jit_code=NULL;temp.jit_debug=NULL;temp.jit_ctx=NULL;temp.staging_patch=true;
+	temp=*m;temp.code=&code;temp.functions_indexes=layout.indexes;temp.jit_code=NULL;temp.jit_debug=NULL;temp.jit_ctx=NULL;temp.staging_patch=true;temp_ready=true;
 #ifdef WIN64_UNWIND_TABLES
 	// The JIT records each function it emits in the module's unwind table; the live module's table is registered for its own code.
 	temp.unwind_table_size=patch->function_count+10;temp.unwind_table=allocation->unwind_table=(PRUNTIME_FUNCTION)calloc(temp.unwind_table_size,sizeof(RUNTIME_FUNCTION));if(!temp.unwind_table){error="Out of memory applying patch unwind table";goto fail;}
 #endif
 	jit=hl_jit_alloc();if(!jit){error="Could not allocate patch JIT";goto fail;}hl_jit_init(jit,&temp);
 	for(int i=0;i<patch->function_count;i++){int function_index=layout.indexes[allocation->functions[i].findex];offsets[i]=hl_jit_function(jit,&temp,combined_functions+function_index);if(offsets[i]<0){error="Could not JIT patch function";goto fail;}}
-	allocation->code=hl_jit_patch_code(jit,&temp,&allocation->code_size,&temp.jit_debug);allocation->jit_debug=temp.jit_debug;allocation->jit_debug_count=code.nfunctions;temp.jit_debug=NULL;if(!allocation->code){error="Could not finalize patch JIT";goto fail;}hl_jit_free(jit,false);jit=NULL;
+	allocation->code=hl_jit_patch_code(jit,&temp,&allocation->code_size,&temp.jit_debug);allocation->jit_debug=temp.jit_debug;allocation->jit_debug_count=code.nfunctions;temp.jit_debug=NULL;
+	// The JIT lists the static closures it makes in `temp`, possibly in a list it grew (`hl_emit_final`): the module takes the
+	// list now, which may have moved, and counts the patch's entries only once the patch commits.
+	m->static_closures=temp.static_closures;m->static_closure_capacity=temp.static_closure_capacity;
+	if(!allocation->code){error="Could not finalize patch JIT";goto fail;}hl_jit_free(jit,false);jit=NULL;
 #ifdef WIN64_UNWIND_TABLES
 	if(!RtlAddFunctionTable(allocation->unwind_table,temp.unwind_table_size,(DWORD64)allocation->code)){error="Could not register patch unwind table";goto fail;}
 	allocation->unwind_registered=true;
@@ -1609,7 +1624,7 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 	hl_gc_exclusive_begin();
 	// The last check: closures the program stored may still reach a function this patch drops. Every other thread is stopped,
 	// so none can be made before the commit, and a refusal leaves the module untouched.
-	if(patch->guard_count>0&&!check_patch_guards(m,patch,&error)){hl_gc_exclusive_end();goto fail;}
+	if(patch->guard_count>0&&!check_patch_guards(m,patch,(void*)&m,&error)){hl_gc_exclusive_end();goto fail;}
 	for(int i=0;i<type_allocation_count;i++)m->patch_type_allocations[m->patch_type_allocation_count++]=type_allocations[i];
 	free(type_allocations);type_allocations=NULL;type_allocation_count=0;for(int i=m->code->ntypes;i<code.ntypes;i++)m->code->types[i].gc_owner=m;m->code->ntypes=code.ntypes;
 	// A constant must exist before any code can read its global; the strings it points to are the patch's, which outlive it.
@@ -1640,12 +1655,14 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 	m->patch_ints=combined_ints;m->patch_floats=combined_floats;m->patch_strings=combined_strings;m->patch_string_lens=combined_string_lens;m->patch_ustrings=combined_ustrings;m->patch_string_data=combined_string_data;
 	m->code->ints=combined_ints;m->code->nints=code.nints;m->code->floats=combined_floats;m->code->nfloats=code.nfloats;m->code->strings=combined_strings;m->code->strings_lens=combined_string_lens;m->code->ustrings=combined_ustrings;m->code->nstrings=code.nstrings;
 	combined_ints=NULL;combined_floats=NULL;combined_strings=NULL;combined_string_lens=NULL;combined_ustrings=NULL;combined_string_data=NULL;
-	m->revision=patch->revision;m->patch_jit_count+=patch->function_count;hl_module_crash_write_unlock();free(offsets);
+	m->revision=patch->revision;m->patch_jit_count+=patch->function_count;m->static_closure_count=temp.static_closure_count;hl_module_crash_write_unlock();free(offsets);
 	if(patch->migration_count>0)migrate_patch_instances(m,patch,report);
 	hl_gc_exclusive_end();
 	if(error_msg)*error_msg=NULL;return true;
 fail:
 	if(jit) hl_jit_free(jit,false);
+	// Keep the list the JIT may have moved; the entries it added for the discarded code stay uncounted (their code is freed).
+	if(temp_ready){m->static_closures=temp.static_closures;m->static_closure_capacity=temp.static_closure_capacity;}
 	if(staged_added) unstage_added_functions(m,patch);
 	if(staged_globals) unstage_patch_globals(m,patch);
 	if(staged_fields) unstage_patch_object_fields(staged_fields,patch->object_field_count);
