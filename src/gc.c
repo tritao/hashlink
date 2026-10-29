@@ -968,6 +968,27 @@ HL_PRIM void hl_gc_census_stop( void ) {
 	gc_global_lock(false);
 }
 
+/* Dump paths are UTF-8. Windows fopen takes the ANSI code page instead, so a non-ASCII name would name another file there. */
+static FILE *gc_fopen_utf8( const char *path, const char *mode ) {
+#	ifdef HL_WIN
+	wchar_t wide_mode[8];
+	wchar_t *wide_path;
+	FILE *f;
+	int i, size = MultiByteToWideChar(CP_UTF8,0,path,-1,NULL,0);
+	if( size <= 0 ) return NULL;
+	for(i=0;mode[i] && i<7;i++) wide_mode[i] = (wchar_t)mode[i];
+	wide_mode[i] = 0;
+	wide_path = (wchar_t*)malloc(sizeof(wchar_t) * size);
+	if( wide_path == NULL ) return NULL;
+	MultiByteToWideChar(CP_UTF8,0,path,-1,wide_path,size);
+	f = _wfopen(wide_path,wide_mode);
+	free(wide_path);
+	return f;
+#	else
+	return fopen(path,mode);
+#	endif
+}
+
 static void gc_census_write_string( FILE *f, const uchar *s ) {
 	fputc('"',f);
 	while( s && *s ) {
@@ -1007,7 +1028,7 @@ HL_PRIM void hl_gc_census_dump( const char *filename ) {
 	every = gc_census_every;
 	total = gc_census_total;
 	gc_global_lock(false);
-	f = fopen(filename,"wb");
+	f = gc_fopen_utf8(filename,"wb");
 	if( f == NULL ) {
 		free(types);
 		free(stacks);
@@ -2435,7 +2456,7 @@ HL_API void hl_gc_dump_memory( const char *filename ) {
 	gc_global_lock(true);
 	gc_stop_world(true);
 	gc_mark();
-	fdump = fopen(filename,"wb");
+	fdump = gc_fopen_utf8(filename,"wb");
 	if( fdump == NULL ) {
 		gc_stop_world(false);
 		gc_global_lock(false);
