@@ -929,7 +929,7 @@ static void regs_emit_instrs( regs_ctx *ctx ) {
 			ereg *args = hl_emit_get_args(ctx->jit->emit,&e);
 			call_regs regs = {0};
 			int stack_args = 0;
-			int stack_bits = 0;
+			bool stack_slots[256] = {false};
 			bool native_layout = (e.op == CALL_PTR && ctx->jit->cfg.native_stack_layout != NATIVE_STACK_LAYOUT_HL);
 			int native_offsets[256];
 			int native_total = 0;
@@ -945,7 +945,7 @@ static void regs_emit_instrs( regs_ctx *ctx ) {
 				if( IS_NULL(r) ) {
 					if( !native_layout ) {
 						stack_args += get_stack_size(ctx,mode);
-						stack_bits |= 1 << k;
+						stack_slots[k] = true;
 					}
 				} else if( !v || r != v->reg ) {
 					int_arr_add(ctx->pack_movs,r);
@@ -972,7 +972,7 @@ static void regs_emit_instrs( regs_ctx *ctx ) {
 				if( offset )
 					regs_emit(ctx,UNUSED,STACK_OFFS,UNUSED,UNUSED,0,-offset);
 				for(int k=e.nargs-1;k>=0;k--) {
-					if( stack_bits & (1 << k) ) {
+					if( stack_slots[k] ) {
 						value_info *v = REG_IS_VAL(args[k]) ? VAL_REG(args[k]) : NULL;
 						EMIT(PUSH,VAL_REG(args[k])->reg,UNUSED,v && IS_FLOAT(v->mode) ? v->mode : M_PTR);
 					}
