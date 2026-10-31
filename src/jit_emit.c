@@ -2393,7 +2393,8 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 				if( fid >= 0 && fid < m->code->nfunctions ) {
 					hl_function *cf = m->code->functions + fid;
 					const uchar *name = fun_field_name(cf);
-					hashed_name = hl_hash_gen(name, true);
+					if( name != NULL )
+						hashed_name = hl_hash_gen(name, true);
 				}
 			}
 			// -----------------------------------------
