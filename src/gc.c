@@ -1355,7 +1355,9 @@ static gc_mstack global_mark_stack = {0};
 static int gc_mark_threads = GC_MAX_MARK_THREADS;
 static gc_mthread mark_threads[GC_MAX_MARK_THREADS] = {0};
 static unsigned char mark_threads_active = 0;
-static hl_semaphore *mark_threads_done;
+static int mark_threads_pending = 0;
+/* Protect the active mask and pending predicate, and wake the collector when no workers remain. */
+static hl_condition *mark_completion;
 
 #define GC_STACK_BEGIN(st) register void **__current_stack = (st)->cur; gc_mstack *__current_mstack = st;
 #define GC_STACK_END() __current_mstack->cur = __current_stack;
@@ -1393,23 +1395,6 @@ HL_PRIM void **hl_gc_mark_grow( gc_mstack *stack ) {
 	return stack->cur;
 }
 
-static bool atomic_bit_unset( unsigned char *addr, unsigned char bitmask ) {
-	if( GC_MAX_MARK_THREADS <= 1 ) {
-		unsigned char v = *addr;
-		bool b = (v & bitmask) != 0;
-		if( b ) *addr = v & ~bitmask;
-		return b;
-	}
-#	if defined(HL_VCC)
-	return ((unsigned)InterlockedAnd8((char*)addr,(char)~bitmask) & bitmask) != 0;
-#	elif defined(HL_CLANG) || defined(HL_GCC)
-	return (__sync_fetch_and_and(addr,~bitmask) & bitmask) != 0;
-#	else
-	hl_fatal("Not implemented");
-	return false;
-#	endif
-}
-
 // Stop-the-world marking with one worker has no competing bitmap writers.
 // Keep other configurations on their existing atomic path until validated there.
 #if defined(__linux__) && defined(__x86_64__) && defined(__GNUC__)
@@ -1439,20 +1424,30 @@ static bool atomic_bit_set( unsigned char *addr, unsigned char bitmask ) {
 static void gc_dispatch_mark( gc_mstack *st, bool all ) {
 	int nthreads = 0;
 	int i;
-	if( mark_threads_active == (1<<gc_mark_threads) - 1 )
+	hl_condition_acquire(mark_completion);
+	if( mark_threads_active == (1<<gc_mark_threads) - 1 ) {
+		hl_condition_release(mark_completion);
 		return;
+	}
 	for(i=0;i<gc_mark_threads;i++)
 		if( (mark_threads_active&(1<<i)) == 0 )
 			nthreads++;
-	if( nthreads == 0 )
+	if( nthreads == 0 ) {
+		hl_condition_release(mark_completion);
 		return;
+	}
 	int count = all ? (GC_STACK_COUNT(st) + nthreads - 1) / nthreads : GC_STACK_COUNT(st) / (nthreads + 1);
-	if( count == 0 )
+	if( count == 0 ) {
+		hl_condition_release(mark_completion);
 		return;
+	}
 	for(i=0;i<gc_mark_threads;i++) {
 		gc_mthread *t = &mark_threads[i];
-		if( !atomic_bit_set(&mark_threads_active,1<<i) )
+		unsigned char bit = 1 << i;
+		if( mark_threads_active & bit )
 			continue;
+		mark_threads_active |= bit;
+		mark_threads_pending++;
 		int push = GC_STACK_COUNT(st);
 		if( push > count ) push = count;
 		while( t->stack.size <= push )
@@ -1472,6 +1467,15 @@ static void gc_dispatch_mark( gc_mstack *st, bool all ) {
 			hl_semaphore_release(t->ready);
 		}
 	}
+	hl_condition_release(mark_completion);
+}
+
+static void gc_wait_mark_threads( void ) {
+	hl_condition_acquire(mark_completion);
+	while( mark_threads_pending > 0 )
+		hl_condition_wait(mark_completion);
+	if( mark_threads_active != 0 ) hl_fatal("assert");
+	hl_condition_release(mark_completion);
 }
 
 #define REGULAR_BITS 16
@@ -1626,9 +1630,7 @@ static void gc_mark() {
 		gc_dispatch_mark(st, true);
 		if( GC_STACK_COUNT(st) > 0 )
 			hl_fatal("assert");
-		// wait threads to finish
-		while( mark_threads_active )
-			hl_semaphore_acquire(mark_threads_done);
+		gc_wait_mark_threads();
 		for(i=0;i<gc_mark_threads;i++) {
 			gc_mthread *t = &mark_threads[i];
 			if( GC_STACK_COUNT(&t->stack) > 0 )
@@ -1813,8 +1815,12 @@ static void mark_thread_main( void *param ) {
 	while( true ) {
 		hl_semaphore_acquire(inf->ready);
 		inf->mark_count += gc_flush_mark(&inf->stack);
-		if( !atomic_bit_unset(&mark_threads_active, 1 << index) ) hl_fatal("assert");
-		if( mark_threads_active == 0 ) hl_semaphore_release(mark_threads_done);
+		hl_condition_acquire(mark_completion);
+		unsigned char bit = 1 << index;
+		if( !(mark_threads_active & bit) || mark_threads_pending <= 0 ) hl_fatal("assert");
+		mark_threads_active &= ~bit;
+		if( --mark_threads_pending == 0 ) hl_condition_signal(mark_completion);
+		hl_condition_release(mark_completion);
 	}
 }
 
@@ -1888,12 +1894,11 @@ static void hl_gc_init() {
 #	ifdef HL_THREADS
 	hl_add_root(&gc_threads.global_lock);
 	hl_add_root(&gc_threads.exclusive_lock);
-	hl_add_root(&mark_threads_done);
+	hl_add_root(&mark_completion);
 #	endif
 	gc_threads.global_lock = hl_mutex_alloc(false);
 	gc_threads.exclusive_lock = hl_mutex_alloc(false);
 #	ifdef HL_THREADS
-	mark_threads_done = hl_semaphore_alloc(0);
 	char *nthreads = getenv("HL_GC_THREADS");
 	if( nthreads ) {
 		gc_mark_threads = atoi(nthreads);
@@ -1901,6 +1906,9 @@ static void hl_gc_init() {
 		if( gc_mark_threads > GC_MAX_MARK_THREADS ) gc_mark_threads = GC_MAX_MARK_THREADS;
 	}
 	if( gc_mark_threads > 1 ) {
+		mark_completion = hl_condition_alloc();
+		mark_threads_active = 0;
+		mark_threads_pending = 0;
 		for(int i=0;i<gc_mark_threads;i++) {
 			gc_mthread *t = &mark_threads[i];
 			hl_add_root(&t->ready);
