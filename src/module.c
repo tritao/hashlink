@@ -371,14 +371,12 @@ int hl_module_resolve_crash_location( void *address, char *buffer, int size ) {
 }
 #endif
 
-int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out, int size ) {
+int hl_module_capture_stack_range_snapshot( hl_module **modules, int module_count, void *stack_top, void **stack_ptr, void **out, int size ) {
 #if defined(HL_64) && defined(HL_WIN)
 #else
 	void *stack_bottom = stack_ptr;
 #endif
 	int count = 0;
-	int module_count;
-	hl_module **modules = hl_module_registry_snapshot(&module_count);
 	if( module_count == 1 ) {
 		hl_module *m = modules[0];
 		while( stack_ptr < (void**)stack_top ) {
@@ -442,6 +440,13 @@ int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out
 			}
 		}
 	}
+	return count;
+}
+
+int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out, int size ) {
+	int module_count;
+	hl_module **modules = hl_module_registry_snapshot(&module_count);
+	int count = hl_module_capture_stack_range_snapshot(modules,module_count,stack_top,stack_ptr,out,size);
 	hl_module_registry_snapshot_free(modules,module_count);
 	return count;
 }
@@ -490,9 +495,7 @@ static void **module_find_frame_record( hl_module **modules, int module_count, v
 	nearest JIT frame record found just above, a short, bounded read because native frames are small, and the frames
 	skipped are marked with one gap.
 */
-int hl_module_capture_stack_from_frame( void *stack_top, void **stack_ptr, void **frame_ptr, void **out, unsigned char *kinds, int size ) {
-	int module_count;
-	hl_module **modules = hl_module_registry_snapshot(&module_count);
+int hl_module_capture_stack_from_frame( hl_module **modules, int module_count, void *stack_top, void **stack_ptr, void **frame_ptr, void **out, unsigned char *kinds, int size ) {
 	int count = 0;
 	void **fp = NULL;
 	bool usable = frame_ptr && frame_ptr >= stack_ptr && (void*)frame_ptr < stack_top && ((uintptr_t)frame_ptr & (sizeof(void*)-1)) == 0
@@ -524,7 +527,6 @@ int hl_module_capture_stack_from_frame( void *stack_top, void **stack_ptr, void 
 		} else
 			fp = (void**)next_fp;
 	}
-	hl_module_registry_snapshot_free(modules,module_count);
 	return count;
 }
 
@@ -807,9 +809,7 @@ void hl_module_redirect_slot( hl_module *m, int slot, void *code ) {
 #	endif
 }
 
-bool hl_module_patch_entry_origin( void *pc, void **origin ) {
-	int module_count;
-	hl_module **modules = hl_module_registry_snapshot(&module_count);
+bool hl_module_patch_entry_origin_snapshot( hl_module **modules, int module_count, void *pc, void **origin ) {
 	bool found = false;
 	for(int i=0;i<module_count&&!found;i++) {
 		hl_module *m = modules[i];
@@ -820,6 +820,13 @@ bool hl_module_patch_entry_origin( void *pc, void **origin ) {
 		*origin = entry;
 		found = true;
 	}
+	return found;
+}
+
+bool hl_module_patch_entry_origin( void *pc, void **origin ) {
+	int module_count;
+	hl_module **modules = hl_module_registry_snapshot(&module_count);
+	bool found = hl_module_patch_entry_origin_snapshot(modules,module_count,pc,origin);
 	hl_module_registry_snapshot_free(modules,module_count);
 	return found;
 }

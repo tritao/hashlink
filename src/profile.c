@@ -76,7 +76,9 @@
 
 HL_API double hl_sys_time( void );
 int hl_module_capture_stack_range( void *stack_top, void **stack_ptr, void **out, int size );
-int hl_module_capture_stack_from_frame( void *stack_top, void **stack_ptr, void **frame_ptr, void **out, unsigned char *kinds, int size );
+int hl_module_capture_stack_range_snapshot( hl_module **modules, int module_count, void *stack_top, void **stack_ptr, void **out, int size );
+int hl_module_capture_stack_from_frame( hl_module **modules, int module_count, void *stack_top, void **stack_ptr, void **frame_ptr, void **out, unsigned char *kinds, int size );
+bool hl_module_patch_entry_origin_snapshot( hl_module **modules, int module_count, void *pc, void **origin );
 uchar *hl_module_resolve_symbol_full( void *addr, uchar *out, int *outSize, int **r_debug_addr );
 bool hl_module_is_jit_code( void *addr );
 
@@ -708,14 +710,26 @@ static void read_thread_data( thread_handle *t ) {
 	double sample_started = hl_sys_time();
 	bool waiting = false;
 	double stopped_at;
-	if( !pause_thread(t,true) )
+#if defined(HL_LINUX) || defined(HL_MAC)
+	/* Pin the module registry before stopping the target: it may hold the registry lock. */
+	int module_count;
+	hl_module **modules = hl_module_registry_snapshot(&module_count);
+#endif
+	if( !pause_thread(t,true) ) {
+#if defined(HL_LINUX) || defined(HL_MAC)
+		hl_module_registry_snapshot_free(modules,module_count);
+#endif
 		return;
+	}
 	stopped_at = hl_sys_time();
 	unsigned long long stopped_ticks = hl_prof_ticks();
 	void *eip;
 	void *stack = get_thread_stackptr(t,&eip);
 	if( !stack ) {
 		pause_thread(t,false);
+#if defined(HL_LINUX) || defined(HL_MAC)
+		hl_module_registry_snapshot_free(modules,module_count);
+#endif
 		return;
 	}
 
@@ -726,14 +740,15 @@ static void read_thread_data( thread_handle *t ) {
     // A thread stopped in the stub of a patched function has pushed nothing yet, so its caller's return address is on top
     // of the stack and the frame pointer chain starts one frame above the caller.
     void *entry_origin = NULL, *entry_return = NULL;
-    if( frame && eip && hl_module_patch_entry_origin(eip,&entry_origin) && (void**)stack < (void**)t->inf->stack_top )
+    if( frame && eip && hl_module_patch_entry_origin_snapshot(modules,module_count,eip,&entry_origin) && (void**)stack < (void**)t->inf->stack_top )
         entry_return = *(void**)stack;
     int count = frame ?
-        hl_module_capture_stack_from_frame(t->inf->stack_top, stack, frame, data.stackOut, capture_kinds, MAX_STACK_COUNT) :
-        hl_module_capture_stack_range(t->inf->stack_top, stack, data.stackOut, MAX_STACK_COUNT);
+        hl_module_capture_stack_from_frame(modules, module_count, t->inf->stack_top, stack, frame, data.stackOut, capture_kinds, MAX_STACK_COUNT) :
+        hl_module_capture_stack_range_snapshot(modules, module_count, t->inf->stack_top, stack, data.stackOut, MAX_STACK_COUNT);
     sampling_cost.capture += hl_sys_time() - capture_started;
     pause_thread(t, false);
     sampling_cost.stopped += hl_sys_time() - stopped_at;
+    hl_module_registry_snapshot_free(modules,module_count);
     if( frame ) count = keep_sampled_frames(data.stackOut, capture_kinds, count, hl_sys_time());
     if( entry_origin ) {
         // Attribute the sample to the function whose entry jumped here, with the caller below it.
