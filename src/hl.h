@@ -368,6 +368,7 @@ typedef enum {
 } hl_type_kind;
 
 typedef struct hl_type hl_type;
+typedef struct _hl_array_access hl_array_access;
 typedef struct hl_runtime_obj hl_runtime_obj;
 typedef struct hl_alloc_block hl_alloc_block;
 typedef struct { hl_alloc_block *cur; } hl_alloc;
@@ -458,6 +459,7 @@ struct hl_type {
 		hl_type_enum *tenum;
 		hl_type_virtual *virt;
 		hl_type	*tparam;
+		hl_array_access *array_access;
 	};
 	void **vobj_proto;
 	unsigned int *mark_bits;
@@ -518,6 +520,9 @@ typedef struct {
 	int capacity; // allocated element capacity; preserves the 16-byte header alignment
 	vbyte *data; // exact backing allocation base; growth never changes the array identity
 } varray;
+
+/* Optional access for arrays whose elements are not stored as a contiguous native array. */
+struct _hl_array_access { vdynamic *(*read)(varray *array, int index); };
 
 typedef struct _vclosure {
 	hl_type *t;
