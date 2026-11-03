@@ -1561,7 +1561,7 @@ ASAN_DISABLE
 static void gc_mark_stack( void *start, void *end ) {
 	GC_STACK_BEGIN(&global_mark_stack);
 	void **stack_head = (void**)start;
-	while( stack_head < (void**)end ) {
+	while( (char*)stack_head + sizeof(void*) <= (char*)end ) {
 		void *p = *stack_head++;
 		gc_pheader *page = GC_GET_PAGE(p);
 		if( !page || !INPAGE(p,page) ) continue;
