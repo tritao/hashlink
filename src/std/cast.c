@@ -88,6 +88,16 @@ HL_PRIM vdynamic *hl_make_dyn( void *data, hl_type *t ) {
 		return v;
 	case HBOOL:
 		return hl_alloc_dynbool(*(bool*)data);
+	case HSTRUCT:
+		{
+			void *source = *(void**)data;
+			if( source == NULL ) return NULL;
+			void *copy = hl_alloc_obj(t);
+			hl_gc_copy_packed(copy,source,hl_get_obj_rt(t)->size,t);
+			v = hl_alloc_dynamic(t);
+			hl_gc_store_ref(&v->v.ptr,copy,t);
+			return v;
+		}
 	case HBYTES:
 	case HTYPE:
 	case HREF:

@@ -890,8 +890,10 @@ static vdynamic *hl_obj_lookup_extra( vdynamic *d, int hfield ) {
 	case HSTRUCT:
 		{
 			hl_field_lookup *f = obj_resolve_field(d->t->obj,hfield);
-			if( f && f->field_index < 0 )
-				return (vdynamic*)hl_alloc_closure_ptr(f->t,d->t->obj->rt->methods[-f->field_index-1],d);
+			if( f && f->field_index < 0 ) {
+				void *receiver = d->t->kind == HSTRUCT ? d->v.ptr : d;
+				return (vdynamic*)hl_alloc_closure_ptr(f->t,d->t->obj->rt->methods[-f->field_index-1],receiver);
+			}
 			if( f == NULL ) {
 				hl_runtime_obj *rt = d->t->obj->rt;
 				if( rt->getFieldFun )

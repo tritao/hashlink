@@ -218,7 +218,13 @@ HL_PRIM vdynamic *hl_dyn_call( vclosure *c, vdynamic **args, int nargs ) {
 		ctmp.t = c->t->fun->parent;
 		ctmp.hasValue = 0;
 		ctmp.fun = c->fun;
-		tmp.args[0] = hl_make_dyn(&c->value,ctmp.t->fun->args[0]);
+		hl_type *receiver_type = ctmp.t->fun->args[0];
+		if( receiver_type->kind == HSTRUCT && c->value != NULL ) {
+			vdynamic *receiver = hl_alloc_dynamic(receiver_type);
+			hl_gc_store_ref(&receiver->v.ptr,c->value,receiver_type);
+			tmp.args[0] = receiver;
+		} else
+			tmp.args[0] = hl_make_dyn(&c->value,receiver_type);
 		tmp.a.size++;
 		for(i=0;i<nargs;i++)
 			tmp.args[i+1] = args[i];
@@ -313,6 +319,11 @@ HL_PRIM void *hl_wrapper_call( void *_c, void **args, vdynamic *ret ) {
 		break;
 	default:
 		pret = hl_dyn_castp(aret,w->t->fun->ret,tfun->ret);
+		if( tfun->ret->kind == HSTRUCT && pret != NULL ) {
+			void *copy = hl_alloc_obj(tfun->ret);
+			hl_gc_copy_packed(copy,pret,hl_get_obj_rt(tfun->ret)->size,tfun->ret);
+			pret = copy;
+		}
 		break;
 	}
 	return pret;

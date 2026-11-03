@@ -432,6 +432,13 @@ void *hl_jit_wrapper_ptr( vclosure_wrapper *c, char *stack_args, void **regs ) {
 	case HI64:
 	case HGUID:
 		return (void*)(int_val)hl_dyn_casti64(&ret,&hlt_dyn);
+	case HSTRUCT: {
+		void *value = hl_dyn_castp(&ret,&hlt_dyn,tret);
+		if( value == NULL ) return NULL;
+		void *copy = hl_alloc_obj(tret);
+		hl_gc_copy_packed(copy,value,hl_get_obj_rt(tret)->size,tret);
+		return copy;
+	}
 	default:
 		return hl_dyn_castp(&ret,&hlt_dyn,tret);
 	}
