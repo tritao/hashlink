@@ -155,6 +155,8 @@ OP_BEGIN
 	OP(OPrefetch,R_NW,C,C)
 	OP(OAsm,C,C,C)
 	OP(OCatch,J,X,X)
+	OP(OCleanupTrap,R_NW,J,X)
+	OP(OEndCleanupTrap,R,X,X)
 	// --
 	OP(OLast,X,X,X)
 OP_END

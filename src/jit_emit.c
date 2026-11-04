@@ -2429,9 +2429,9 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 			emit_native_call(ctx, get_dynset(rb->t), args, need_type ? 4 : 3, &hlt_void);
 		}
 		break;
-	case OTrap:
+	case OTrap: case OCleanupTrap:
 		{
-			ereg st = emit_gen_size(ctx, ALLOC_STACK, sizeof(hl_trap_ctx));
+			ereg st = emit_gen_size(ctx, ALLOC_STACK, o->op == OCleanupTrap ? sizeof(hl_cleanup_trap_ctx) : sizeof(hl_trap_ctx));
 
 			ereg thread, current_addr;
 			static hl_thread_info *tinf = NULL;
@@ -2445,6 +2445,10 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 #			endif
 			STORE_MEM(st, (int)(int_val)&trap->prev, LOAD_MEM_PTR(current_addr,0));
 			STORE_MEM(current_addr, 0, st);
+			if( o->op == OCleanupTrap ) {
+				ereg guard_args[1] = { st };
+				emit_native_call(ctx, hl_cleanup_trap_enter, guard_args, 1, &hlt_void);
+			}
 
 
 			/*
@@ -2510,7 +2514,7 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 			inf->target = o->p2 + 1 + ctx->op_pos;
 		}
 		break;
-	case OEndTrap:
+	case OEndTrap: case OEndCleanupTrap:
 		{
 			if( ctx->trap_count == 0 ) jit_assert();
 
@@ -2528,6 +2532,10 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 			/* Consecutive OEndTrap opcodes can unwind several nested handlers.
 			   ctx->traps is static JIT state, so pop the active runtime handler. */
 			ereg active_trap = LOAD_MEM_PTR(current_addr,0);
+			if( o->op == OEndCleanupTrap ) {
+				ereg guard_args[1] = { active_trap };
+				emit_native_call(ctx, hl_cleanup_trap_leave, guard_args, 1, &hlt_void);
+			}
 			STORE_MEM(current_addr, 0, LOAD_MEM_PTR(active_trap,(int)(int_val)&trap->prev));
 
 			emit_instr(ctx, CATCH);

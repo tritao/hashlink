@@ -804,21 +804,23 @@ static bool valid_closure_target( hl_module *m, patch_layout *layout, int index 
 static bool validate_traps( hl_patch_function *f, const char **error ) {
 	int n=f->instruction_count, top=0, open=0, targets[PATCH_MAX_TRAPS];
 	int *depth=(int*)malloc(sizeof(int)*(n>0?n:1)), *pending=(int*)malloc(sizeof(int)*(n>0?n:1)), *regions=(int*)malloc(sizeof(int)*(n>0?n:1));
+	unsigned int *guards=(unsigned int*)malloc(sizeof(unsigned int)*(n>0?n:1));
 	bool ok=true;
-	if(!depth||!pending||!regions){free(depth);free(pending);free(regions);*error="Out of memory validating patch traps";return false;}
+	if(!depth||!pending||!regions||!guards){free(depth);free(pending);free(regions);free(guards);*error="Out of memory validating patch traps";return false;}
 	// The JIT closes one region per instruction, the innermost, when it reaches that region's handler.
 	for(int i=0;ok&&i<n;i++){
 		if(open>0&&targets[open-1]==i)open--;
 		regions[i]=open;
-		if(f->instructions[i].opcode==OTrap){
+		if(f->instructions[i].opcode==OTrap || f->instructions[i].opcode==OCleanupTrap){
 			if(open==PATCH_MAX_TRAPS){*error="Too many nested patch traps";ok=false;break;}
 			targets[open++]=i+1+f->instructions[i].operands[1];
 		}
 	}
 	for(int i=0;i<n;i++)depth[i]=-1;
-	if(n>0){depth[0]=0;pending[top++]=0;}
+	if(n>0){depth[0]=0;guards[0]=0;pending[top++]=0;}
 	while(ok&&top>0){
 		int i=pending[--top],d=depth[i],next[2],next_depth[2],count=0;
+		unsigned int next_guards[2], mask=guards[i];
 		hl_patch_instruction *op=f->instructions+i;int *p=op->operands;
 		if(regions[i]<d){*error="Patch trap outside its try region";ok=false;break;}
 		switch(op->opcode){
@@ -829,21 +831,25 @@ static bool validate_traps( hl_patch_function *f, const char **error ) {
 		case OJAlways:next[count]=i+1+p[0];next_depth[count++]=d;break;
 		case ORet:if(d!=0){*error="Unbalanced patch traps";ok=false;}break;
 		case OThrow:case ORethrow:break;
-		case OTrap:
+		case OTrap: case OCleanupTrap:
 			if(d==PATCH_MAX_TRAPS){*error="Too many nested patch traps";ok=false;break;}
-			next[count]=i+1+p[1];next_depth[count++]=d;next[count]=i+1;next_depth[count++]=d+1;break;
-		case OEndTrap:
+			next[count]=i+1+p[1];next_depth[count]=d;next_guards[count++]=mask;
+			next[count]=i+1;next_depth[count]=d+1;next_guards[count++]=op->opcode==OCleanupTrap ? mask|(1u<<d) : mask;break;
+		case OEndTrap: case OEndCleanupTrap:
 			if(d==0){*error="Invalid end-trap operands";ok=false;break;}
+			if(!!(mask&(1u<<(d-1))) != (op->opcode==OEndCleanupTrap)){*error="Mismatched cleanup trap";ok=false;break;}
+			mask &= ~(1u<<(d-1));
 			next[count]=i+1;next_depth[count++]=d-1;break;
 		default:next[count]=i+1;next_depth[count++]=d;break;
 		}
 		for(int k=0;ok&&k<count;k++){
 			if(next[k]>=n)continue;
-			if(depth[next[k]]<0){depth[next[k]]=next_depth[k];pending[top++]=next[k];}
-			else if(depth[next[k]]!=next_depth[k]){*error="Inconsistent patch trap depth";ok=false;}
+			unsigned int target_guards=(op->opcode==OTrap || op->opcode==OCleanupTrap) ? next_guards[k] : mask;
+			if(depth[next[k]]<0){depth[next[k]]=next_depth[k];guards[next[k]]=target_guards;pending[top++]=next[k];}
+			else if(depth[next[k]]!=next_depth[k] || guards[next[k]]!=target_guards){*error="Inconsistent patch trap state";ok=false;}
 		}
 	}
-	free(depth);free(pending);free(regions);
+	free(depth);free(pending);free(regions);free(guards);
 	return ok;
 }
 
@@ -942,10 +948,10 @@ static bool validate_function( hl_module *m, hl_patch *patch, patch_layout *layo
 			if(!valid_reg(f,p[0])||!valid_reg(f,p[1])){*error="Invalid register operands";return false;}break;
 		case OUDiv:case OUMod:case OGetI8:case OGetI16:case OGetMem:case OSetI8:case OSetI16:case OSetMem:case ORefOffset:
 			if(!valid_reg(f,p[0])||!valid_reg(f,p[1])||!valid_reg(f,p[2])){*error="Invalid register operands";return false;}break;
-		case OTrap:
+		case OTrap: case OCleanupTrap:
 			if(!valid_reg(f,p[0])||p[1]<0||i+1+p[1]>=f->instruction_count){*error="Invalid trap operands";return false;}
 			break;
-		case OEndTrap:
+		case OEndTrap: case OEndCleanupTrap:
 			if(!valid_reg(f,p[0])){*error="Invalid end-trap operands";return false;}
 			break;
 		default:*error="Unsupported patch opcode";return false;

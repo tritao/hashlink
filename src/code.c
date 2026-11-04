@@ -404,7 +404,7 @@ static const char *hl_validate_function_control_flow( hl_function *f ) {
 		case OJNotLt: case OJNotGte: case OJEq: case OJNotEq:
 			if( !VALID_TARGET(op->p3) ) return "Invalid comparison jump target";
 			break;
-		case OTrap:
+		case OTrap: case OCleanupTrap:
 			if( op->p2 < 0 || !VALID_TARGET(op->p2) ) return "Invalid trap target";
 			break;
 		default:

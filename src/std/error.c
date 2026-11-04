@@ -77,6 +77,23 @@ static void capture_break_context( hl_thread_info *t ) {
 		hl_setup.capture_break_context(&t->break_rip,t->break_regs);
 }
 
+/* Save the primary stack in the cleanup's own native frame, without allocating. Nested guards form a thread-local
+   chain; ordinary catches inside a cleanup can freely update the current exception stack until the guard exits. */
+HL_API void hl_cleanup_trap_enter( hl_cleanup_trap_ctx *guard ) {
+	hl_thread_info *t = hl_get_thread();
+	guard->previous = t->cleanup_trap;
+	guard->stack_count = t->exc_stack_count;
+	memcpy(guard->stack_trace,t->exc_stack_trace,guard->stack_count * sizeof(void*));
+	t->cleanup_trap = guard;
+}
+
+HL_API void hl_cleanup_trap_leave( hl_cleanup_trap_ctx *guard ) {
+	hl_thread_info *t = hl_get_thread();
+	t->exc_stack_count = guard->stack_count;
+	memcpy(t->exc_stack_trace,guard->stack_trace,guard->stack_count * sizeof(void*));
+	t->cleanup_trap = guard->previous;
+}
+
 static bool break_on_trap( hl_thread_info *t, hl_trap_ctx *trap, vdynamic *v ) {
 	bool unwrapped = false;
 	vdynamic *vvalue = NULL;
@@ -122,6 +139,8 @@ HL_PRIM void hl_throw( vdynamic *v ) {
 	if( trap == t->trap_uncaught ) t->trap_uncaught = NULL;
 	t->flags &= ~HL_EXC_RETHROW;
 	if( t->exc_handler && call_handler ) hl_dyn_call_safe(t->exc_handler,&v,1,&call_handler);
+	if( t->cleanup_trap != NULL && &t->cleanup_trap->trap == trap )
+		hl_cleanup_trap_leave(t->cleanup_trap);
 	if( hl_setup.throw_jump == NULL ) hl_setup.throw_jump = longjmp;
 	hl_setup.throw_jump(trap->buf,1);
 	HL_UNREACHABLE;

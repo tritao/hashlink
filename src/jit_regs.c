@@ -1214,7 +1214,7 @@ void hl_regs_function( jit_ctx *jit ) {
 	ctx->hot_calls = NULL;
 	ctx->has_try = false;
 	if( (jit->cfg.regopt & (JIT_REGOPT_CALL_SAVE | JIT_REGOPT_LOOP_PHI)) && !jit->mod->debug ) {
-		for(int i=0;i<jit->fun->nops;i++) if( jit->fun->ops[i].op == OTrap ) ctx->has_try = true;
+		for(int i=0;i<jit->fun->nops;i++) if( jit->fun->ops[i].op == OTrap || jit->fun->ops[i].op == OCleanupTrap ) ctx->has_try = true;
 	}
 	ctx->blocks_phis = (int_arr*)hl_zalloc(&jit->falloc,sizeof(int_arr) * jit->block_count);
 	ctx->values = (value_info*)hl_zalloc(&jit->falloc,sizeof(value_info) * nvalues);

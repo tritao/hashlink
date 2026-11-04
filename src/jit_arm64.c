@@ -1527,8 +1527,8 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 	// ---------------- Exception handling (setjmp-based) ----------------
 	// OTrap: alloc hl_trap_ctx on stack, chain into thread->trap_current,
 	// setjmp; 0 => try-body, non-zero => branch to catch with exc in dst.
-	case OTrap: {
-		int trap_size = ((int)sizeof(hl_trap_ctx) + 15) & ~15;
+	case OTrap: case OCleanupTrap: {
+		int trap_size = ((int)(op->op == OCleanupTrap ? sizeof(hl_cleanup_trap_ctx) : sizeof(hl_trap_ctx)) + 15) & ~15;
 		int prev_off  = (int)offsetof(hl_trap_ctx, prev);
 		int tcheck_off = (int)offsetof(hl_trap_ctx, tcheck);
 		int tc_off    = (int)offsetof(hl_thread_info, trap_current);
@@ -1546,6 +1546,10 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 		a64_str_imm(ctx, A64_X10, A64_X9, tc_off, 8);
 		// t->tcheck = NULL (no typed catch yet)
 		a64_str_imm(ctx, A64_SP_OR_ZR /* xzr */, A64_SP_OR_ZR, tcheck_off, 8);
+		if( op->op == OCleanupTrap ) {
+			a64_add_imm(ctx, A64_X0, A64_SP_OR_ZR, 0, 1);
+			emit_call_native_ptr(ctx, (void*)hl_cleanup_trap_enter);
+		}
 		// x0 = &t->buf (offset 0 == sp)
 		a64_add_imm(ctx, A64_X0, A64_SP_OR_ZR, 0, 1);
 		emit_call_native_ptr(ctx, (void*)setjmp);
@@ -1561,10 +1565,14 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 		a64_patch_branch(ctx, j_no_exc, BUF_POS());
 		break;
 	}
-	case OEndTrap: {
-		int trap_size = ((int)sizeof(hl_trap_ctx) + 15) & ~15;
+	case OEndTrap: case OEndCleanupTrap: {
+		int trap_size = ((int)(op->op == OEndCleanupTrap ? sizeof(hl_cleanup_trap_ctx) : sizeof(hl_trap_ctx)) + 15) & ~15;
 		int prev_off  = (int)offsetof(hl_trap_ctx, prev);
 		int tc_off    = (int)offsetof(hl_thread_info, trap_current);
+		if( op->op == OEndCleanupTrap ) {
+			a64_add_imm(ctx, A64_X0, A64_SP_OR_ZR, 0, 1);
+			emit_call_native_ptr(ctx, (void*)hl_cleanup_trap_leave);
+		}
 		emit_call_native_ptr(ctx, (void*)hl_get_thread);
 		a64_mov_reg(ctx, A64_X9, A64_X0, 1);
 		a64_ldr_imm(ctx, A64_X10, A64_X9, tc_off, 8, 0);
@@ -2707,7 +2715,7 @@ int hl_jit_function( jit_ctx *ctx, hl_module *m, hl_function *f ) {
 		switch( o->op ) {
 		case OJAlways: t = i + 1 + o->p1; break;
 		case OJTrue: case OJFalse: case OJNull: case OJNotNull:
-		case OTrap:
+		case OTrap: case OCleanupTrap:
 			t = i + 1 + o->p2; break;
 		case OJSLt: case OJSGte: case OJSGt: case OJSLte:
 		case OJULt: case OJUGte: case OJNotLt: case OJNotGte:
