@@ -1734,6 +1734,10 @@ void hl_codegen_function( jit_ctx *jit ) {
 			break;
 		case CALL_REG:
 			EMIT(_CALL, e->a, UNUSED, M_NONE);
+			if( e->mode == M_UI8 || e->mode == M_UI16 ) {
+				// An indirect target may be native, whose ABI only defines the narrow return bits.
+				EMIT(e->mode == M_UI8 ? MOVZX8 : MOVZX16,R(RAX),R(RAX),M_PTR);
+			}
 			if( ctx->jit->mod->debug ) emit_mov(ctx, MK_ADDR(RSP,-HL_WSIZE), R(RBP), M_PTR);
 			break;
 		case TEST:

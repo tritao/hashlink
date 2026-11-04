@@ -1428,6 +1428,11 @@ static void emit_call_ptr( code_ctx *ctx, einstr *e ) {
 static void emit_call_reg( code_ctx *ctx, einstr *e ) {
 	Arm64Reg target = materialize_gpr(ctx, e->a, M_PTR, ARM_TMP1);
 	encode_branch_reg(ctx, /*BLR*/1, target);
+	// Indirect targets can be native functions, which return narrow values in the low bits.
+	if( e->mode == M_UI8 )
+		encode_logical_imm(ctx, 0, 0x00, 0, 0, 7, X0, X0);
+	else if( e->mode == M_UI16 )
+		encode_logical_imm(ctx, 0, 0x00, 0, 0, 15, X0, X0);
 }
 
 // JUMP_TABLE: dispatch through a const_table-resident jump table whose entries
