@@ -983,7 +983,7 @@ static bool validate_patch_object_type( hl_module *m, hl_patch *patch, int index
 		if( g < 0 || g >= patch->global_count || patch->globals[g].field_count >= 0 || patch->globals[g].type != index ) { *error = "Invalid appended object global"; return false; }
 	}
 	for(int j=0;j<o->proto_count;j++)
-		if( o->protos[j].name < 0 || o->protos[j].name >= string_count || o->protos[j].pindex < -1 ) { *error = "Invalid appended object method"; return false; }
+		if( o->protos[j].name < 0 || o->protos[j].name >= string_count || (o->protos[j].pindex < -1 && !(type->tag == HOBJ && o->protos[j].pindex == HL_PROTO_TYPED_ENTRY)) ) { *error = "Invalid appended object method"; return false; }
 	for(int j=0;j<o->binding_count;j++)
 		if( o->bindings[j].field < 0 ) { *error = "Invalid appended object binding"; return false; }
 	return true;

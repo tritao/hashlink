@@ -551,6 +551,9 @@ typedef struct {
 	int fid;
 } hl_runtime_binding;
 
+/* Private method metadata: excluded from ordinary prototypes and reflection. */
+#define HL_PROTO_TYPED_ENTRY (-2)
+
 struct hl_runtime_obj {
 	hl_type *t;
 	// absolute
@@ -578,6 +581,7 @@ struct hl_runtime_obj {
 	// __string returns a String object rather than UTF-16 bytes
 	bool toStringObject;
 	volatile bool allocation_ready; // Published after lazy prototype initialization completes.
+	void *typed_methods; // Immutable private value-ABI method table; metadata, not instance storage.
 };
 
 typedef struct {

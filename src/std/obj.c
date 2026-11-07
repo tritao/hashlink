@@ -22,6 +22,102 @@
 #include "hl.h"
 #include <string.h>
 
+/* Private value-ABI entries use prototype marker HL_PROTO_TYPED_ENTRY. They are not source
+   methods and must never enter the reflective field lookup. Slot keys retain
+   the complete semantic contract and physical signature, not just a hash. */
+HL_API void *hl_atomic_load_ptr(void **address);
+HL_API void *hl_atomic_store_ptr(void **address,void *value);
+
+typedef struct hl_typed_slot {
+ const uchar *key;
+ int index;
+ struct hl_typed_slot *next;
+} hl_typed_slot;
+
+typedef struct {
+ int count;
+ vclosure **entries;
+} hl_typed_table;
+
+static hl_typed_slot *typed_slots;
+static int typed_slot_count;
+
+/* Called only with the global metadata lock held. No GC allocations. */
+static hl_typed_slot *typed_slot_locked(const uchar *key) {
+ hl_typed_slot *slot;
+ for(slot=typed_slots;slot;slot=slot->next) if(ucmp(slot->key,key)==0) return slot;
+ slot=(hl_typed_slot*)malloc(sizeof(hl_typed_slot));
+ if(!slot)hl_fatal("Cannot allocate typed method slot");
+ int bytes=(ustrlen(key)+1)*sizeof(uchar);
+ uchar *copy=(uchar*)malloc(bytes);
+ if(!copy)hl_fatal("Cannot allocate typed method key");
+ memcpy(copy,key,bytes);
+ slot->key=copy;slot->index=typed_slot_count++;slot->next=typed_slots;typed_slots=slot;
+ return slot;
+}
+
+HL_PRIM hl_typed_slot *hl_typed_method_slot(hl_type *key) {
+ if(!key || key->kind!=HABSTRACT)hl_error("Invalid typed method slot key");
+ hl_global_lock(true);
+ hl_typed_slot *slot=typed_slot_locked(key->abs_name);
+ hl_global_lock(false);
+ return slot;
+}
+
+static hl_typed_table *typed_table(hl_type *type) {
+ hl_runtime_obj *rt=hl_get_obj_proto(type);
+ hl_typed_table *table;
+#if defined(__GNUC__)
+ table=(hl_typed_table*)__atomic_load_n(&rt->typed_methods,__ATOMIC_ACQUIRE);
+#else
+ table=(hl_typed_table*)hl_atomic_load_ptr(&rt->typed_methods);
+#endif
+ if(table)return table;
+ hl_typed_table *parent=type->obj->super?typed_table(type->obj->super):NULL;
+ hl_global_lock(true);
+ table=(hl_typed_table*)rt->typed_methods;
+ if(!table) {
+  hl_type_obj *object=type->obj;
+  hl_module_context *context=object->m;
+  int i,count=parent?parent->count:0;
+  for(i=0;i<object->nproto;i++)if(object->proto[i].pindex==HL_PROTO_TYPED_ENTRY) {
+   hl_typed_slot *slot=typed_slot_locked(object->proto[i].name);
+   if(slot->index>=count)count=slot->index+1;
+  }
+  table=(hl_typed_table*)hl_malloc(&context->alloc,sizeof(hl_typed_table));
+  table->count=count;
+  table->entries=(vclosure**)hl_zalloc(&context->alloc,sizeof(vclosure*)*count);
+  if(parent && parent->count)memcpy(table->entries,parent->entries,parent->count*sizeof(vclosure*));
+  for(i=0;i<object->nproto;i++)if(object->proto[i].pindex==HL_PROTO_TYPED_ENTRY) {
+   hl_obj_proto *proto=object->proto+i;
+   hl_typed_slot *slot=typed_slot_locked(proto->name);
+   hl_type *signature=context->functions_types[proto->findex];
+   if(!signature || signature->kind!=HFUN || signature->fun->nargs==0 || signature->fun->args[0]->kind!=HDYN)
+   { hl_global_lock(false); hl_error("Invalid typed method entry signature"); }
+   vclosure *closure=(vclosure*)hl_malloc(&context->alloc,sizeof(vclosure));
+   closure->t=signature;closure->fun=context->functions_ptrs[proto->findex];closure->hasValue=false;closure->value=NULL;
+   table->entries[slot->index]=closure;
+  }
+#if defined(__GNUC__)
+  __atomic_store_n(&rt->typed_methods,table,__ATOMIC_RELEASE);
+#else
+  hl_atomic_store_ptr(&rt->typed_methods,table);
+#endif
+ }
+ hl_global_lock(false);
+ return table;
+}
+
+HL_PRIM vclosure *hl_typed_method_entry(vdynamic *receiver,hl_typed_slot *slot) {
+ if(receiver && receiver->t->kind==HVIRTUAL)receiver=((vvirtual*)receiver)->value;
+ if(!receiver || !slot || receiver->t->kind!=HOBJ)return NULL;
+ hl_typed_table *table=typed_table(receiver->t);
+ return slot->index<table->count?table->entries[slot->index]:NULL;
+}
+
+DEFINE_PRIM(_ABSTRACT(haxeon_typed_method_slot),typed_method_slot,_TYPE);
+DEFINE_PRIM(_ABSTRACT(haxeon_typed_method),typed_method_entry,_DYN _ABSTRACT(haxeon_typed_method_slot));
+
 HL_PRIM hl_field_lookup *hl_lookup_insert( hl_field_lookup *l, int size, int hash, hl_type *t, int index ) {
 	int min = 0;
 	int max = size;
@@ -138,6 +234,11 @@ HL_PRIM vbyte *hl_field_name( int hash ) {
 }
 
 HL_PRIM void hl_cache_free() {
+	while( typed_slots ) {
+		hl_typed_slot *next = typed_slots->next;
+		free((void*)typed_slots->key); free(typed_slots); typed_slots = next;
+	}
+	typed_slot_count = 0;
 	int i;
 	for(i=0;i<hl_cache_count;i++)
 		free(hl_cache[i].t);
@@ -188,6 +289,7 @@ HL_PRIM hl_runtime_obj *hl_get_obj_rt( hl_type *ot ) {
 	t = (hl_runtime_obj*)hl_malloc(alloc,sizeof(hl_runtime_obj));
 	t->t = ot;
 	t->allocation_ready = false;
+	t->typed_methods = NULL;
 	t->nfields = o->nfields + (p ? p->nfields : 0);
 	t->nproto = p ? p->nproto : 0;
 	t->nlookup = o->nfields;
@@ -195,11 +297,12 @@ HL_PRIM hl_runtime_obj *hl_get_obj_rt( hl_type *ot ) {
 	t->hasPtr = p ? p->hasPtr : false;
 
 	if( !p ) {
-		t->nlookup += o->nproto;
+		for(i=0;i<o->nproto;i++) if( o->proto[i].pindex != HL_PROTO_TYPED_ENTRY ) t->nlookup++;
 		t->nbindings += o->nbindings;
 	} else {
 		for(i=0;i<o->nproto;i++) {
 			hl_obj_proto *pr = o->proto + i;
+			if( pr->pindex == HL_PROTO_TYPED_ENTRY ) continue;
 			if( pr->pindex >= 0 && pr->pindex < p->nproto )
 				continue;
 			t->nlookup++;
@@ -279,7 +382,7 @@ HL_PRIM hl_runtime_obj *hl_get_obj_rt( hl_type *ot ) {
 		}
 	}
 	t->largest_field = largest_field;
-	t->nmethods = p ? p->nmethods : o->nproto;
+	t->nmethods = p ? p->nmethods : 0;
 	t->methods = NULL;
 	o->rt = t;
 	ot->vobj_proto = NULL;
@@ -289,13 +392,14 @@ HL_PRIM hl_runtime_obj *hl_get_obj_rt( hl_type *ot ) {
 	for(i=0;i<o->nproto;i++) {
 		hl_obj_proto *pr = o->proto + i;
 		hl_type *mt;
+		if( pr->pindex == HL_PROTO_TYPED_ENTRY ) continue;
 		int method_index;
 		if( p ) {
 			if( pr->pindex >= 0 && pr->pindex < p->nproto )
 				continue;
 			method_index = t->nmethods++;
 		} else
-			method_index = i;
+			method_index = t->nmethods++;
 		if( pr->pindex >= t->nproto ) t->nproto = pr->pindex + 1;
 		mt = m->functions_types[pr->findex];
 		hl_lookup_insert(t->lookup,nlookup++,pr->hashed_name,mt,-(method_index+1));
@@ -374,13 +478,14 @@ HL_API hl_runtime_obj *hl_get_obj_proto( hl_type *ot ) {
 	for(i=0;i<o->nproto;i++) {
 		hl_obj_proto *pr = o->proto + i;
 		int method_index;
+		if( pr->pindex == HL_PROTO_TYPED_ENTRY ) continue;
 		if( p ) {
 			if( pr->pindex >= 0 && pr->pindex < p->nproto )
 				method_index = -obj_resolve_field(o->super->obj,pr->hashed_name)->field_index-1;
 			else
 				method_index = nmethods++;
 		} else
-			method_index = i;
+			method_index = nmethods++;
 		t->methods[method_index] = m->functions_ptrs[pr->findex];
 	}
 

@@ -489,7 +489,7 @@ HL_PRIM varray *hl_type_instance_fields( hl_type *t ) {
 		int i;
 		for(i=0;i<o->nproto;i++) {
 			hl_obj_proto *p = o->proto + i;
-			if( p->pindex < 0 ) mcount++;
+			if( p->pindex < 0 && p->pindex != HL_PROTO_TYPED_ENTRY ) mcount++;
 		}
 		if( o->super == NULL ) break;
 		o = o->super->obj;
@@ -503,7 +503,7 @@ HL_PRIM varray *hl_type_instance_fields( hl_type *t ) {
 		int pproto = rt->parent ? rt->parent->nproto : 0;
 		for(i=0;i<o->nproto;i++) {
 			hl_obj_proto *p = o->proto + i;
-			if( p->pindex < 0 || p->pindex >= pproto )
+			if( p->pindex != HL_PROTO_TYPED_ENTRY && (p->pindex < 0 || p->pindex >= pproto) )
 				names[out++] = p->name;
 		}
 		for(i=0;i<o->nfields;i++) {
