@@ -197,10 +197,10 @@ typedef struct {
 
 #define hlt_key		hlt_bytes
 #define hl_hbfilter(key) key
-#define hl_hbhash(key)	((unsigned)hl_hash_gen(key,false))
+#define hl_hbhash(key)	((key) == NULL ? 0u : (unsigned)hl_hash_gen(key,false))
 #define _MKEY_TYPE	uchar*
 #define _MNAME(n)	hl_hb##n
-#define _MMATCH(c)	m->entries[c].hash == hash && ucmp(m->values[c].key,key) == 0
+#define _MMATCH(c)	(m->entries[c].hash == hash && (m->values[c].key == key || (m->values[c].key != NULL && key != NULL && ucmp(m->values[c].key,key) == 0)))
 #define _MKEY(m,c)	m->values[c].key
 #define	_MSET(c)	m->entries[c].hash = hash; hl_gc_store_ref(&m->values[c].key,key,&hlt_key)
 #define _MERASE(c)  hl_gc_store_ref(&m->values[c].key,NULL,&hlt_key)
