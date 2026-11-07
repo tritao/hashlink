@@ -210,8 +210,10 @@ static void hl_read_type( hl_reader *r, hl_type *t ) {
 	case HVIRTUAL:
 		{
 			int i;
+			const uchar *identity = r->code->version >= 8 ? hl_read_ustring(r) : NULL;
 			int nfields = UINDEX();
 			t->virt = (hl_type_virtual*)hl_malloc(&r->code->alloc,sizeof(hl_type_virtual));
+			t->virt->nominal_identity = identity;
 			t->virt->nfields = nfields;
 			t->virt->fields = (hl_obj_field*)hl_malloc(&r->code->alloc,sizeof(hl_obj_field)*nfields);
 			for(i=0;i<nfields;i++) {
@@ -512,7 +514,7 @@ hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg ) {
 	hl_alloc alloc;
 	int i;
 	int flags;
-	int max_version = 7;
+	int max_version = 8;
 	hl_alloc_init(&alloc);
 	c = hl_zalloc(&alloc,sizeof(hl_code));
 	c->alloc = alloc;
@@ -774,6 +776,7 @@ static int hash_type_first( hl_type *t, bool isrec ) {
 		HTYPE(t->tparam);
 		break;
 	case HVIRTUAL:
+		if( t->virt->nominal_identity != NULL ) { HUSTR(t->virt->nominal_identity); }
 		H32(t->virt->nfields);
 		for(i=0;i<t->virt->nfields;i++) {
 			hl_obj_field *f = t->virt->fields + i;

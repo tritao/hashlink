@@ -1390,6 +1390,9 @@ static bool check_same_type( hl_type *t1, hl_type *t2 ) {
 				return false;
 		return check_same_type(t1->fun->ret, t2->fun->ret);
 	case HVIRTUAL:
+		if( t1->virt->nominal_identity != NULL || t2->virt->nominal_identity != NULL )
+			return t1->virt->nominal_identity != NULL && t2->virt->nominal_identity != NULL
+				&& ucmp(t1->virt->nominal_identity,t2->virt->nominal_identity) == 0;
 		if( t1->virt == t2->virt )
 			return true;
 		if( t1->virt->nfields != t2->virt->nfields )

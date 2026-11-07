@@ -432,6 +432,7 @@ typedef struct {
 	int dataSize;
 	int *indexes;
 	hl_field_lookup *lookup;
+	const uchar *nominal_identity;
 } hl_type_virtual;
 
 typedef struct {

@@ -478,6 +478,7 @@ static unsigned int hash_type_prefix( hl_module *module, int count ) {
 			break;
 		}
 		case HVIRTUAL:
+			hash=hash_i32(hash,hash_type_string_index(code,&strings,type->virt->nominal_identity));
 			hash=hash_i32(hash,type->virt->nfields);
 			for(int j=0;j<type->virt->nfields;j++) { hash=hash_i32(hash,hash_type_string_index(code,&strings,type->virt->fields[j].name)); hash=hash_i32(hash,hash_type_index(code,type->virt->fields[j].t)); }
 			break;
@@ -553,7 +554,7 @@ static bool read_patch_object_type( patch_reader *r, hl_patch_type *type ) {
 	memset(o,0,sizeof(*o));
 	o->super = -1;
 	if( type->tag == HVIRTUAL )
-		return read_count(r,&o->field_count) && read_patch_type_fields(r,o->field_count,&o->fields);
+		return read_index(r,&o->name) && read_count(r,&o->field_count) && read_patch_type_fields(r,o->field_count,&o->fields);
 	return read_index(r,&o->name) && read_index(r,&o->super) && read_count(r,&o->global) && read_count(r,&o->field_count)
 		&& read_count(r,&o->proto_count) && read_count(r,&o->binding_count) && read_patch_type_fields(r,o->field_count,&o->fields)
 		&& read_patch_type_methods(r,o->proto_count,&o->protos) && read_patch_type_bindings(r,o->binding_count,&o->bindings);
@@ -601,8 +602,8 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 	if( !take(&r,3,&p) ) goto fail;
 	if( memcmp(p,"HLP",3) != 0 ) FAIL("Invalid HLP magic");
 	if( !read_byte(&r,&version) ) goto fail;
-	// Version 10 adds object, struct, virtual and packed types and null object globals; version 9 patches read as before.
-	if( version != 9 && version != 10 ) FAIL("Unsupported HLP version");
+	// Version 11 adds stable nominal identities to virtual types.
+	if( version != 11 ) FAIL("Unsupported HLP version");
 	if( !take(&r,16,&p) ) goto fail;
 	memcpy(patch->module_id,p,16);
 	if( !read_count(&r,&patch->base_revision) || !read_count(&r,&patch->revision) ) goto fail;
@@ -628,8 +629,8 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 				hl_patch_type *type=patch->types+i;if(!read_byte(&s,&type->tag))goto section_fail;
 				if(type->tag==HFUN){if(!read_byte(&s,&type->data.fun.count))goto section_fail;type->data.fun.arguments=(int*)calloc(type->data.fun.count,sizeof(int));if(type->data.fun.count&&!type->data.fun.arguments)FAIL("Out of memory reading function type");for(j=0;j<type->data.fun.count;j++)if(!read_index(&s,type->data.fun.arguments+j))goto section_fail;if(!read_index(&s,&type->data.fun.result))goto section_fail;}
 				else if(type->tag==HABSTRACT){if(!read_index(&s,&type->data.name))goto section_fail;}
-				else if(type->tag==HREF||type->tag==HNULL||(version>=10&&type->tag==HPACKED)){if(!read_index(&s,&type->data.parameter))goto section_fail;}
-				else if(version>=10&&patch_type_is_object(type->tag)){if(!read_patch_object_type(&s,type))goto section_fail;}
+				else if(type->tag==HREF||type->tag==HNULL||type->tag==HPACKED){if(!read_index(&s,&type->data.parameter))goto section_fail;}
+				else if(patch_type_is_object(type->tag)){if(!read_patch_object_type(&s,type))goto section_fail;}
 				else if(type->tag<HVOID||type->tag>HGUID||type->tag==HOBJ||type->tag==HVIRTUAL||type->tag==HENUM||type->tag==HPACKED)FAIL("Unsupported HLP type");
 			}
 		} else if( tag == 2 ) {
@@ -700,7 +701,7 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 			patch->globals=(hl_patch_global*)calloc(patch->global_count,sizeof(hl_patch_global));if(!patch->globals)FAIL("Out of memory reading patch globals");
 			for(i=0;i<patch->global_count;i++){
 				hl_patch_global *global=patch->globals+i;
-				if(version>=10){int kind;if(!read_byte(&s,&kind))goto section_fail;if(kind==0){global->field_count=-1;if(!read_count(&s,&global->type))goto section_fail;global->fields=NULL;continue;}if(kind!=1)FAIL("Invalid HLP global kind");}
+				int kind;if(!read_byte(&s,&kind))goto section_fail;if(kind==0){global->field_count=-1;if(!read_count(&s,&global->type))goto section_fail;global->fields=NULL;continue;}if(kind!=1)FAIL("Invalid HLP global kind");
 				if(!read_count(&s,&global->type)||!read_count(&s,&global->field_count))goto section_fail;
 				if(global->field_count>s.end-s.p)FAIL("Truncated HLP data");
 				global->fields=(int*)calloc(global->field_count>0?global->field_count:1,sizeof(int));if(!global->fields)FAIL("Out of memory reading patch globals");
@@ -972,7 +973,10 @@ static bool validate_patch_object_type( hl_module *m, hl_patch *patch, int index
 	int total = patch->base_type_count + patch->type_count;
 	for(int j=0;j<o->field_count;j++)
 		if( o->fields[j].name < 0 || o->fields[j].name >= string_count || o->fields[j].type < 0 || o->fields[j].type >= total ) { *error = "Invalid appended object field"; return false; }
-	if( type->tag == HVIRTUAL ) return true;
+	if( type->tag == HVIRTUAL ) {
+		if( o->name < 0 || o->name >= string_count ) { *error = "Invalid appended interface identity"; return false; }
+		return true;
+	}
 	if( o->name < 0 || o->name >= string_count ) { *error = "Invalid appended object name"; return false; }
 	// A base comes first, so building the runtime layout of a type never loops.
 	if( o->super >= 0 && (o->super >= index || patch_type_kind(m,patch,o->super) != type->tag) ) { *error = "Invalid appended object base"; return false; }
@@ -1011,6 +1015,7 @@ static bool stage_patch_object_type( hl_module *m, hl_patch_type *src, hl_type *
 		if( virt == NULL ) { *error = "Out of memory staging virtual type"; return false; }
 		*allocation = virt;
 		fields = (hl_obj_field*)(virt + 1);
+		virt->nominal_identity = strings[o->name];
 		virt->nfields = o->field_count;
 		virt->fields = fields;
 		dst->virt = virt;
