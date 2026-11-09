@@ -453,6 +453,11 @@ static unsigned int hash_type_prefix( hl_module *module, int count ) {
 		hl_type *type=code->types+i;
 		hash=hash_i32(hash,type->kind);
 		switch(type->kind) {
+		case HENUMTAG:
+			hash=hash_i32(hash,hash_type_index(code,type->tenumtag->boxed_type));
+			hash=hash_i32(hash,type->tenumtag->ncases);
+			for(int j=0;j<type->tenumtag->ncases;j++) hash=hash_i32(hash,type->tenumtag->cache_globals[j]);
+			break;
 		case HFUN:
 			hash=hash_i32(hash,type->fun->nargs);
 			for(int j=0;j<type->fun->nargs;j++) hash=hash_i32(hash,hash_type_index(code,type->fun->args[j]));

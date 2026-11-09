@@ -347,6 +347,7 @@ static void *callback_c2hl( void *f, hl_type *t, void **args, vdynamic *ret ) {
 		case HBOOL:
 		case HUI8:
 		case HUI16:
+		case HENUMTAG:
 		case HI32:
 		case HF32:
 			iv = *(int*)v;
@@ -374,6 +375,7 @@ static void *callback_c2hl( void *f, hl_type *t, void **args, vdynamic *ret ) {
 	switch( t->fun->ret->kind ) {
 	case HUI8:
 	case HUI16:
+	case HENUMTAG:
 	case HI32:
 	case HBOOL:
 		ret->v.i = ((int (*)(void *, void *, int))call_jit_c2hl)(f, &vargs, sp);
@@ -426,6 +428,7 @@ void *hl_jit_wrapper_ptr( vclosure_wrapper *c, char *stack_args, void **regs ) {
 		return NULL;
 	case HUI8:
 	case HUI16:
+	case HENUMTAG:
 	case HI32:
 	case HBOOL:
 		return (void*)(int_val)hl_dyn_casti(&ret,&hlt_dyn,tret);

@@ -205,6 +205,9 @@ static void hl_buffer_addr( hl_buffer *b, void *data, hl_type *t, vlist *stack )
 	case HUI16:
 		hl_buffer_str_sub(b,buf,usprintf(buf,32,USTR("%d"),(int)*(unsigned short*)data));
 		break;
+	case HENUMTAG:
+		hl_buffer_rec(b,(vdynamic*)hl_enum_tag_box(t,*(int*)data),stack);
+		break;
 	case HI32:
 		hl_buffer_str_sub(b,buf,usprintf(buf,32,USTR("%d"),*(int*)data));
 		break;

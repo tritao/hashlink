@@ -981,6 +981,19 @@ static void hl_module_init_indexes( hl_module *m ) {
 				}
 			}
 			break;
+		case HENUMTAG: {
+			hl_type_enum_tag *et = t->tenumtag;
+			if( et->boxed_type->kind != HENUM || et->boxed_type->tenum->nconstructs != et->ncases )
+				hl_fatal("Invalid scalar enum descriptor");
+			et->cache_slots = hl_malloc(&m->code->alloc,sizeof(void**)*et->ncases);
+			for(int k=0;k<et->ncases;k++) {
+				int g = et->cache_globals[k];
+				if( et->boxed_type->tenum->constructs[k].nparams != 0 || g < 0 || g >= m->code->nglobals
+					|| !hl_same_type(m->code->globals[g],et->boxed_type) ) hl_fatal("Invalid scalar enum case global");
+				et->cache_slots[k] = (void**)(m->globals_data + m->globals_indexes[g]);
+			}
+			break;
+		}
 		case HENUM:
 			hl_init_enum(t,&m->ctx);
 			t->tenum->global_value = ((int)(int_val)t->tenum->global_value) ? (void**)(int_val)(m->globals_data + m->globals_indexes[(int)(int_val)t->tenum->global_value-1]) : NULL;
@@ -1411,6 +1424,8 @@ static bool check_same_type( hl_type *t1, hl_type *t2 ) {
 		return true;
 	case HABSTRACT:
 		return ucmp(t1->abs_name, t2->abs_name) == 0;
+	case HENUMTAG:
+		return check_same_type(t1->tenumtag->boxed_type,t2->tenumtag->boxed_type);
 	case HENUM:
 		return ucmp(t1->tenum->name, t2->tenum->name) == 0;
 	case HPACKED:

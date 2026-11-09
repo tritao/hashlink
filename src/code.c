@@ -246,6 +246,18 @@ static void hl_read_type( hl_reader *r, hl_type *t ) {
 			}
 		}
 		break;
+	case HENUMTAG:
+		t->tenumtag = (hl_type_enum_tag*)hl_malloc(&r->code->alloc,sizeof(hl_type_enum_tag));
+		t->tenumtag->boxed_type = hl_get_type(r);
+		t->tenumtag->ncases = UINDEX();
+		t->tenumtag->cache_globals = (int*)hl_malloc(&r->code->alloc,sizeof(int)*t->tenumtag->ncases);
+		t->tenumtag->cache_slots = NULL;
+		for(int i=0;i<t->tenumtag->ncases;i++) {
+			int global = UINDEX();
+			if( global >= r->code->nglobals ) ERROR("Invalid scalar enum cache global");
+			t->tenumtag->cache_globals[i] = global;
+		}
+		break;
 	case HREF:
 	case HNULL:
 	case HPACKED:
@@ -771,6 +783,9 @@ static int hash_type_first( hl_type *t, bool isrec ) {
 			HTYPE(f->t);
 		}
 		break;
+	case HENUMTAG:
+		HTYPE(t->tenumtag->boxed_type);
+		break;
 	case HREF:
 	case HNULL:
 		HTYPE(t->tparam);
@@ -823,6 +838,9 @@ static int hash_type_rec( hl_code_hash *h, hl_type *t ) {
 			hl_obj_field *f = t->obj->fields + i;
 			HTYPE(f->t);
 		}
+		break;
+	case HENUMTAG:
+		HTYPE(t->tenumtag->boxed_type);
 		break;
 	case HREF:
 	case HNULL:
@@ -1063,6 +1081,10 @@ hl_code_hash *hl_code_hash_alloc( hl_code *c ) {
 			if( t->obj->global_value )
 				h->globals_signs[(int)(int_val)t->obj->global_value - 1] = hl_code_hash_type(h,t);
 			break;
+		case HENUMTAG:
+			for(int k=0;k<t->tenumtag->ncases;k++)
+				h->globals_signs[t->tenumtag->cache_globals[k]] = hl_code_hash_type(h,t) ^ k;
+			break;
 		case HENUM:
 			if( t->tenum->global_value )
 				h->globals_signs[(int)(int_val)t->tenum->global_value - 1] = hl_code_hash_type(h,t);
@@ -1176,6 +1198,10 @@ void hl_code_hash_remap_globals( hl_code_hash *hnew, hl_code_hash *hold ) {
 		case HOBJ:
 			if( t->obj->global_value )
 				t->obj->global_value = (void*)(int_val)(remap[(int)(int_val)t->obj->global_value - 1] + 1);
+			break;
+		case HENUMTAG:
+			for(int k=0;k<t->tenumtag->ncases;k++)
+				t->tenumtag->cache_globals[k] = remap[t->tenumtag->cache_globals[k]];
 			break;
 		case HENUM:
 			if( t->tenum->global_value )

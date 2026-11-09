@@ -620,7 +620,7 @@ static void *callback_c2hl_arm64( void *_f, hl_type *t, void **args, vdynamic *r
 			switch( at->kind ) {
 			case HBOOL: case HUI8:  buf[ngpr] = *(unsigned char*)v; break;
 			case HUI16:             buf[ngpr] = *(unsigned short*)v; break;
-			case HI32:              buf[ngpr] = (uint64_t)(int64_t)*(int32_t*)v; break;
+			case HENUMTAG: case HI32:              buf[ngpr] = (uint64_t)(int64_t)*(int32_t*)v; break;
 			case HI64: case HGUID:  buf[ngpr] = *(uint64_t*)v; break;
 			default:                buf[ngpr] = (uint64_t)(intptr_t)v; break;
 			}
@@ -631,7 +631,7 @@ static void *callback_c2hl_arm64( void *_f, hl_type *t, void **args, vdynamic *r
 	case HVOID:
 		((void(*)(void*, void*))call_jit_c2hl_native)(*f, buf);
 		return NULL;
-	case HUI8: case HUI16: case HI32: case HBOOL:
+	case HUI8: case HUI16: case HENUMTAG: case HI32: case HBOOL:
 		ret->v.i = ((int(*)(void*, void*))call_jit_c2hl_native)(*f, buf);
 		return &ret->v.i;
 	case HI64: case HGUID:
@@ -740,7 +740,7 @@ static int vreg_size( hl_function *f, int i ) {
 	switch( f->regs[i]->kind ) {
 	case HUI8: case HBOOL: return 1;
 	case HUI16: return 2;
-	case HI32: case HF32: return 4;
+	case HENUMTAG: case HI32: case HF32: return 4;
 	default: return 8;
 	}
 }
@@ -1293,7 +1293,7 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 			case HF32: fn = (void*)hl_dyn_getf;  needs_type = 0; break;
 			case HF64: fn = (void*)hl_dyn_getd;  needs_type = 0; break;
 			case HI64: case HGUID: fn = (void*)hl_dyn_geti64; needs_type = 0; break;
-			case HI32: case HUI16: case HUI8: case HBOOL: fn = (void*)hl_dyn_geti; break;
+			case HENUMTAG: case HI32: case HUI16: case HUI8: case HBOOL: fn = (void*)hl_dyn_geti; break;
 			default: fn = (void*)hl_dyn_getp; break;
 			}
 			if( needs_type ) a64_mov_imm64(ctx, A64_X2, (int64_t)(intptr_t)dt);
@@ -1368,7 +1368,7 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 				fn = (void*)hl_dyn_seti64;
 				load_vreg(ctx, A64_X2, op->p3);
 				break;
-			case HI32: case HUI16: case HUI8: case HBOOL:
+			case HENUMTAG: case HI32: case HUI16: case HUI8: case HBOOL:
 				fn = (void*)hl_dyn_seti;
 				a64_mov_imm64(ctx, A64_X2, (int64_t)(intptr_t)src_t);
 				load_vreg(ctx, A64_X3, op->p3);
@@ -1716,7 +1716,7 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 		case HF32:  fn = (void*)hl_dyn_getf;  needs_type = 0; break;
 		case HF64:  fn = (void*)hl_dyn_getd;  needs_type = 0; break;
 		case HI64: case HGUID: fn = (void*)hl_dyn_geti64; needs_type = 0; break;
-		case HI32: case HUI16: case HUI8: case HBOOL:
+		case HENUMTAG: case HI32: case HUI16: case HUI8: case HBOOL:
 			fn = (void*)hl_dyn_geti; break;
 		default:    fn = (void*)hl_dyn_getp; break;
 		}
@@ -1748,7 +1748,7 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 			fn = (void*)hl_dyn_seti64;
 			load_vreg(ctx, A64_X2, op->p3);
 			break;
-		case HI32: case HUI16: case HUI8: case HBOOL:
+		case HENUMTAG: case HI32: case HUI16: case HUI8: case HBOOL:
 			fn = (void*)hl_dyn_seti;
 			a64_mov_imm64(ctx, A64_X2, (int64_t)(intptr_t)vt);
 			load_vreg(ctx, A64_X3, op->p3);
@@ -1880,7 +1880,7 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 					case HF32: cast_fn = (void*)hl_dyn_castf; break;
 					case HF64: cast_fn = (void*)hl_dyn_castd; break;
 					case HI64: case HGUID: cast_fn = (void*)hl_dyn_casti64; break;
-					case HI32: case HUI16: case HUI8: case HBOOL:
+					case HENUMTAG: case HI32: case HUI16: case HUI8: case HBOOL:
 						cast_fn = (void*)hl_dyn_casti; has_arg3 = 1; break;
 					default:
 						cast_fn = (void*)hl_dyn_castp; has_arg3 = 1; break;
@@ -1998,7 +1998,7 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 				a64_add_imm(ctx, A64_X9, A64_SP_OR_ZR, ret_off, 1);
 				a64_ldr_fp(ctx, A64_V16, A64_X9, 8, dt->kind == HF64);
 				store_vreg_fp(ctx, A64_V16, op->p1);
-			} else if( dt->kind == HUI8 || dt->kind == HUI16 || dt->kind == HI32 ||
+			} else if( dt->kind == HUI8 || dt->kind == HUI16 || dt->kind == HI32 || dt->kind == HENUMTAG ||
 					dt->kind == HBOOL || dt->kind == HI64 || dt->kind == HGUID ) {
 				a64_add_imm(ctx, A64_X9, A64_SP_OR_ZR, ret_off, 1);
 				a64_ldr_imm(ctx, A64_X9, A64_X9, 8, vreg_size(f, op->p1), 0);
@@ -2157,7 +2157,7 @@ static void jit_opcode( jit_ctx *ctx, hl_opcode *op, int opIdx ) {
 		case HF32:  fn = (void*)hl_dyn_castf;  two_arg = 1; break;
 		case HF64:  fn = (void*)hl_dyn_castd;  two_arg = 1; break;
 		case HI64: case HGUID: fn = (void*)hl_dyn_casti64; two_arg = 1; break;
-		case HI32: case HUI16: case HUI8: case HBOOL:
+		case HENUMTAG: case HI32: case HUI16: case HUI8: case HBOOL:
 			fn = (void*)hl_dyn_casti; break;
 		default:    fn = (void*)hl_dyn_castp; break;
 		}
