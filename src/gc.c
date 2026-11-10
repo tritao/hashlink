@@ -230,6 +230,8 @@ static int64 gc_total_allocated_bytes( void );
 // One group of slots per owner class that can take part in the fast path: the unowned class and each registered one.
 #	define GC_TLAB_ALL_SLOTS	((1 + GC_OWNER_CLASSES) * GC_TLAB_SLOTS)
 #	define GC_TLAB_RUN		2048
+// The largest object compiled code allocates inline (five words on 64 bits).
+#	define GC_JIT_INLINE_MAX	(5 * (int)sizeof(void*))
 #if defined(__x86_64__) || defined(_M_X64)
 # define GC_ALLOC_FAST_SUPPORTED
 static bool gc_alloc_fast = true;
@@ -1093,9 +1095,10 @@ HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data) {
 #if defined(__linux__) && defined(__x86_64__) && defined(__GNUC__) && defined(GC_TLAB)
 	if(type->kind != HOBJ) return false;
 	hl_runtime_obj *rt = hl_get_obj_rt(type); // Layout only: methods remain lazy.
-	if(rt->nbindings || rt->size <= 0 || rt->size > GC_SIZES[GC_FIXED_PARTS-1]) return false;
+	// Compiled code zeroes the block word by word, so only the original classes (up to five words) are allocated inline.
+	if(rt->nbindings || rt->size <= 0 || rt->size > GC_JIT_INLINE_MAX) return false;
 	int rounded = rt->size + ((-rt->size) & (GC_ALIGN-1));
-	int part = (rounded >> GC_ALIGN_BITS)-1;
+	int part = GC_FIXED_PART(rounded);
 	memset(data,0,sizeof(*data));
 	data->type = type; data->runtime = rt; data->block = GC_SIZES[part];
 	intptr_t tls = (intptr_t)((uintptr_t)&current_thread - (uintptr_t)__builtin_thread_pointer());
@@ -1150,7 +1153,7 @@ static HL_INLINE void gc_tlab_clear( unsigned char *ptr, int size, int flags, in
 static void *gc_tlab_alloc( hl_thread_info *th, int size, int flags, int oc ) {
 	int kind = flags & PAGE_KIND_MASK;
 	int rounded = size + ((-size) & (GC_ALIGN - 1));
-	int part = (rounded >> GC_ALIGN_BITS) - 1;
+	int part = GC_FIXED_PART(rounded);
 	int block = GC_SIZES[part];
 	gc_tlab_slot *slot = (gc_tlab_slot*)th->gc_tlab + (oc * GC_TLAB_SLOTS + ((part << PAGE_KIND_BITS) | kind));
 	if( slot->cur >= slot->end ) {
@@ -1308,7 +1311,7 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 		if( th ) {
 			int kind = flags & PAGE_KIND_MASK;
 			int rounded = size + ((-size) & (GC_ALIGN - 1));
-			int part = (rounded >> GC_ALIGN_BITS) - 1;
+			int part = GC_FIXED_PART(rounded);
 			int block = GC_SIZES[part];
 			gc_tlab_slot *slot = (gc_tlab_slot*)th->gc_tlab + (oc * GC_TLAB_SLOTS + ((part << PAGE_KIND_BITS) | kind));
 			unsigned char *ptr = slot->cur;

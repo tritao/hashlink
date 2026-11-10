@@ -44,19 +44,30 @@ static inline unsigned int TRAILING_ZEROES( unsigned int x ) {
 }
 #endif
 
-#define GC_PARTITIONS	9
-#define GC_PART_BITS	4
-#define GC_FIXED_PARTS	5
-#define GC_LARGE_PART	(GC_PARTITIONS-1)
 #define GC_LARGE_BLOCK	(1 << 20)
-static const int GC_SBITS[GC_PARTITIONS] = {0,0,0,0,0,		3,6,13,0};
 
 #ifdef HL_64
-static const int GC_SIZES[GC_PARTITIONS] = {8,16,24,32,40,	8,64,1<<13,0};
+// Fixed classes: every block of a page has the class's size, so any free run is usable and a thread can take a buffer of
+// blocks from it. Objects of 41 to 256 bytes used to share the variable-size pages, where each allocation scanned the free
+// list of a fragmented page for a run long enough (the hottest loop of a cold compile of the app); they have classes of
+// their own now, in steps of 8 bytes up to 128 and then 32.
+#	define GC_PARTITIONS	24
+#	define GC_FIXED_PARTS	20
+#	define GC_LARGE_PART	(GC_PARTITIONS-1)
+static const int GC_SBITS[GC_PARTITIONS] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,	3,6,13,0};
+static const int GC_SIZES[GC_PARTITIONS] = {8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,160,192,224,256,	8,64,1<<13,0};
 #	define GC_ALIGN_BITS		3
+// The class of a size that is a multiple of GC_ALIGN, indexed by size / GC_ALIGN.
+static const unsigned char GC_FIXED_PART_OF[33] = {0, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15, 16,16,16,16, 17,17,17,17, 18,18,18,18, 19,19,19,19};
+#	define GC_FIXED_PART(sz)	((int)GC_FIXED_PART_OF[(sz) >> GC_ALIGN_BITS])
 #else
+#	define GC_PARTITIONS	9
+#	define GC_FIXED_PARTS	5
+#	define GC_LARGE_PART	(GC_PARTITIONS-1)
+static const int GC_SBITS[GC_PARTITIONS] = {0,0,0,0,0,		3,6,13,0};
 static const int GC_SIZES[GC_PARTITIONS] = {4,8,12,16,20,	8,64,1<<13,0};
 #	define GC_ALIGN_BITS		2
+#	define GC_FIXED_PART(sz)	(((sz) >> GC_ALIGN_BITS) - 1)
 #endif
 
 
@@ -425,7 +436,7 @@ static void *gc_allocator_alloc( int *size, int page_kind, int oc ) {
 		return ph->base;
 	}
 	if( sz <= GC_SIZES[GC_FIXED_PARTS-1] && page_kind != MEM_KIND_FINALIZER ) {
-		int part = (sz >> GC_ALIGN_BITS) - 1;
+		int part = GC_FIXED_PART(sz);
 		*size = GC_SIZES[part];
 		return gc_alloc_fixed(oc, part, page_kind);
 	}
