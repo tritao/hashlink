@@ -20,6 +20,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 #include "hl.h"
+#include "gc_flush_scan.h"
 
 #ifdef HL_WIN
 #	include <intrin.h>
@@ -208,6 +209,10 @@ static gc_pheader *gc_allocator_new_page( int pid, int block, int size, int kind
 }
 
 
+static void flush_emit_run( void *context, int pos, int count ) {
+	freelist_append((gc_freelist*)context,pos,count);
+}
+
 static void flush_free_list( gc_pheader *ph ) {
 	gc_allocator_page_data *p = &ph->alloc;
 
@@ -222,6 +227,12 @@ static void flush_free_list( gc_pheader *ph ) {
 	int next_bid = reuse ? reuse->pos : -1;
 	unsigned char *bmp = ph->bmp;
 
+	if( !p->sizes ) {
+		// A fixed-class page: its free runs are the unmarked blocks and the old free runs, found a word at a time.
+		gc_fixed_free_runs(bmp,p->first_block,p->max_blocks,old_fl.current < old_fl.count ? GET_FL(&old_fl,old_fl.current) : NULL,old_fl.count - old_fl.current,flush_emit_run,&new_fl);
+		bid = last;
+		reuse = NULL; // gc_fixed_free_runs walked old_fl itself
+	}
 	while( bid < last ) {
 		if( bid == next_bid ) {
 			if( cur_pos && cur_pos->pos + cur_pos->count == bid ) {
@@ -252,6 +263,38 @@ static void flush_free_list( gc_pheader *ph ) {
 		}
 		bid += count;
 	}
+#	ifdef GC_DEBUG
+	if( !p->sizes ) {
+		// The fast scan must agree, run for run, with the one-block-at-a-time scan it replaced (tests/native/gc_flush_scan.c checks
+		// the same on random pages; this checks it on the pages of a real run).
+		gc_freelist ref;
+		alloc_freelist(&ref,new_fl.size_bits);
+		gc_fl *cur_ref = NULL;
+		int ref_index = old_fl.current, ref_bid = p->first_block;
+		gc_fl *ref_reuse = ref_index < old_fl.count ? GET_FL(&old_fl,ref_index++) : NULL;
+		int ref_next = ref_reuse ? ref_reuse->pos : -1;
+		while( ref_bid < last ) {
+			if( ref_bid == ref_next ) {
+				if( cur_ref && cur_ref->pos + cur_ref->count == ref_bid ) cur_ref->count += ref_reuse->count;
+				else { freelist_append(&ref,ref_reuse->pos,ref_reuse->count); cur_ref = GET_FL(&ref,ref.count - 1); }
+				ref_reuse = ref_index < old_fl.count ? GET_FL(&old_fl,ref_index++) : NULL;
+				ref_bid = cur_ref->count + cur_ref->pos;
+				ref_next = ref_reuse ? ref_reuse->pos : -1;
+				continue;
+			}
+			if( (bmp[ref_bid>>3] & (1<<(ref_bid&7))) == 0 ) {
+				if( cur_ref && cur_ref->pos + cur_ref->count == ref_bid ) cur_ref->count++;
+				else { freelist_append(&ref,ref_bid,1); cur_ref = GET_FL(&ref,ref.count - 1); }
+			}
+			ref_bid++;
+		}
+		bool same = ref.count == new_fl.count;
+		for(int k=0;same && k<ref.count;k++)
+			same = GET_FL(&ref,k)->pos == GET_FL(&new_fl,k)->pos && GET_FL(&ref,k)->count == GET_FL(&new_fl,k)->count;
+		free_freelist(&ref);
+		if( !same ) hl_fatal("Fast free-run scan differs from the one-block-at-a-time scan");
+	}
+#	endif
 	p->free = new_fl;
 	p->need_flush = false;
 #ifdef __GC_DEBUG
