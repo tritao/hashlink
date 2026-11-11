@@ -363,11 +363,20 @@ typedef enum {
 	HPACKED = 22,
 	HGUID	= 23,
 	// ---------
-	HLAST	= 24,
+	HENUMTAG = 24,
+	HLAST	= 25,
 	_H_FORCE_INT = 0x7FFFFFFF
 } hl_type_kind;
 
 typedef struct hl_type hl_type;
+
+/* A nominal four-byte enum carrier. Cache slots belong to the module's ordinary GC-rooted globals. */
+typedef struct {
+	hl_type *boxed_type;
+	int ncases;
+	int *cache_globals;
+	void ***cache_slots;
+} hl_type_enum_tag;
 typedef struct _hl_array_access hl_array_access;
 typedef struct hl_runtime_obj hl_runtime_obj;
 typedef struct hl_alloc_block hl_alloc_block;
@@ -458,6 +467,7 @@ struct hl_type {
 		hl_type_fun *fun;
 		hl_type_obj *obj;
 		hl_type_enum *tenum;
+		hl_type_enum_tag *tenumtag;
 		hl_type_virtual *virt;
 		hl_type	*tparam;
 		hl_array_access *array_access;
@@ -698,6 +708,8 @@ HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data);
 HL_API bool hl_jit_box_prepare(hl_type *type, hl_jit_alloc_data *data);
 HL_API vdynamic *hl_jit_box_slow(hl_type *type);
 HL_API vdynamic *hl_jit_alloc_slow(hl_type *type);
+HL_API venum *hl_enum_tag_box( hl_type *t, int tag );
+HL_API int hl_enum_tag_unbox( hl_type *t, vdynamic *value );
 HL_API venum *hl_alloc_enum( hl_type *t, int index );
 HL_API vvirtual *hl_alloc_virtual( hl_type *t );
 HL_API vdynobj *hl_alloc_dynobj( void );
@@ -986,7 +998,7 @@ HL_API void hl_throw_buffer( hl_buffer *b );
 #endif
 
 // match GNU C++ mangling
-#define TYPE_STR	"vcsilfdbBDPOATR??X?N?S?g"
+#define TYPE_STR	"vcsilfdbBDPOATR??X?N?S?gi"
 
 #undef  _VOID
 #define _NO_ARG

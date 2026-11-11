@@ -155,6 +155,7 @@ HL_PRIM vdynamic* hl_call_method( vdynamic *c, varray *args ) {
 		case HBOOL:
 		case HUI8:
 		case HUI16:
+		case HENUMTAG:
 		case HI32:
 			tmp[i].i = hl_dyn_casti(vargs + i, &hlt_dyn,t);
 			p = &tmp[i].i;
@@ -185,6 +186,8 @@ HL_PRIM vdynamic* hl_call_method( vdynamic *c, varray *args ) {
 		switch( tret->kind ) {
 		case HVOID:
 			return NULL;
+		case HENUMTAG:
+			return (vdynamic*)hl_enum_tag_box(tret,out.v.i);
 		case HBOOL:
 			return hl_alloc_dynbool(out.v.b);
 		default:
@@ -270,6 +273,7 @@ HL_PRIM void *hl_wrapper_call( void *_c, void **args, vdynamic *ret ) {
 			switch( to->kind ) {
 			case HUI8:
 			case HUI16:
+			case HENUMTAG:
 			case HI32:
 			case HBOOL:
 				tmp[i].i = hl_dyn_casti(v,t,to);
@@ -303,6 +307,7 @@ HL_PRIM void *hl_wrapper_call( void *_c, void **args, vdynamic *ret ) {
 		return NULL;
 	case HUI8:
 	case HUI16:
+	case HENUMTAG:
 	case HI32:
 	case HBOOL:
 		ret->v.i = hl_dyn_casti(aret,w->t->fun->ret,tfun->ret);

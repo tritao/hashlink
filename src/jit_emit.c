@@ -277,6 +277,7 @@ static emit_mode hl_type_mode( hl_type *t ) {
 		M_F64,
 		sizeof(bool) == 1 ? M_UI8 : M_I32,
 	};
+	if( t->kind == HENUMTAG ) return M_I32;
 	if( t->kind <= HBOOL )
 		return CONV[t->kind];
 	return M_PTR;
@@ -825,6 +826,7 @@ static void *get_dynget( hl_type *t ) {
 	case HI64:
 	case HGUID:
 		return hl_dyn_geti64;
+	case HENUMTAG:
 	case HI32:
 	case HUI16:
 	case HUI8:
@@ -844,6 +846,7 @@ static void *get_dynset( hl_type *t ) {
 	case HI64:
 	case HGUID:
 		return hl_dyn_seti64;
+	case HENUMTAG:
 	case HI32:
 	case HUI16:
 	case HUI8:
@@ -863,6 +866,7 @@ static void *get_dyncast( hl_type *t ) {
 	case HI64:
 	case HGUID:
 		return hl_dyn_casti64;
+	case HENUMTAG:
 	case HI32:
 	case HUI16:
 	case HUI8:

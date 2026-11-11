@@ -1027,6 +1027,7 @@ HL_PRIM int hl_dyn_geti( vdynamic *d, int hfield, hl_type *t ) {
 		d = hl_obj_lookup_extra(d,hfield);
 		return d == NULL ? 0 : hl_dyn_casti(&d,&hlt_dyn,t);
 	}
+	if( t->kind == HENUMTAG || ft->kind == HENUMTAG ) return hl_dyn_casti(addr,ft,t);
 	switch( ft->kind ) {
 	case HUI8:
 		return *(unsigned char*)addr;
@@ -1170,6 +1171,11 @@ HL_PRIM void hl_dyn_seti( vdynamic *d, int hfield, hl_type *t, int value ) {
 	hl_type *ft = NULL;
 	hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d,hfield));
 	void *addr = hl_obj_lookup_set(d,hfield,t,&ft);
+	if( t->kind == HENUMTAG || ft->kind == HENUMTAG ) {
+		if( ft->kind == HENUMTAG ) *(int*)addr = hl_dyn_casti(&value,t,ft);
+		else hl_write_dyn(addr,ft,hl_make_dyn(&value,t),false);
+		return;
+	}
 	switch( ft->kind ) {
 	case HUI8:
 		*(unsigned char*)addr = (unsigned char)value;

@@ -59,7 +59,7 @@ static const uchar *TSTR[] = {
 	USTR("void"), USTR("ui8"), USTR("ui16"), USTR("i32"), USTR("i64"), USTR("f32"), USTR("f64"),
 	USTR("bool"), USTR("bytes"), USTR("dynamic"), NULL, NULL,
 	USTR("array"), USTR("type"), NULL, NULL, USTR("dynobj"),
-	NULL, NULL, NULL, NULL, NULL, NULL, USTR("guid")
+	NULL, NULL, NULL, NULL, NULL, NULL, USTR("guid"), NULL
 };
 
 static int T_SIZES[] = {
@@ -87,6 +87,7 @@ static int T_SIZES[] = {
 	HL_WSIZE, // STRUCT
 	0, // PACKED
 	8, // GUID
+	4, // ENUMTAG
 };
 
 HL_PRIM int hl_type_size( hl_type *t ) {
@@ -106,6 +107,7 @@ HL_PRIM int hl_pad_struct( int size, hl_type *t ) {
 		GET_ALIGN(unsigned short);
 		break;
 	case HI32:
+	case HENUMTAG:
 		GET_ALIGN(unsigned int);
 		break;
 	case HI64:
@@ -148,6 +150,8 @@ HL_PRIM bool hl_same_type( hl_type *a, hl_type *b ) {
 	case HDYNOBJ:
 	case HGUID:
 		return true;
+	case HENUMTAG:
+		return hl_same_type(a->tenumtag->boxed_type,b->tenumtag->boxed_type);
 	case HREF:
 	case HNULL:
 	case HPACKED:
@@ -204,6 +208,7 @@ HL_PRIM bool hl_is_dynamic( hl_type *t ) {
 		false, // HSTRUCT
 		false, // HPACKED
 		false, // HGUID
+		false, // HENUMTAG
 	};
 	return T_IS_DYNAMIC[t->kind];
 }
@@ -234,6 +239,7 @@ HL_PRIM bool hl_is_ptr( hl_type *t ) {
 		true, // HSTRUCT
 		true, // HPACKED
 		false, // HGUID
+		false, // HENUMTAG
 	};
 	return T_IS_PTR[t->kind];
 }
@@ -356,6 +362,9 @@ static void hl_type_str_rec( hl_buffer *b, hl_type *t, tlist *parents ) {
 		break;
 	case HABSTRACT:
 		hl_buffer_str(b,t->abs_name);
+		break;
+	case HENUMTAG:
+		hl_type_str_rec(b,t->tenumtag->boxed_type,l);
 		break;
 	case HENUM:
 		hl_buffer_str(b,USTR("enum"));
@@ -596,6 +605,26 @@ HL_PRIM bool hl_type_enum_eq( venum *a, venum *b ) {
 	return true;
 }
 
+HL_PRIM venum *hl_enum_tag_box( hl_type *t, int tag ) {
+	if( tag == 0 ) return NULL;
+	if( t->kind != HENUMTAG || tag < 1 || tag > t->tenumtag->ncases ) hl_error("Invalid enum tag");
+	void **slot = t->tenumtag->cache_slots[tag-1];
+	if( *slot == NULL ) {
+		venum *value = hl_alloc_enum(t->tenumtag->boxed_type,tag-1);
+		hl_gc_store_ref(slot,value,t->tenumtag->boxed_type);
+	}
+	return (venum*)*slot;
+}
+
+HL_PRIM int hl_enum_tag_unbox( hl_type *t, vdynamic *value ) {
+	if( value == NULL ) return 0;
+	if( t->kind != HENUMTAG || value->t->kind != HENUM || !hl_same_type(value->t,t->tenumtag->boxed_type) )
+		hl_error("Invalid enum tag cast");
+	int index = ((venum*)value)->index;
+	if( index < 0 || index >= t->tenumtag->ncases ) hl_error("Invalid enum tag index");
+	return index+1;
+}
+
 HL_PRIM venum *hl_alloc_enum( hl_type *t, int index ) {
 	hl_enum_construct *c = t->tenum->constructs + index;
 	venum *v = (venum*)hl_gc_alloc_gen(t, c->size, MEM_KIND_DYNAMIC | (c->hasptr ? 0 : MEM_KIND_NOPTR) | MEM_ZERO);
@@ -792,6 +821,7 @@ static void compact_write_data( mem_context *ctx, hl_type *t, void *addr ) {
 	case HUI16:
 		compact_write_mem(ctx, addr, 2);
 		break;
+	case HENUMTAG:
 	case HI32:
 	case HF32:
 		compact_write_mem(ctx, addr, 4);

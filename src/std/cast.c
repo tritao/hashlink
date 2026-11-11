@@ -68,6 +68,8 @@ HL_PRIM vdynamic *hl_make_dyn( void *data, hl_type *t ) {
 		v->t = t;
 		v->v.i = *(unsigned short*)data;
 		return v;
+	case HENUMTAG:
+		return (vdynamic*)hl_enum_tag_box(t,*(int*)data);
 	case HI32:
 		return hl_dyni32(*(int*)data);
 	case HI64:
@@ -117,6 +119,12 @@ HL_PRIM vdynamic *hl_make_dyn( void *data, hl_type *t ) {
 
 HL_PRIM int hl_dyn_casti( void *data, hl_type *t, hl_type *to ) {
 	hl_track_call(HL_TRACK_CAST, on_cast(t,to));
+	if( to->kind == HENUMTAG ) {
+		if( t->kind == HENUMTAG && hl_same_type(t,to) ) return *(int*)data;
+		if( t->kind == HDYN || t->kind == HENUM ) return hl_enum_tag_unbox(to,*(vdynamic**)data);
+		invalid_cast(t,to);
+		return 0;
+	}
 	if( t->kind == HDYN ) {
 		vdynamic *v = *((vdynamic**)data);
 		if( v == NULL ) return 0;
@@ -197,6 +205,8 @@ HL_PRIM void *hl_dyn_castp( void *data, hl_type *t, hl_type *to ) {
 			return v;
 	}
 	hl_track_call(HL_TRACK_CAST, on_cast(t,to));
+	if( t->kind == HENUMTAG && (to->kind == HDYN || hl_same_type(t->tenumtag->boxed_type,to)) )
+		return hl_enum_tag_box(t,*(int*)data);
 	if( to->kind == HDYN && hl_is_dynamic(t) )
 		return *(vdynamic**)data;
 	if( t->kind == HDYN || t->kind == HNULL ) {
@@ -521,6 +531,7 @@ HL_PRIM void hl_write_dyn( void *data, hl_type *t, vdynamic *v, bool is_tmp ) {
 	case HUI16:
 		*(unsigned short*)data = (unsigned short)hl_dyn_casti(&v,&hlt_dyn,t);
 		break;
+	case HENUMTAG:
 	case HI32:
 		*(int*)data = hl_dyn_casti(&v,&hlt_dyn,t);
 		break;
