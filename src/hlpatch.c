@@ -466,7 +466,7 @@ static unsigned int hash_type_prefix( hl_module *module, int count ) {
 		case HABSTRACT:
 			hash=hash_i32(hash,hash_type_string_index(code,&strings,type->abs_name));
 			break;
-		case HREF: case HNULL:
+		case HREF: case HNULL: case HPACKED:
 			hash=hash_i32(hash,hash_type_index(code,type->tparam));
 			break;
 		case HOBJ: case HSTRUCT: {
