@@ -30,22 +30,24 @@ static void invalid_cast( hl_type *from, hl_type *to ) {
 }
 
 
-static vdynamic static_ints[256];
+static vdynamic static_ints[HL_STATIC_INT_COUNT];
 static bool static_ints_init = false;
 
-static vdynamic *hl_dyni32( int v ) {
-	signed char b = (signed char)v;
-	if( b == v ) {
-		if( !static_ints_init ) {
-			int i;
-			for(i=-128;i<128;i++) {
-				static_ints[i&0xFF].t = &hlt_i32;
-				static_ints[i&0xFF].v.i = i;
-			}
-			static_ints_init = true;
+HL_PRIM vdynamic *hl_static_ints() {
+	if( !static_ints_init ) {
+		int i;
+		for(i=0;i<HL_STATIC_INT_COUNT;i++) {
+			static_ints[i].t = &hlt_i32;
+			static_ints[i].v.i = i + HL_STATIC_INT_MIN;
 		}
-		return &static_ints[v&0xFF];
+		static_ints_init = true;
 	}
+	return static_ints;
+}
+
+static vdynamic *hl_dyni32( int v ) {
+	if( (unsigned)(v - HL_STATIC_INT_MIN) < HL_STATIC_INT_COUNT )
+		return &hl_static_ints()[v - HL_STATIC_INT_MIN];
 	vdynamic *d = (vdynamic*)hl_gc_alloc_noptr(sizeof(vdynamic));
 	d->t = &hlt_i32;
 	d->v.i = v;

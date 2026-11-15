@@ -624,6 +624,12 @@ HL_API hl_type hlt_array;
 HL_API hl_type hlt_bytes;
 HL_API hl_type hlt_dynobj;
 HL_API hl_type hlt_bool;
+
+// Boxes for small Ints, shared by every conversion of such a value to Dynamic or Null<Int> (from the JIT and the runtime):
+// the box of v is hl_static_ints()[v - HL_STATIC_INT_MIN] when 0 <= v - HL_STATIC_INT_MIN < HL_STATIC_INT_COUNT.
+#define HL_STATIC_INT_MIN (-128)
+#define HL_STATIC_INT_COUNT 1152
+HL_API vdynamic *hl_static_ints( void );
 HL_API hl_type hlt_abstract;
 
 

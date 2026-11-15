@@ -957,6 +957,44 @@ static void emit_dyn_cast( emit_ctx *ctx, ereg v, hl_type *t, vreg *dst ) {
 
 static void emit_opcode( emit_ctx *ctx, hl_opcode *o );
 
+// sizeof(vdynamic) is 16 (checked in hl_emit_alloc): a box in the small Int table is at index << 4.
+#define VDYNAMIC_SHIFT 4
+
+// The runtime's small Int boxes (hl_static_ints), read once when the JIT starts.
+static vdynamic *jit_static_ints = NULL;
+
+/* Stores in `dst` a new box holding the value of `ra` (null for a null pointer-like value). */
+static void emit_box_alloc( emit_ctx *ctx, vreg *ra, vreg *dst ) {
+	hl_module *m = ctx->mod;
+	hl_jit_alloc_data data;
+	if(ctx->jit->cfg.alloc_box && !m->debug && hl_jit_box_prepare(ra->t,&data)) {
+		hl_jit_alloc_data *saved = (hl_jit_alloc_data*)hl_malloc(&ctx->jit->galloc,sizeof(data));
+		*saved = data;
+		einstr *e = emit_instr(ctx,ALLOC_BOXED);
+		e->mode = M_PTR; e->value = (uint64)(int_val)saved;
+		ereg ret = new_value(ctx);
+		STORE_MEM(ret,HDYN_VALUE,LOAD(ra));
+		STORE(dst,ret);
+		return;
+	}
+	/* Preserve null pointer-like values as null dynamics instead of typed null payloads. */
+	int jnull = -1;
+	if( hl_is_ptr(ra->t) ) {
+		emit_test(ctx, LOAD(ra), OJNull);
+		jnull = emit_jump(ctx, true);
+	}
+	ereg arg = LOAD_CONST_PTR(ra->t);
+	ereg ret = emit_native_call(ctx,hl_alloc_dynamic,&arg,1,&hlt_dyn);
+	STORE_MEM(ret,HDYN_VALUE,LOAD(ra));
+	STORE(dst, ret);
+	if( jnull >= 0 ) {
+		int jend = emit_jump(ctx, false);
+		patch_jump(ctx, jnull);
+		STORE(dst, LOAD_CONST_PTR(NULL));
+		patch_jump(ctx, jend);
+	}
+}
+
 static void remap_phi_reg( emit_ctx *ctx, ereg *r ) {
 	if( *r >= 0 || IS_NULL(*r) )
 		return;
@@ -1363,6 +1401,8 @@ void hl_emit_alloc( jit_ctx *jit ) {
 	jit_dyn_bool_values[1].t = &hlt_bool;
 	jit_dyn_bool_values[0].v.b = false;
 	jit_dyn_bool_values[1].v.b = true;
+	if( sizeof(vdynamic) != (1 << VDYNAMIC_SHIFT) ) jit_assert();
+	jit_static_ints = hl_static_ints();
 }
 
 void hl_emit_free( jit_ctx *jit ) {
@@ -1831,35 +1871,29 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 				ereg addr = OFFSET(LOAD_CONST_PTR(hl_emit_dyn_bools), idx, HL_WSIZE, 0);
 				STORE(dst, LOAD_MEM_PTR(addr, 0));
 			}
-		} else {
-			hl_jit_alloc_data data;
-			if(ctx->jit->cfg.alloc_box && !m->debug && hl_jit_box_prepare(ra->t,&data)) {
-				hl_jit_alloc_data *saved = (hl_jit_alloc_data*)hl_malloc(&ctx->jit->galloc,sizeof(data));
-				*saved = data;
-				einstr *e = emit_instr(ctx,ALLOC_BOXED);
-				e->mode = M_PTR; e->value = (uint64)(int_val)saved;
-				ereg ret = new_value(ctx);
-				STORE_MEM(ret,HDYN_VALUE,LOAD(ra));
-				STORE(dst,ret);
-				break;
-			}
-			/* Preserve null pointer-like values as null dynamics instead of typed null payloads. */
-			int jnull = -1;
-			if( hl_is_ptr(ra->t) ) {
-				emit_test(ctx, LOAD(ra), OJNull);
-				jnull = emit_jump(ctx, true);
-			}
-			ereg arg = LOAD_CONST_PTR(ra->t);
-			ereg ret = emit_native_call(ctx,hl_alloc_dynamic,&arg,1,&hlt_dyn);
-			STORE_MEM(ret,HDYN_VALUE,LOAD(ra));
-			STORE(dst, ret);
-			if( jnull >= 0 ) {
+		} else if( ra->t->kind == HI32 ) {
+			// A small Int takes its shared box (hl_static_ints, as the runtime's boxing does); a larger one gets a new box.
+			ereg arg = LOAD(ra);
+			uint64 cval;
+			if( emit_get_const(ctx, arg, &cval) ) {
+				int v = (int)cval;
+				if( (unsigned)(v - HL_STATIC_INT_MIN) < HL_STATIC_INT_COUNT )
+					STORE(dst, LOAD_CONST_PTR(&jit_static_ints[v - HL_STATIC_INT_MIN]));
+				else
+					emit_box_alloc(ctx, ra, dst);
+			} else {
+				ereg index = emit_gen_ext(ctx, BINOP, arg, LOAD_CONST(-HL_STATIC_INT_MIN,&hlt_i32), M_I32, OAdd);
+				emit_cmp(ctx, index, LOAD_CONST(HL_STATIC_INT_COUNT,&hlt_i32), OJUGte);
+				int jlarge = emit_jump(ctx, true);
+				ereg offset = emit_gen_ext(ctx, BINOP, index, LOAD_CONST(VDYNAMIC_SHIFT,&hlt_i32), M_I32, OShl);
+				STORE(dst, OFFSET(LOAD_CONST_PTR(jit_static_ints), emit_conv(ctx, offset, M_I32, M_PTR, false), 1, 0));
 				int jend = emit_jump(ctx, false);
-				patch_jump(ctx, jnull);
-				STORE(dst, LOAD_CONST_PTR(NULL));
+				patch_jump(ctx, jlarge);
+				emit_box_alloc(ctx, ra, dst);
 				patch_jump(ctx, jend);
 			}
-		}
+		} else
+			emit_box_alloc(ctx, ra, dst);
 		break;
 	case OToSFloat:
 	case OToInt:
