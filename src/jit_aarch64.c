@@ -1649,6 +1649,12 @@ static bool codegen_function_pass( jit_ctx *jit ) {
 	ctx->code.cur -= 64;
 
 	int const_addr_prev = int_arr_count(ctx->const_addr);
+	if( hl_jit_entry_pad(jit->mod) ) {
+		// Callers of a patchable module reach this entry directly: the first patch of the function turns this NOP into a
+		// B to its new code or stub with one aligned store (see hl_jit_patch_entry_jump).
+		EMIT32(ctx, 0xD503201F);
+		ctx->pos_map[0] = byte_count(ctx->code);
+	}
 
 	for( int cur_pos = 0; cur_pos < jit->reg_instr_count; cur_pos++ ) {
 		einstr *e = jit->reg_instrs + cur_pos;

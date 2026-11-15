@@ -260,14 +260,20 @@ const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, 
 int hl_runtime_module_entry_state( hl_runtime_module *runtime, int stable_id ) {
 	int slot, state = -1;
 #	ifndef HL_JIT_DIRECT_PATCHABLE_CALLS
-	return -1; // the entries below are decoded as x86-64, the only target that redirects them with one atomic jump
+	return -1; // only targets with direct patchable calls redirect an entry with one atomic jump
 #	endif
 	if( runtime == NULL ) return -1;
 	hl_mutex_acquire(runtime->lock);
 	slot = resolve_stable_id(runtime,stable_id);
 	if( slot >= 0 && runtime->module->patch_origin && runtime->module->patch_origin[slot] ) {
 		const unsigned char *entry = (const unsigned char*)runtime->module->patch_origin[slot];
+#		ifdef __aarch64__
+		// B (the atomic redirect), LDR X16 (the start of hl_jit_patch_method's sequence), or anything else: untouched.
+		uint32_t first = *(const uint32_t*)entry;
+		state = (first & 0xFC000000u) == 0x14000000u ? 2 : first == 0x58000070u ? 1 : 0;
+#		else
 		state = entry[0] == 0xE9 ? 2 : entry[0] == 0x48 && entry[1] == 0xB8 ? 1 : 0;
+#		endif
 	}
 	hl_mutex_release(runtime->lock);
 	return state;
@@ -286,14 +292,23 @@ int hl_runtime_module_calls_directly( hl_runtime_module *runtime, int caller_id,
 		const unsigned char *code = (const unsigned char*)runtime->module->patch_origin[caller];
 		const unsigned char *end = (const unsigned char*)runtime->module->jit_code + runtime->module->codesize;
 		const unsigned char *target = (const unsigned char*)runtime->module->patch_origin[callee];
-		// The caller's code is scanned for a call rel32 to the callee's entry; a few hundred bytes cover a test function.
+		// The caller's code is scanned for a direct call to the callee's entry; a few hundred bytes cover a test function.
 		result = 0;
+#		ifdef __aarch64__
+		for(int i=0;i<1024&&code+i+4<=end;i+=4) {
+			uint32_t ins = *(const uint32_t*)(code + i);
+			if( (ins & 0xFC000000u) != 0x94000000u ) continue; // BL imm26
+			int32_t offset = (int32_t)(ins << 6) >> 4; // sign-extended imm26, in bytes
+			if( code + i + offset == target ) { result = 1; break; }
+		}
+#		else
 		for(int i=0;i<1024&&code+i+5<=end;i++) {
 			int delta;
 			if( code[i] != 0xE8 ) continue;
 			memcpy(&delta,code + i + 1,sizeof(delta));
 			if( code + i + 5 + delta == target ) { result = 1; break; }
 		}
+#		endif
 	}
 	hl_mutex_release(runtime->lock);
 	return result;

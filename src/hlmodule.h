@@ -33,13 +33,17 @@
 #define HL_JIT_PATCH_ENTRY_STRIDE 16
 #endif
 
-/* On x86-64 a patchable module's own bytecode calls its functions directly (a plain call rel32, as in a normal module)
+/* A patchable module's own bytecode calls its functions directly (a plain call rel32 or BL, as in a normal module)
    instead of through the stub table. The first patch of a function then redirects callers by rewriting its original
    entry, so each function of such a module starts with an HL_JIT_ENTRY_PAD byte nop that one aligned store turns into
-   a jmp rel32 to the slot's stub. Patch generations keep calling through the table. */
+   a jump to the new code or the slot's stub: jmp rel32 on x86-64, B on AArch64 (whose architecture lets a NOP become a B
+   while other threads run it). Patch generations keep calling through the table. */
 #if defined(HL_64) && !defined(__aarch64__) && !defined(_M_ARM64)
 #define HL_JIT_DIRECT_PATCHABLE_CALLS
 #define HL_JIT_ENTRY_PAD 8
+#elif defined(__aarch64__)
+#define HL_JIT_DIRECT_PATCHABLE_CALLS
+#define HL_JIT_ENTRY_PAD 4
 #endif
 
 typedef struct {
@@ -606,7 +610,7 @@ HL_EXTERN_C HL_EXPORT const uchar *hl_runtime_module_patch_message( hl_runtime_m
 HL_EXTERN_C HL_EXPORT const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_debug_region_count( hl_runtime_module *runtime );
 /** Test hook: how a function's original entry was redirected: 0 untouched, 1 by the 12-byte writer, 2 by the atomic jump, -1 unknown
-    or on a target without direct patchable calls (HL_JIT_DIRECT_PATCHABLE_CALLS), whose entries this does not decode. */
+    or on a target without direct patchable calls (HL_JIT_DIRECT_PATCHABLE_CALLS). */
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_entry_state( hl_runtime_module *runtime, int stable_id );
 /** Test hook: 1 when the base code of caller contains a direct call to the original entry of callee, 0 when not, -1 unknown or on a
     target without direct patchable calls, where every call to a patchable function goes through its stub. */

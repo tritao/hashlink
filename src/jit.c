@@ -521,7 +521,20 @@ void *hl_jit_patch_code( jit_ctx *ctx, hl_module *m, int *codesize, hl_debug_inf
 	return hl_jit_code_finalize(ctx,m,codesize,debug,NULL,false);
 }
 
-#ifdef HL_JIT_DIRECT_PATCHABLE_CALLS
+#if defined(HL_JIT_DIRECT_PATCHABLE_CALLS) && defined(__aarch64__)
+bool hl_jit_patch_entry_jump( void *entry, void *stub ) {
+	uint32_t *code = (uint32_t*)entry;
+	intptr_t delta = (unsigned char*)stub - (unsigned char*)entry;
+	if( ((uintptr_t)entry & 3) || (delta & 3) || delta < -((intptr_t)1 << 27) || delta >= ((intptr_t)1 << 27) ) return false;
+	// The entry's NOP, or the B an earlier patch wrote; the longer hl_jit_patch_method sequence is not rewritten here.
+	if( *code != 0xD503201Fu && (*code & 0xFC000000u) != 0x14000000u ) return false;
+	/* One aligned store replaces one instruction: a thread runs either the NOP (then the old body) or the B. */
+	hl_jit_write_begin();
+	__atomic_store_n(code,0x14000000u | ((uint32_t)(delta >> 2) & 0x03FFFFFFu),__ATOMIC_SEQ_CST);
+	hl_jit_write_end(code,4);
+	return true;
+}
+#elif defined(HL_JIT_DIRECT_PATCHABLE_CALLS)
 bool hl_jit_patch_entry_jump( void *entry, void *stub ) {
 	static const unsigned char nop8[HL_JIT_ENTRY_PAD] = { 0x0F, 0x1F, 0x84, 0, 0, 0, 0, 0 };
 	unsigned char *code = (unsigned char*)entry;
