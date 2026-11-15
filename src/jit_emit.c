@@ -41,6 +41,9 @@ typedef struct {
 	int id;
 	int write_pos;
 	int scope_end;
+	// Passed by reference somewhere in the function (ORef): a callee can change it through the address, so the constant it
+	// was last assigned does not describe what a later read sees.
+	bool referenced;
 } vreg;
 
 #define MAX_TMP_ARGS	256
@@ -318,6 +321,11 @@ static bool emit_get_const( emit_ctx *ctx, ereg v, uint64 *out ) {
 		return false;
 	*out = e->value;
 	return true;
+}
+
+/** The constant `r` holds, read as `v`, unless the function passes `r` by reference (see vreg.referenced). */
+static bool emit_get_reg_const( emit_ctx *ctx, vreg *r, ereg v, uint64 *out ) {
+	return !r->referenced && emit_get_const(ctx, v, out);
 }
 
 static const char *phi_prefix( emit_ctx *ctx ) {
@@ -1328,7 +1336,10 @@ void hl_emit_function( jit_ctx *jit ) {
 		r->t = f->regs[i];
 		r->write_pos = -1;
 		r->scope_end = SCOPE_NONE;
+		r->referenced = false;
 	}
+	for(i=0;i<f->nops;i++)
+		if( f->ops[i].op == ORef ) R(f->ops[i].p2)->referenced = true;
 
 	emit_gen_size(ctx, BLOCK, 0);
 	emit_gen(ctx,ENTER,UNUSED,UNUSED,M_NONE);
@@ -1864,7 +1875,7 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 		} else if( ra->t->kind == HBOOL ) {
 			ereg arg = LOAD(ra);
 			uint64 cval;
-			if( emit_get_const(ctx, arg, &cval) )
+			if( emit_get_reg_const(ctx, ra, arg, &cval) )
 				STORE(dst, LOAD_CONST_PTR(hl_emit_dyn_bools[cval ? 1 : 0]));
 			else {
 				ereg idx = emit_gen_ext(ctx, CONV, arg, UNUSED, M_PTR, M_UI8);
@@ -1875,7 +1886,7 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 			// A small Int takes its shared box (hl_static_ints, as the runtime's boxing does); a larger one gets a new box.
 			ereg arg = LOAD(ra);
 			uint64 cval;
-			if( emit_get_const(ctx, arg, &cval) ) {
+			if( emit_get_reg_const(ctx, ra, arg, &cval) ) {
 				int v = (int)cval;
 				if( (unsigned)(v - HL_STATIC_INT_MIN) < HL_STATIC_INT_COUNT )
 					STORE(dst, LOAD_CONST_PTR(&jit_static_ints[v - HL_STATIC_INT_MIN]));
