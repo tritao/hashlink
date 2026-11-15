@@ -42,11 +42,7 @@ STD = src/ryu/d2s.o src/ryu/f2s.o src/std/array.o src/std/buffer.o src/std/bytes
 	src/std/track.o
 
 ifneq ($(filter arm64 aarch64,$(ARCH)),)
-ifeq ($(HL_JIT_AARCH64_OLD),1)
-HL_JIT_OBJ = src/jit_arm64.o src/jit_arm64_compat.o src/jit_gdb.o
-else
 HL_JIT_OBJ = src/jit.o src/jit_emit.o src/jit_regs.o src/jit_aarch64.o src/jit_aarch64_emit.o src/jit_dump.o src/jit_gdb.o
-endif
 else
 HL_JIT_OBJ = src/jit.o src/jit_emit.o src/jit_regs.o src/jit_x86_64.o src/jit_dump.o src/jit_gdb.o
 endif
