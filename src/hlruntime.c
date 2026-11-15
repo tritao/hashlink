@@ -259,6 +259,9 @@ const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, 
 
 int hl_runtime_module_entry_state( hl_runtime_module *runtime, int stable_id ) {
 	int slot, state = -1;
+#	ifndef HL_JIT_DIRECT_PATCHABLE_CALLS
+	return -1; // the entries below are decoded as x86-64, the only target that redirects them with one atomic jump
+#	endif
 	if( runtime == NULL ) return -1;
 	hl_mutex_acquire(runtime->lock);
 	slot = resolve_stable_id(runtime,stable_id);
@@ -272,6 +275,9 @@ int hl_runtime_module_entry_state( hl_runtime_module *runtime, int stable_id ) {
 
 int hl_runtime_module_calls_directly( hl_runtime_module *runtime, int caller_id, int callee_id ) {
 	int caller, callee, result = -1;
+#	ifndef HL_JIT_DIRECT_PATCHABLE_CALLS
+	return -1; // without direct patchable calls, callers reach a patchable function through its stub
+#	endif
 	if( runtime == NULL ) return -1;
 	hl_mutex_acquire(runtime->lock);
 	caller = resolve_stable_id(runtime,caller_id);

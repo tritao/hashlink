@@ -605,9 +605,11 @@ HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_
 HL_EXTERN_C HL_EXPORT const uchar *hl_runtime_module_patch_message( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_debug_region_count( hl_runtime_module *runtime );
-/** Test hook: how a function's original entry was redirected: 0 untouched, 1 by the 12-byte writer, 2 by the atomic jump, -1 unknown. */
+/** Test hook: how a function's original entry was redirected: 0 untouched, 1 by the 12-byte writer, 2 by the atomic jump, -1 unknown
+    or on a target without direct patchable calls (HL_JIT_DIRECT_PATCHABLE_CALLS), whose entries this does not decode. */
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_entry_state( hl_runtime_module *runtime, int stable_id );
-/** Test hook: 1 when the base code of caller contains a direct call to the original entry of callee, 0 when not, -1 unknown. */
+/** Test hook: 1 when the base code of caller contains a direct call to the original entry of callee, 0 when not, -1 unknown or on a
+    target without direct patchable calls, where every call to a patchable function goes through its stub. */
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_calls_directly( hl_runtime_module *runtime, int caller_id, int callee_id );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_hlp_summary( const unsigned char *bytes, int length, int *base_revision, int *revision, int *function_count );
 HL_EXTERN_C HL_EXPORT int hl_runtime_module_revision( hl_runtime_module *runtime );
