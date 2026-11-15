@@ -183,7 +183,12 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 #include <signal.h>
 #include <stdint.h>
 #include <unistd.h>
+#ifdef HL_MAC
+// ucontext_t alone: <ucontext.h> also declares the deprecated context routines and refuses to build without _XOPEN_SOURCE.
+#include <sys/ucontext.h>
+#else
 #include <ucontext.h>
+#endif
 #ifdef HL_LINUX
 #include <fcntl.h>
 #endif
