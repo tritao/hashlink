@@ -91,7 +91,53 @@ typedef struct {
 
 #define hlt_key		hlt_bytes
 #define hl_hbfilter(key) key
-#define hl_hbhash(key)	((key) == NULL ? 0u : (unsigned)hl_hash_gen(key,false))
+// String keys are hashed with rapidhash over their UTF-16 code units. Maps iterate in insertion order, so the hash
+// never shows in a program's behaviour and may change between versions or platforms.
+#include "../../include/rapidhash/rapidhash.h"
+
+#if defined(_MSC_VER)
+#	include <intrin.h>
+static inline int hb_ctz64( uint64_t v ) { unsigned long i; _BitScanForward64(&i,v); return (int)i; }
+#else
+#	define hb_ctz64(v) __builtin_ctzll(v)
+#endif
+
+#if defined(__clang__) || defined(__GNUC__)
+#	define HB_NO_ASAN __attribute__((no_sanitize_address))
+#else
+#	define HB_NO_ASAN
+#endif
+
+// The number of code units before the terminating 0, four at a time. Each load is an aligned 8 bytes, which never
+// crosses a page boundary, so reading past the terminator inside that word is safe.
+static inline HB_NO_ASAN size_t hb_ulen( const uchar *s ) {
+#if defined(RAPIDHASH_LITTLE_ENDIAN) && (defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
+	const uint64_t ones = 0x0001000100010001ull, highs = 0x8000800080008000ull;
+	uintptr_t at = (uintptr_t)s;
+	const uint64_t *w = (const uint64_t*)(at & ~(uintptr_t)7);
+	// mark the code units before `s` in the first word as non-zero
+	uint64_t v;
+	memcpy(&v,w,8);
+	v |= (1ull << ((at & 7) * 8)) - 1;
+	uint64_t zero = (v - ones) & ~v & highs;
+	while( !zero ) {
+		memcpy(&v,++w,8);
+		zero = (v - ones) & ~v & highs;
+	}
+	return (size_t)(((const char*)w + (hb_ctz64(zero) >> 3) - 1 - (const char*)s) / sizeof(uchar));
+#else
+	const uchar *p = s;
+	while( *p ) p++;
+	return (size_t)(p - s);
+#endif
+}
+
+static unsigned hl_hbhash_key( const uchar *key ) {
+	uint64_t h = rapidhash(key,hb_ulen(key) * sizeof(uchar));
+	return (unsigned)(h ^ (h >> 32));
+}
+
+#define hl_hbhash(key)	((key) == NULL ? 0u : hl_hbhash_key(key))
 #define _MKEY_TYPE	uchar*
 #define _MNAME(n)	hl_hb##n
 #define _MMATCH(c)	(m->entries[c].hash == hash && (m->values[c].key == key || (m->values[c].key != NULL && key != NULL && ucmp(m->values[c].key,key) == 0)))
