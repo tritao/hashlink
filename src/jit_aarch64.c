@@ -1282,14 +1282,30 @@ static void emit_cmov_arm( code_ctx *ctx, ereg out_e, ereg a_e, emit_mode mode, 
 	encode_cond_select(ctx, 1, 0, out, cond, 0, a, out);
 }
 
+// Swaps two operands, at least one a register, through a backend-private temp as x86 does: V31 for floats, X15 otherwise
+// (emit_mov may use X16 itself to reach a stack slot).
+static void emit_swap( code_ctx *ctx, ereg a, ereg b, emit_mode mode ) {
+	ereg tmp = is_fp_mode(mode) ? R(64 + 31) : R(ARM_TMP3);
+	emit_mov(ctx, tmp, a, mode);
+	emit_mov(ctx, a, b, mode);
+	emit_mov(ctx, b, tmp, mode);
+}
+
 static void emit_xchg( code_ctx *ctx, einstr *e ) {
+	if( REG_KIND(e->a) != R_REG && REG_KIND(e->b) != R_REG )
+		jit_error("aarch64 XCHG without a register operand");
+	emit_swap(ctx, e->a, e->b, e->mode);
+}
+
+// The register allocator's swap on the taken edge of a conditional jump: swaps only when the preceding compare's
+// condition holds, leaving the flags for the jump that follows.
+static void emit_cxchg( code_ctx *ctx, einstr *e, ArmCondition cond ) {
 	if( REG_KIND(e->a) != R_REG || REG_KIND(e->b) != R_REG )
-		jit_error("aarch64 XCHG with non-reg operand");
-	Arm64Reg ra = gpr_id(e->a);
-	Arm64Reg rb = gpr_id(e->b);
-	emit_mov_gpr(ctx, ARM_TMP1, ra, 1);
-	emit_mov_gpr(ctx, ra, rb, 1);
-	emit_mov_gpr(ctx, rb, ARM_TMP1, 1);
+		jit_error("aarch64 CXCHG with non-reg operand");
+	int skip = byte_count(ctx->code);
+	encode_branch_cond(ctx, 0, (ArmCondition)(cond ^ 1));
+	emit_swap(ctx, e->a, e->b, e->mode);
+	patch_branch(ctx, skip, byte_count(ctx->code), 1);
 }
 
 static void emit_push_const( code_ctx *ctx, einstr *e ) {
@@ -1650,8 +1666,7 @@ static bool codegen_function_pass( jit_ctx *jit ) {
 			emit_xchg(ctx, e);
 			break;
 		case CXCHG:
-			// x86 emits BREAK() here too — atomic compare-exchange unimplemented.
-			EMIT32(ctx, 0xD4200000);
+			emit_cxchg(ctx, e, get_cond_jump(ctx));
 			break;
 		case PUSH_CONST:
 			emit_push_const(ctx, e);
