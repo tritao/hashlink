@@ -57,6 +57,9 @@ struct _code_ctx {
 	// Each pending branch is a triple (code_byte_pos, target_ir_op, is_cond)
 	// patched after the function's pos_map is finalized.
 	int_arr branch_fixups;
+	// A conditional branch (B.cond) reaches only ±1 MB. A function too large for that is emitted again with every
+	// conditional jump as an inverted B.cond over an unconditional B, which reaches ±128 MB.
+	bool far_branches;
 	int *pos_map;
 	int cur_op;
 	bool flushed;

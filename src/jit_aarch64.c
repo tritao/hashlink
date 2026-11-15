@@ -610,6 +610,14 @@ static void emit_jump( code_ctx *ctx, int target_op_offset ) {
 
 static void emit_jump_cond( code_ctx *ctx, ArmCondition cond, int target_op_offset ) {
 	int target = ctx->cur_op + 1 + target_op_offset;
+	if( ctx->far_branches ) {
+		// Skip the unconditional branch when the condition does not hold.
+		encode_branch_cond(ctx, 2, (ArmCondition)(cond ^ 1));
+		int pos = byte_count(ctx->code);
+		encode_branch_uncond(ctx, 0);
+		add_branch_fixup(ctx, pos, target, 0);
+		return;
+	}
 	int pos = byte_count(ctx->code);
 	encode_branch_cond(ctx, 0, cond);
 	add_branch_fixup(ctx, pos, target, 1);
@@ -673,6 +681,12 @@ static ArmCondition get_cond_jump( code_ctx *ctx ) {
 	}
 }
 
+/** Whether a branch at `pos` can reach `target_byte_pos`: B.cond within ±1 MB, B within ±128 MB. */
+static bool branch_reaches( int pos, int target_byte_pos, int is_cond ) {
+	int imm = (target_byte_pos - pos) >> 2;
+	return is_cond ? imm >= -(1 << 18) && imm < (1 << 18) : imm >= -(1 << 25) && imm < (1 << 25);
+}
+
 static void patch_branch( code_ctx *ctx, int pos, int target_byte_pos, int is_cond ) {
 	int delta = target_byte_pos - pos;
 	if( delta & 3 ) jit_error("aarch64 branch target not 4-byte aligned");
@@ -681,7 +695,7 @@ static void patch_branch( code_ctx *ctx, int pos, int target_byte_pos, int is_co
 	if( is_cond ) {
 		// imm19 lives in bits [23:5]; cond + 0x54000000 prefix retained.
 		if( imm < -(1 << 18) || imm >= (1 << 18) )
-			jit_error("aarch64 B.cond out of range (Phase 2 limit)");
+			jit_error("aarch64 B.cond out of range");
 		*insn = (*insn & ~(0x7FFFF << 5)) | ((imm & 0x7FFFF) << 5);
 	} else {
 		// imm26 lives in bits [25:0]; opcode 000101.
@@ -1510,7 +1524,25 @@ void hl_codegen_flush( jit_ctx *jit ) {
 // hl_codegen_function — the main per-IR-op switch
 // ============================================================================
 
+static bool codegen_function_pass( jit_ctx *jit );
+
 void hl_codegen_function( jit_ctx *jit ) {
+	code_ctx *ctx = jit->code;
+	int funs_start = int_arr_count(ctx->funs), const_refs_start = int_arr_count(ctx->const_refs),
+		const_addr_start = int_arr_count(ctx->const_addr);
+	ctx->far_branches = false;
+	if( codegen_function_pass(jit) ) return;
+	// A conditional jump did not reach its target: emit the function again with far conditional jumps, dropping the
+	// relocations the first pass recorded. Its constants stay pooled; the second pass finds the same ones.
+	ctx->funs.cur = funs_start;
+	ctx->const_refs.cur = const_refs_start;
+	ctx->const_addr.cur = const_addr_start;
+	ctx->far_branches = true;
+	if( !codegen_function_pass(jit) ) jit_error("aarch64 far conditional branch out of range");
+}
+
+/** Emits the current function; false when a conditional jump cannot reach its target and `far_branches` is off. */
+static bool codegen_function_pass( jit_ctx *jit ) {
 	code_ctx *ctx = jit->code;
 	ctx->flushed = false;
 	byte_free(&ctx->code);
@@ -1679,7 +1711,13 @@ void hl_codegen_function( jit_ctx *jit ) {
 	// Functions are 4-byte aligned naturally on ARM; no padding needed for now.
 	hl_codegen_flush(jit);
 
-	// Patch all in-function branches.
+	// Patch all in-function branches, once every one is known to reach.
+	for( int i = 0; i < int_arr_count(ctx->branch_fixups); i += 3 ) {
+		int pos = int_arr_get(ctx->branch_fixups, i);
+		int target_byte_pos = ctx->pos_map[int_arr_get(ctx->branch_fixups, i + 1)];
+		if( !branch_reaches(pos, target_byte_pos, int_arr_get(ctx->branch_fixups, i + 2)) )
+			return false;
+	}
 	for( int i = 0; i < int_arr_count(ctx->branch_fixups); i += 3 ) {
 		int pos = int_arr_get(ctx->branch_fixups, i);
 		int target_op = int_arr_get(ctx->branch_fixups, i + 1);
@@ -1695,6 +1733,7 @@ void hl_codegen_function( jit_ctx *jit ) {
 		int offs = jit->out_pos + ctx->pos_map[target_op];
 		ctx->const_addr.values[i + 1] = offs;
 	}
+	return true;
 }
 
 // ============================================================================
