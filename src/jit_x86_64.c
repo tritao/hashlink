@@ -1908,18 +1908,20 @@ void hl_codegen_function( jit_ctx *jit ) {
 					jit_assert();
 					break;
 				}
+				// int-to-float reads a 64-bit source when the input is 64-bit (REX.W), not the destination's width
+				emit_mode op_mode = e->op == CONV_UNSIGNED || ((op == CVTSI2SD || op == CVTSI2SS) && in_mode == M_PTR) ? M_PTR : e->mode;
 				// These conversions write only the low lane and keep the destination's other bits, so they depend on
 				// whatever last wrote the register; clearing it first breaks that chain (as compilers do with pxor).
 				bool merges = op == CVTSI2SD || op == CVTSI2SS || op == CVTSD2SS || op == CVTSS2SD;
 				if( IS_REG(out) || op == _MOV ) {
 					if( merges && IS_REG(out) && out != r )
 						EMIT(e->mode == M_F32 ? XORPS : XORPD,out,out,e->mode);
-					EMIT(op,out,r,e->op == CONV_UNSIGNED ? M_PTR : e->mode);
+					EMIT(op,out,r,op_mode);
 				} else {
 					ereg r2 = get_tmp(e->mode);
 					if( merges && r2 != r )
 						EMIT(e->mode == M_F32 ? XORPS : XORPD,r2,r2,e->mode);
-					EMIT(op,r2,r,e->op == CONV_UNSIGNED ? M_PTR : e->mode);
+					EMIT(op,r2,r,op_mode);
 					emit_mov(ctx,out,r2,e->mode);
 				}
 			}
