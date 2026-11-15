@@ -4,6 +4,12 @@
 #define _MVALUE_LAYOUT hlt_dyn
 #endif
 
+/*
+	Entries live in insertion order in `entries`/`values`, appended at `nused`. Each hash cell heads a chain
+	through `nexts`. A removed entry stays in place as a tombstone (`nexts[c] == _MDEAD`) until the next
+	rebuild compacts the storage, so iteration order is insertion order and never depends on the hash.
+*/
+
 #undef t_map
 #undef t_entry
 #undef t_value
@@ -13,8 +19,16 @@
 #define t_entry _MNAME(_entry)
 #define t_value _MNAME(_value)
 #define _MLIMIT 128
-#define _MINDEX(m,ckey) ((m)->maxentries < _MLIMIT ? (int)((signed char*)(m)->cells)[ckey] : ((int*)(m)->cells)[ckey])
-#define _MNEXT(m,ckey) ((m)->maxentries < _MLIMIT ? (int)((signed char*)(m)->nexts)[ckey] : ((int*)(m)->nexts)[ckey])
+#define _MDEAD (-2)
+#define _MSMALL(m) ((m)->maxentries < _MLIMIT)
+#define _MINDEX(m,ckey) (_MSMALL(m) ? (int)((signed char*)(m)->cells)[ckey] : ((int*)(m)->cells)[ckey])
+#define _MNEXT(m,c) (_MSMALL(m) ? (int)((signed char*)(m)->nexts)[c] : ((int*)(m)->nexts)[c])
+#define _MSETINDEX(m,ckey,v) if( _MSMALL(m) ) ((signed char*)(m)->cells)[ckey] = (signed char)(v); else ((int*)(m)->cells)[ckey] = (v)
+#define _MSETNEXT(m,c,v) if( _MSMALL(m) ) ((signed char*)(m)->nexts)[c] = (signed char)(v); else ((int*)(m)->nexts)[c] = (v)
+#define _MLIVE(m,c) (_MNEXT(m,c) != _MDEAD)
+#ifndef _MREHASH
+#define _MREHASH(m,c) _MNAME(hash)(_MKEY(m,c))
+#endif
 #ifdef _MNO_EXPORTS
 #define _MSTATIC
 #else
@@ -26,9 +40,9 @@ typedef struct {
 	void *nexts;
 	t_entry *entries;
 	t_value *values;
-	hl_free_list lfree;
 	int ncells;
-	int nentries;
+	int nentries;	// live entries
+	int nused;		// entries and tombstones, in insertion order
 	int maxentries;
 } t_map;
 
@@ -57,10 +71,50 @@ _MSTATIC _MVAL_TYPE *_MNAME(find)( t_map *m, t_key key ) {
 	return NULL;
 }
 
-static void _MNAME(resize)( t_map *m );
+// Moves the live entries, in order, into storage for `maxentries` entries and relinks the chains.
+static void _MNAME(rebuild)( t_map *m, int maxentries ) {
+	t_map old = *m, *o = &old;
+	int i = 0, n = 0, c;
+	int ncells = maxentries >> 2;
+	while( H_PRIMES[i] < ncells ) i++;
+	ncells = H_PRIMES[i];
+
+	int ksize = maxentries < _MLIMIT ? 1 : sizeof(int);
+	hl_gc_store_ref(&m->entries,(t_entry*)hl_gc_alloc_noptr(maxentries * sizeof(t_entry)),&hlt_bytes);
+	hl_gc_store_ref(&m->values,(t_value*)hl_gc_alloc_raw(maxentries * sizeof(t_value)),&hlt_bytes);
+	hl_gc_store_ref(&m->cells,hl_gc_alloc_noptr((ncells + maxentries) * ksize),&hlt_bytes);
+	hl_gc_store_ref(&m->nexts,(signed char*)m->cells + ncells * ksize,&hlt_bytes);
+	m->ncells = ncells;
+	m->maxentries = maxentries;
+	memset(m->cells,0xFF,ncells * ksize);
+	memset(m->values,0,maxentries * sizeof(t_value));
+	for(c=0;c<o->nused;c++) {
+		if( !_MLIVE(o,c) ) continue;
+		unsigned int hash = _MREHASH(o,c);
+		int ckey = hash % ((unsigned)ncells);
+		memcpy((char*)m->entries + n * sizeof(t_entry),(char*)o->entries + c * sizeof(t_entry),sizeof(t_entry));
+		m->values[n] = o->values[c];
+		_MSETNEXT(m,n,_MINDEX(m,ckey));
+		_MSETINDEX(m,ckey,n);
+		n++;
+	}
+	hl_gc_record_write(m->values,maxentries * sizeof(t_value));
+	m->nused = n;
+	m->nentries = n;
+}
+
+// Called when every slot is used: compacts if enough are tombstones, grows otherwise.
+static void _MNAME(make_room)( t_map *m ) {
+	int max = m->maxentries;
+	if( max == 0 )
+		max = H_SIZE_INIT;
+	else if( m->nentries * 4 > max * 3 )
+		max = ((max * 3) + 1) >> 1;
+	_MNAME(rebuild)(m,max);
+}
 
 _MSTATIC void _MNAME(set_impl)( t_map *m, t_key key, _MVAL_TYPE value ) {
-	int c, ckey = 0;
+	int c, ckey;
 	unsigned int hash = _MNAME(hash)(key);
 	if( m->values ) {
 		ckey = hash % ((unsigned)m->ncells);
@@ -73,72 +127,15 @@ _MSTATIC void _MNAME(set_impl)( t_map *m, t_key key, _MVAL_TYPE value ) {
 			c = _MNEXT(m,c);
 		}
 	}
-	c = hl_freelist_get(&m->lfree);
-	if( c < 0 ) {
-		_MNAME(resize)(m);
-		ckey = hash % ((unsigned)m->ncells);
-		c = hl_freelist_get(&m->lfree);
-	}
+	if( m->nused == m->maxentries )
+		_MNAME(make_room)(m);
+	ckey = hash % ((unsigned)m->ncells);
+	c = m->nused++;
 	_MSET(c);
-	if( m->maxentries < _MLIMIT ) {
-		((signed char*)m->nexts)[c] = ((signed char*)m->cells)[ckey];
-		((signed char*)m->cells)[ckey] = (signed char)c;
-	} else {
-		((int*)m->nexts)[c] = ((int*)m->cells)[ckey];
-		((int*)m->cells)[ckey] = c;
-	}
+	_MSETNEXT(m,c,_MINDEX(m,ckey));
+	_MSETINDEX(m,ckey,c);
 	hl_gc_copy_values(&m->values[c].value,&value,sizeof(value),&_MVALUE_LAYOUT);
 	m->nentries++;
-}
-
-static void _MNAME(resize)( t_map *m ) {
-	// save
-	t_map old = *m;
-
-	if( m->nentries != m->maxentries ) hl_error("assert");
-
-	// resize
-	int i = 0;
-	int nentries = m->maxentries ? ((m->maxentries * 3) + 1) >> 1 : H_SIZE_INIT;
-	int ncells = nentries >> 2;
-
-	while( H_PRIMES[i] < ncells ) i++;
-	ncells = H_PRIMES[i];
-
-	int ksize = nentries < _MLIMIT ? 1 : sizeof(int);
-	hl_gc_store_ref(&m->entries,(t_entry*)hl_gc_alloc_noptr(nentries * sizeof(t_entry)),&hlt_bytes);
-	hl_gc_store_ref(&m->values,(t_value*)hl_gc_alloc_raw(nentries * sizeof(t_value)),&hlt_bytes);
-	m->maxentries = nentries;
-
-	if( old.ncells == ncells && (nentries < _MLIMIT || old.maxentries >= _MLIMIT) ) {
-		// simply expand
-		hl_gc_store_ref(&m->nexts,hl_gc_alloc_noptr(nentries * ksize),&hlt_bytes);
-		memcpy(m->entries,old.entries,old.maxentries * sizeof(t_entry));
-		memcpy(m->values,old.values,old.maxentries * sizeof(t_value));
-		hl_gc_record_write(m->values,old.maxentries * sizeof(t_value));
-		memcpy(m->nexts,old.nexts,old.maxentries * ksize);
-		memset(m->values + old.maxentries, 0, (nentries - old.maxentries) * sizeof(t_value));
-		hl_gc_record_write(m->values,nentries * sizeof(t_value));
-		hl_freelist_add_range(&m->lfree,old.maxentries,m->maxentries - old.maxentries);
-	} else {
-		// expand and remap
-		hl_gc_store_ref(&m->cells,hl_gc_alloc_noptr((ncells + nentries) * ksize),&hlt_bytes);
-		hl_gc_store_ref(&m->nexts,(signed char*)m->cells + ncells * ksize,&hlt_bytes);
-		m->ncells = ncells;
-		m->nentries = 0;
-		memset(m->cells,0xFF,ncells * ksize);
-		memset(m->values, 0, nentries * sizeof(t_value));
-		hl_gc_record_write(m->values,nentries * sizeof(t_value));
-		hl_freelist_init(&m->lfree);
-		hl_freelist_add_range(&m->lfree,0,m->maxentries);
-		for(i=0;i<old.ncells;i++) {
-			int c = old.maxentries < _MLIMIT ? ((signed char*)old.cells)[i] : ((int*)old.cells)[i];
-			while( c >= 0 ) {
-				_MNAME(set_impl)(m,_MKEY((&old),c),old.values[c].value);
-				c = _MNEXT(&old,c);
-			}
-		}
-	}
 }
 
 #ifndef _MNO_EXPORTS
@@ -167,21 +164,18 @@ HL_PRIM bool _MNAME(remove)( t_map *m, t_key key ) {
 	c = _MINDEX(m,ckey);
 	while( c >= 0 ) {
 		if( _MMATCH(c) ) {
-			hl_freelist_add(&m->lfree,c);
+			int next = _MNEXT(m,c);
+			if( prev >= 0 ) {
+				_MSETNEXT(m,prev,next);
+			} else {
+				_MSETINDEX(m,ckey,next);
+			}
+			_MSETNEXT(m,c,_MDEAD);
 			m->nentries--;
 			_MERASE(c);
 			hl_gc_store_ref(&m->values[c].value,NULL,&hlt_dyn);
-			if( m->maxentries < _MLIMIT ) {
-				if( prev >= 0 )
-					((signed char*)m->nexts)[prev] = ((signed char*)m->nexts)[c];
-				else
-					((signed char*)m->cells)[ckey] = ((signed char*)m->nexts)[c];
-			} else {
-				if( prev >= 0 )
-					((int*)m->nexts)[prev] = ((int*)m->nexts)[c];
-				else
-					((int*)m->cells)[ckey] = ((int*)m->nexts)[c];
-			}
+			// a tombstone at the end is simply given back
+			while( m->nused > 0 && !_MLIVE(m,m->nused - 1) ) m->nused--;
 			return true;
 		}
 		prev = c;
@@ -194,14 +188,11 @@ HL_PRIM varray* _MNAME(keys)( t_map *m ) {
 	varray *a = hl_alloc_array(&hlt_key,m->nentries);
 	t_key *keys = hl_aptr(a,t_key);
 	int p = 0;
-	int i;
-	for(i=0;i<m->ncells;i++) {
-		int c = _MINDEX(m,i);
-		while( c >= 0 ) {
-			t_key key = _MKEY(m,c);
-			hl_gc_copy_values(&keys[p++],&key,sizeof(key),&hlt_key);
-			c = _MNEXT(m,c);
-		}
+	int c;
+	for(c=0;c<m->nused;c++) {
+		if( !_MLIVE(m,c) ) continue;
+		t_key key = _MKEY(m,c);
+		hl_gc_copy_values(&keys[p++],&key,sizeof(key),&hlt_key);
 	}
 	return a;
 }
@@ -210,13 +201,10 @@ HL_PRIM varray* _MNAME(values)( t_map *m ) {
 	varray *a = hl_alloc_array(&hlt_dyn,m->nentries);
 	vdynamic **values = hl_aptr(a,vdynamic*);
 	int p = 0;
-	int i;
-	for(i=0;i<m->ncells;i++) {
-		int c = _MINDEX(m,i);
-		while( c >= 0 ) {
-			hl_gc_store_ref(&values[p++],m->values[c].value,&hlt_dyn);
-			c = _MNEXT(m,c);
-		}
+	int c;
+	for(c=0;c<m->nused;c++) {
+		if( !_MLIVE(m,c) ) continue;
+		hl_gc_store_ref(&values[p++],m->values[c].value,&hlt_dyn);
 	}
 	return a;
 }
@@ -227,41 +215,35 @@ HL_PRIM varray* _MNAME(values)( t_map *m ) {
 
 HL_PRIM void _MNAME(clear)( t_map *m ) {
 	if( m->values && m->maxentries <= _MCLEAR_KEEP_ENTRIES ) {
-		int ksize = m->maxentries < _MLIMIT ? 1 : sizeof(int);
+		int ksize = _MSMALL(m) ? 1 : sizeof(int);
 		memset(m->cells,0xFF,m->ncells * ksize);
 		memset(m->entries,0,m->maxentries * sizeof(t_entry));
 		memset(m->values,0,m->maxentries * sizeof(t_value));
 		hl_gc_record_write(m->values,m->maxentries * sizeof(t_value));
 		m->nentries = 0;
-		hl_freelist_init(&m->lfree);
-		hl_freelist_add_range(&m->lfree,0,m->maxentries);
+		m->nused = 0;
 		return;
 	}
 	hl_gc_clear_values(m,sizeof(t_map),&hlt_bytes);
 }
 
-// A structural copy: same entries, no rehash. Every buffer is duplicated on its own, since `nexts` is either
-// part of the `cells` allocation or a separate one depending on how the map last grew.
+// A structural copy: same entries in the same order, tombstones included, no rehash.
 HL_PRIM t_map *_MNAME(copy)( t_map *m ) {
 	t_map *c = (t_map*)hl_gc_alloc_raw(sizeof(t_map));
 	*c = *m;
 	hl_gc_record_write(c,sizeof(t_map));
 	if( !m->values )
 		return c;
-	int ksize = m->maxentries < _MLIMIT ? 1 : sizeof(int);
+	int ksize = _MSMALL(m) ? 1 : sizeof(int);
 	hl_gc_store_ref(&c->entries,(t_entry*)hl_gc_alloc_noptr(m->maxentries * sizeof(t_entry)),&hlt_bytes);
 	memcpy(c->entries,m->entries,m->maxentries * sizeof(t_entry));
 	hl_gc_store_ref(&c->values,(t_value*)hl_gc_alloc_raw(m->maxentries * sizeof(t_value)),&hlt_bytes);
 	memcpy(c->values,m->values,m->maxentries * sizeof(t_value));
 	hl_gc_record_write(c->values,m->maxentries * sizeof(t_value));
-	hl_gc_store_ref(&c->cells,hl_gc_alloc_noptr(m->ncells * ksize),&hlt_bytes);
+	hl_gc_store_ref(&c->cells,hl_gc_alloc_noptr((m->ncells + m->maxentries) * ksize),&hlt_bytes);
+	hl_gc_store_ref(&c->nexts,(signed char*)c->cells + m->ncells * ksize,&hlt_bytes);
 	memcpy(c->cells,m->cells,m->ncells * ksize);
-	hl_gc_store_ref(&c->nexts,hl_gc_alloc_noptr(m->maxentries * ksize),&hlt_bytes);
 	memcpy(c->nexts,m->nexts,m->maxentries * ksize);
-	if( m->lfree.buckets ) {
-		hl_gc_store_ref(&c->lfree.buckets,(hl_free_bucket*)hl_gc_alloc_noptr(sizeof(hl_free_bucket) * m->lfree.nbuckets),&hlt_bytes);
-		memcpy(c->lfree.buckets,m->lfree.buckets,m->lfree.head * sizeof(hl_free_bucket));
-	}
 	return c;
 }
 
@@ -279,9 +261,15 @@ HL_PRIM int _MNAME(size)( t_map *m ) {
 #undef _MKEY
 #undef _MSET
 #undef _MERASE
+#undef _MREHASH
 #undef _MOLD_KEY
 #undef _MINDEX
 #undef _MNEXT
+#undef _MSETINDEX
+#undef _MSETNEXT
+#undef _MLIVE
+#undef _MSMALL
+#undef _MDEAD
 #undef _MSTATIC
 
 #undef _MVALUE_LAYOUT
