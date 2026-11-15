@@ -1262,8 +1262,10 @@ static void emit_cmov_arm( code_ctx *ctx, ereg out_e, ereg a_e, emit_mode mode, 
 	Arm64Reg out = gpr_id(out_e);
 	Arm64Reg a = materialize_gpr(ctx, a_e, mode, ARM_TMP1);
 	// CSEL out, a, out, cond (if cond: out=a; else out=out). The IR
-	// mode matters: a spilled Bool/byte must use LDRB, not an 8-byte load.
-	encode_cond_select(ctx, sf_for(mode), 0, out, cond, 0, a, out);
+	// mode matters for loading `a`: a spilled Bool/byte must use LDRB, not an 8-byte load.
+	// The select itself is always 64-bit, as x86 uses a 64-bit CMOV: a 32-bit CSEL zeroes the upper half of `out`
+	// even when the condition fails, and the allocator may keep a live pointer there on that path.
+	encode_cond_select(ctx, 1, 0, out, cond, 0, a, out);
 }
 
 static void emit_xchg( code_ctx *ctx, einstr *e ) {
