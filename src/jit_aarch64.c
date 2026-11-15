@@ -117,6 +117,11 @@ void hl_jit_init_regs( regs_config *cfg ) {
 	cfg->stack_align = 16;      // AAPCS64 mandates
 	cfg->clear_stack_on_return = 1;
 	cfg->stack_stores = true;
+	// Inline allocation is opt-in, as on x86-64 (see GC_JIT_INLINE_ALLOC).
+	const char *alloc = getenv("HL_JIT_ALLOC_INLINE");
+	cfg->alloc_inline = alloc && strcmp(alloc,"1") == 0;
+	const char *box = getenv("HL_JIT_ALLOC_BOX");
+	cfg->alloc_box = box && strcmp(box,"1") == 0;
 	// HL's internal calling convention uses one 8-byte slot per stack-passed
 	// value, so the callee sees adjacent arguments at FP+16, FP+24, ...; the
 	// caller reserves the whole area, rounded to 16 bytes, and stores into it
@@ -1242,6 +1247,97 @@ static void emit_lea( code_ctx *ctx, einstr *e, ereg out_e ) {
 // ----------------------------------------------------------------------------
 // CMOV / XCHG / PUSH_CONST / PREFETCH.
 // ----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// ALLOC_OBJECT / ALLOC_BOXED: allocation from the thread's TLAB, as the x86-64
+// backend expands it (see hl_jit_alloc_prepare). The register allocator treats
+// the op as clobbering only its output, so the slow path keeps every scratch
+// register it could hold a value in.
+// ----------------------------------------------------------------------------
+
+// The longest expansion: six guards, the bump, zeroing and a slow path saving every scratch register.
+#define ALLOC_EXPANSION_BYTES	2048
+
+// A forward CBZ/CBNZ (sf=1) or B.cond to the slow path, patched once that is placed (both keep imm19 in bits 5-23).
+static int alloc_cbz( code_ctx *ctx, Arm64Reg r, bool nonzero ) {
+	int pos = byte_count(ctx->code);
+	encode_cbz_cbnz(ctx, 1, nonzero ? 1 : 0, 0, r);
+	return pos;
+}
+
+static int alloc_branch_cond( code_ctx *ctx, ArmCondition cond ) {
+	int pos = byte_count(ctx->code);
+	encode_branch_cond(ctx, 0, cond);
+	return pos;
+}
+
+static void emit_small_alloc( code_ctx *ctx, ereg out, hl_jit_alloc_data *data ) {
+	regs_config *cfg = &ctx->jit->cfg;
+	Arm64Reg dst = REG_KIND(out) == R_REG ? gpr_id(out) : ARM_TMP3;
+	int slow[16], nslow = 0;
+	// Policy guards (tracking, a pending stop of the world): any set bit takes the slow path.
+	for( int i = 0; i < data->nguards; i++ ) {
+		hl_jit_alloc_guard *guard = data->guards + i;
+		load_immediate(ctx, (int64_t)(uintptr_t)guard->address, ARM_TMP1, true);
+		emit_ld_st(ctx, true, guard->bytes == 1 ? M_UI8 : guard->bytes == 4 ? M_I32 : M_PTR, ARM_TMP1, ARM_TMP1, 0);
+		if( guard->mask != ~(uint64)0 ) {
+			load_immediate(ctx, (int64_t)guard->mask, ARM_TMP2, true);
+			encode_logical_reg(ctx, 1, 0x00 /*AND*/, 0, 0, ARM_TMP2, 0, ARM_TMP1, ARM_TMP1);
+		}
+		slow[nslow++] = alloc_cbz(ctx, ARM_TMP1, true);
+	}
+	// Object layouts keep lazy prototype initialization; primitive boxes need no prototype.
+	if( data->runtime ) {
+		load_immediate(ctx, (int64_t)(uintptr_t)&data->runtime->allocation_ready, ARM_TMP1, true);
+		emit_ld_st(ctx, true, M_UI8, ARM_TMP1, ARM_TMP1, 0);
+		slow[nslow++] = alloc_cbz(ctx, ARM_TMP1, false);
+	}
+	// The thread's hl_thread_info, at the offset from the thread pointer that prepare measured, then its TLAB.
+	EMIT32(ctx, 0xD53BD040 | ARM_TMP1); // MRS X16, TPIDR_EL0
+	emit_ld_st(ctx, true, M_PTR, ARM_TMP1, ARM_TMP1, data->tls_offset);
+	slow[nslow++] = alloc_cbz(ctx, ARM_TMP1, false);
+	emit_ld_st(ctx, true, M_PTR, ARM_TMP1, ARM_TMP1, (int)offsetof(hl_thread_info, gc_tlab));
+	slow[nslow++] = alloc_cbz(ctx, ARM_TMP1, false);
+	// Bump the slot's cursor when the block fits below its limit.
+	emit_ld_st(ctx, true, M_PTR, dst, ARM_TMP1, data->slot_offset);
+	slow[nslow++] = alloc_cbz(ctx, dst, false);
+	encode_add_sub_imm(ctx, 1, 0 /*ADD*/, 0, 0, data->block, dst, dst);
+	emit_ld_st(ctx, true, M_PTR, ARM_TMP2, ARM_TMP1, data->slot_offset + HL_WSIZE);
+	encode_add_sub_reg(ctx, 1, 1 /*SUB*/, 1 /*S*/, 0, ARM_TMP2, 0, dst, XZR); // CMP dst, limit
+	slow[nslow++] = alloc_branch_cond(ctx, COND_HI);
+	emit_ld_st(ctx, false, M_PTR, dst, ARM_TMP1, data->slot_offset);
+	encode_add_sub_imm(ctx, 1, 1 /*SUB*/, 0, 0, data->block, dst, dst);
+	// Preserve all default values, including primitive fields and scan padding.
+	for( int offset = HL_WSIZE; offset < data->block; offset += HL_WSIZE )
+		emit_ld_st(ctx, false, M_PTR, XZR, dst, offset);
+	load_immediate(ctx, (int64_t)(uintptr_t)data->type, ARM_TMP1, true);
+	emit_ld_st(ctx, false, M_PTR, ARM_TMP1, dst, 0);
+	int done = byte_count(ctx->code);
+	encode_branch_uncond(ctx, 0);
+	for( int i = 0; i < nslow; i++ )
+		patch_branch(ctx, slow[i], byte_count(ctx->code), 1);
+	// The failed bump can leave an address in a free block; it is not a GC root.
+	load_immediate(ctx, 0, dst, true);
+	int ngpr = cfg->regs.nscratchs, nfp = cfg->floats.nscratchs;
+	int frame = ((ngpr + nfp) * HL_WSIZE + 15) & ~15; // SP stays 16-byte aligned (stack_stores)
+	emit_sp_offs(ctx, -frame);
+	for( int i = 0; i < ngpr; i++ )
+		if( gpr_id(cfg->regs.scratch[i]) != dst ) emit_ld_st(ctx, false, M_PTR, gpr_id(cfg->regs.scratch[i]), SP_REG, i * HL_WSIZE);
+	for( int i = 0; i < nfp; i++ )
+		emit_ld_st(ctx, false, M_F64, fpr_id(cfg->floats.scratch[i]), SP_REG, (ngpr + i) * HL_WSIZE);
+	load_immediate(ctx, (int64_t)(uintptr_t)data->type, X0, true);
+	load_immediate(ctx, (int64_t)(uintptr_t)(data->runtime ? (void*)hl_jit_alloc_slow : (void*)hl_jit_box_slow), ARM_TMP1, true);
+	encode_branch_reg(ctx, /*BLR*/1, ARM_TMP1);
+	if( dst != X0 ) emit_mov_gpr(ctx, dst, X0, 1);
+	for( int i = 0; i < nfp; i++ )
+		emit_ld_st(ctx, true, M_F64, fpr_id(cfg->floats.scratch[i]), SP_REG, (ngpr + i) * HL_WSIZE);
+	for( int i = 0; i < ngpr; i++ )
+		if( gpr_id(cfg->regs.scratch[i]) != dst ) emit_ld_st(ctx, true, M_PTR, gpr_id(cfg->regs.scratch[i]), SP_REG, i * HL_WSIZE);
+	emit_sp_offs(ctx, frame);
+	patch_branch(ctx, done, byte_count(ctx->code), 0);
+	if( REG_KIND(out) != R_REG )
+		emit_mov(ctx, out, R(ARM_TMP3), M_PTR);
+}
+
 static void emit_cmov_arm( code_ctx *ctx, ereg out_e, ereg a_e, emit_mode mode, ArmCondition cond ) {
 	if( REG_KIND(out_e) != R_REG ) jit_error("aarch64 CMOV non-reg out");
 	if( is_fp_mode(mode) ) {
@@ -1557,8 +1653,9 @@ static bool codegen_function_pass( jit_ctx *jit ) {
 	for( int cur_pos = 0; cur_pos < jit->reg_instr_count; cur_pos++ ) {
 		einstr *e = jit->reg_instrs + cur_pos;
 		ereg out = jit->reg_writes[cur_pos];
-		byte_reserve(ctx->code, 64);
-		ctx->code.cur -= 64;
+		int reserve = (e->op == ALLOC_OBJECT || e->op == ALLOC_BOXED) ? ALLOC_EXPANSION_BYTES : 64;
+		byte_reserve(ctx->code, reserve);
+		ctx->code.cur -= reserve;
 		ctx->cur_op = cur_pos;
 		if( cur_pos > 0 ) ctx->pos_map[cur_pos] = ctx->code.cur;
 
@@ -1643,6 +1740,10 @@ static bool codegen_function_pass( jit_ctx *jit ) {
 			break;
 		case CMOV:
 			emit_cmov_arm(ctx, out, e->a, e->mode, get_cond_jump(ctx));
+			break;
+		case ALLOC_OBJECT:
+		case ALLOC_BOXED:
+			emit_small_alloc(ctx, out, (hl_jit_alloc_data*)(int_val)e->value);
 			break;
 		case XCHG:
 			emit_xchg(ctx, e);

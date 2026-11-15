@@ -1093,7 +1093,7 @@ static HL_INLINE hl_thread_info *gc_tlab_thread( int size, int flags ) {
 
 // Compiled code allocates small objects and integer boxes from the thread's TLAB on these targets: the prepare functions
 // below describe the fast path, and the JIT backend emits it. Both sides must support a target before it is listed.
-#if defined(GC_TLAB) && defined(__linux__) && defined(__GNUC__) && defined(__x86_64__)
+#if defined(GC_TLAB) && defined(__linux__) && defined(__GNUC__) && (defined(__x86_64__) || defined(__aarch64__))
 #	define GC_JIT_INLINE_ALLOC
 #endif
 
