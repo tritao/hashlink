@@ -129,6 +129,19 @@ static int get_persist_slot_size( regs_ctx *ctx ) {
 	return ctx->jit->cfg.persist_reg_size ? ctx->jit->cfg.persist_reg_size : HL_WSIZE;
 }
 
+/* The i-th saved register in push order (general registers, then floats), and the slot a push would have put it in. */
+static ereg persist_reg( regs_ctx *ctx, int i ) {
+	return i < ctx->persists_uses[0] ? ctx->jit->cfg.regs.persist[i] : ctx->jit->cfg.floats.persist[i - ctx->persists_uses[0]];
+}
+
+static emit_mode persist_mode( regs_ctx *ctx, int i ) {
+	return i < ctx->persists_uses[0] ? M_PTR : M_F64;
+}
+
+static ereg persist_slot_addr( regs_ctx *ctx, int i ) {
+	return MK_ADDR(REG_REG(ctx->jit->cfg.stack_pos), -(i + 1) * get_persist_slot_size(ctx));
+}
+
 // Compute native-ABI stack argument offsets for CALL_PTR. Returns the total
 // allocation, rounded to the ABI stack alignment, and writes -1 for arguments
 // passed in registers.
@@ -972,12 +985,25 @@ static void regs_emit_instrs( regs_ctx *ctx ) {
 					int align = stack_args % jit->cfg.stack_align;
 					if( align ) offset = jit->cfg.stack_align - align;
 				}
-				if( offset )
-					regs_emit(ctx,UNUSED,STACK_OFFS,UNUSED,UNUSED,0,-offset);
-				for(int k=e.nargs-1;k>=0;k--) {
-					if( stack_slots[k] ) {
-						value_info *v = REG_IS_VAL(args[k]) ? VAL_REG(args[k]) : NULL;
-						EMIT(PUSH,VAL_REG(args[k])->reg,UNUSED,v && IS_FLOAT(v->mode) ? v->mode : M_PTR);
+				if( jit->cfg.stack_stores ) {
+					// The layout the pushes would leave: the first stack argument lowest, the padding above the last.
+					regs_emit(ctx,UNUSED,STACK_OFFS,UNUSED,UNUSED,0,-(offset + stack_args));
+					int slot = 0;
+					for(int k=0;k<e.nargs;k++) {
+						if( !stack_slots[k] ) continue;
+						value_info *v = VAL_REG(args[k]);
+						emit_mode mode = IS_FLOAT(v->mode) ? v->mode : M_PTR;
+						regs_emit(ctx,UNUSED,STORE,jit->cfg.stack_reg,v->reg,mode,slot);
+						slot += get_stack_size(ctx,v->mode);
+					}
+				} else {
+					if( offset )
+						regs_emit(ctx,UNUSED,STACK_OFFS,UNUSED,UNUSED,0,-offset);
+					for(int k=e.nargs-1;k>=0;k--) {
+						if( stack_slots[k] ) {
+							value_info *v = REG_IS_VAL(args[k]) ? VAL_REG(args[k]) : NULL;
+							EMIT(PUSH,VAL_REG(args[k])->reg,UNUSED,v && IS_FLOAT(v->mode) ? v->mode : M_PTR);
+						}
 					}
 				}
 				if( IS_WINCALL64 ) {
@@ -1031,10 +1057,12 @@ static void regs_emit_instrs( regs_ctx *ctx ) {
 			{
 				EMIT(PUSH,jit->cfg.stack_pos,UNUSED,M_PTR);
 				regs_emit_mov(ctx,jit->cfg.stack_pos,jit->cfg.stack_reg,M_PTR);
-				for(int i=0;i<ctx->persists_uses[0];i++)
-					EMIT(PUSH,ctx->jit->cfg.regs.persist[i],UNUSED,M_PTR);
-				for(int i=0;i<ctx->persists_uses[1];i++)
-					EMIT(PUSH,ctx->jit->cfg.floats.persist[i],UNUSED,M_F64);
+				if( !jit->cfg.stack_stores ) {
+					for(int i=0;i<ctx->persists_uses[0];i++)
+						EMIT(PUSH,ctx->jit->cfg.regs.persist[i],UNUSED,M_PTR);
+					for(int i=0;i<ctx->persists_uses[1];i++)
+						EMIT(PUSH,ctx->jit->cfg.floats.persist[i],UNUSED,M_F64);
+				}
 				// A frame of a page or more is touched a page at a time from the top before SP moves past it. Skipping
 				// the stack's guard page faults on Windows (whose stack grows a page at a time), and lands silently in
 				// whatever lies below a thread's stack elsewhere. The loads go through the frame pointer, which stays
@@ -1046,7 +1074,14 @@ static void regs_emit_instrs( regs_ctx *ctx ) {
 						EMIT(TEST,MK_ADDR(fp,-offs),UNUSED,M_I32);
 					EMIT(TEST,MK_ADDR(fp,-frame_size),UNUSED,M_I32);
 				}
-				if( stack_offset )
+				if( jit->cfg.stack_stores ) {
+					// The saved registers take the slots the pushes would, below the frame pointer, written after one SP
+					// adjustment for them and the locals together.
+					if( frame_size )
+						regs_emit(ctx,UNUSED,STACK_OFFS,UNUSED,UNUSED,M_PTR,-frame_size);
+					for(int i=0;i<persist_count;i++)
+						regs_emit_mov(ctx,persist_slot_addr(ctx,i),persist_reg(ctx,i),persist_mode(ctx,i));
+				} else if( stack_offset )
 					regs_emit(ctx,UNUSED,STACK_OFFS,UNUSED,UNUSED,M_PTR,-stack_offset);
 			}
 			break;
@@ -1105,12 +1140,19 @@ static void regs_emit_instrs( regs_ctx *ctx ) {
 			}
 			{
 				int epilog_start = ctx->emit_pos;
-				if( stack_offset )
-					regs_emit(ctx,UNUSED,STACK_OFFS,UNUSED,UNUSED,M_PTR,stack_offset);
-				for(int i=ctx->persists_uses[1]-1;i>=0;i--)
-					EMIT(POP,ctx->jit->cfg.floats.persist[i],UNUSED,M_F64);
-				for(int i=ctx->persists_uses[0]-1;i>=0;i--)
-					EMIT(POP,ctx->jit->cfg.regs.persist[i],UNUSED,M_PTR);
+				if( jit->cfg.stack_stores ) {
+					for(int i=persist_count-1;i>=0;i--)
+						regs_emit_mov(ctx,persist_reg(ctx,i),persist_slot_addr(ctx,i),persist_mode(ctx,i));
+					if( persist_size + stack_offset )
+						regs_emit(ctx,UNUSED,STACK_OFFS,UNUSED,UNUSED,M_PTR,persist_size + stack_offset);
+				} else {
+					if( stack_offset )
+						regs_emit(ctx,UNUSED,STACK_OFFS,UNUSED,UNUSED,M_PTR,stack_offset);
+					for(int i=ctx->persists_uses[1]-1;i>=0;i--)
+						EMIT(POP,ctx->jit->cfg.floats.persist[i],UNUSED,M_F64);
+					for(int i=ctx->persists_uses[0]-1;i>=0;i--)
+						EMIT(POP,ctx->jit->cfg.regs.persist[i],UNUSED,M_PTR);
+				}
 				EMIT(POP,jit->cfg.stack_pos,UNUSED,M_PTR);
 				EMIT(RET,UNUSED,UNUSED,M_NONE);
 				if( ctx->emit_pos - epilog_start >= 6 )

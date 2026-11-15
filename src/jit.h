@@ -234,6 +234,9 @@ typedef struct {
 	// Conservative GC targets dead JIT stack slots. Targets may request that
 	// their local frame is scrubbed before the epilogue restores the caller.
 	int clear_stack_on_return;
+	// The target saves registers and passes HL stack arguments with stores into an area reserved by one SP adjustment,
+	// never moving SP one word at a time: AArch64 faults on a load or store through an SP that is not 16-byte aligned.
+	bool stack_stores;
 	int debug_prefix_size;
 	bool alloc_inline; // Opt-in backend support; false on all other targets.
 	bool alloc_box; // Independent opt-in integer boxing expansion.

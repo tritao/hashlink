@@ -116,10 +116,11 @@ void hl_jit_init_regs( regs_config *cfg ) {
 	cfg->stack_pos = R(FP);     // X29
 	cfg->stack_align = 16;      // AAPCS64 mandates
 	cfg->clear_stack_on_return = 1;
+	cfg->stack_stores = true;
 	// HL's internal calling convention uses one 8-byte slot per stack-passed
-	// value.  The caller rounds the aggregate allocation to 16 bytes; individual
-	// PUSH operations must remain 8 bytes so the callee sees adjacent arguments
-	// at FP+16, FP+24, ... (the same layout as the old ARM backend).
+	// value, so the callee sees adjacent arguments at FP+16, FP+24, ...; the
+	// caller reserves the whole area, rounded to 16 bytes, and stores into it
+	// (stack_stores), as it does for saved registers.
 	cfg->stack_arg_size = HL_WSIZE;
 	cfg->persist_reg_size = HL_WSIZE;
 	// HL→native calls follow the platform C ABI, which differs from the HL
@@ -502,53 +503,24 @@ static void emit_load_const( code_ctx *ctx, ereg out, uint64_t value, emit_mode 
 // aggregate alignment padding around call arguments and the frame allocator
 // accounts for any odd number of saved registers.
 // ----------------------------------------------------------------------------
-/*
-	PUSH and POP move SP by one 8-byte word, as the shared register allocator expects, so between them SP can be 8 modulo
-	16. A load or store whose base register is a misaligned SP faults on hardware (SIGBUS on Linux and macOS; qemu-user does
-	not check), so the word is addressed through ARM_TMP2 instead. The allocator keeps SP aligned at calls.
-*/
-static void emit_sp_word( code_ctx *ctx, bool is_load, bool fp, int reg ) {
-	emit_mov_gpr(ctx, ARM_TMP2, SP_REG, 1);
-	encode_ldr_str_imm(ctx, /*size=*/3, /*V=*/fp ? 1 : 0, /*opc=*/is_load ? 1 : 0, 0, ARM_TMP2, (Arm64Reg)reg);
-}
-
+// With stack_stores the shared allocator never pushes a single word: the only PUSH and POP are the frame record (FP and
+// LR together), so SP stays 16-byte aligned, as AArch64 requires of every load and store through it.
 static void emit_push( code_ctx *ctx, ereg r, emit_mode mode ) {
-	if( is_fp_mode(mode) ) {
-		// SUB SP, SP, #8; store Dn.  Materialize through V31 if r is not a register.
-		Arm64FpReg src = (REG_KIND(r) == R_REG) ? fpr_id(r) : materialize_fpr(ctx, r, mode, (Arm64FpReg)31);
-		emit_sp_offs(ctx, -8);
-		emit_sp_word(ctx, false, true, src);
-		return;
-	}
-	// materialize_gpr handles MK_STACK_OFFS by adding the offset; gpr_id alone
-	// would discard it (mapping STACK_REG->FP and ignoring REG_VALUE).
-	Arm64Reg src = materialize_gpr(ctx, r, mode, ARM_TMP1);
-	if( src == FP && REG_KIND(r) == R_REG && REG_VALUE(r) == 0 ) {
-		// True PUSH FP (prologue) — emit STP x29,x30,[sp,#-16]! to also save LR.
+	if( !is_fp_mode(mode) && REG_KIND(r) == R_REG && REG_VALUE(r) == 0 && gpr_id(r) == FP ) {
+		// STP x29, x30, [sp, #-16]!
 		encode_ldp_stp(ctx, /*opc=*/2, /*V=*/0, /*mode=*/0x03, /*imm7=*/-2 & 0x7F, LR, SP_REG, FP);
 		return;
 	}
-	// SUB SP, SP, #8; store Xn
-	emit_sp_offs(ctx, -8);
-	emit_sp_word(ctx, false, false, src);
+	jit_error("aarch64 PUSH of one word would misalign SP");
 }
 
 static void emit_pop( code_ctx *ctx, ereg r, emit_mode mode ) {
-	if( REG_KIND(r) != R_REG ) jit_error("aarch64 POP non-reg not implemented");
-	if( is_fp_mode(mode) ) {
-		emit_sp_word(ctx, true, true, fpr_id(r));
-		emit_sp_offs(ctx, 8);
-		return;
-	}
-	Arm64Reg dst = gpr_id(r);
-	if( dst == FP ) {
-		// LDP X29, X30, [SP], #16   opc=10, V=0, mode=01 (post-index load), imm7=2
+	if( !is_fp_mode(mode) && REG_KIND(r) == R_REG && gpr_id(r) == FP ) {
+		// LDP x29, x30, [sp], #16
 		encode_ldp_stp(ctx, /*opc=*/2, /*V=*/0, /*mode=*/0x01, /*imm7=*/2, LR, SP_REG, FP);
 		return;
 	}
-	// load Xn; ADD SP, SP, #8
-	emit_sp_word(ctx, true, false, dst);
-	emit_sp_offs(ctx, 8);
+	jit_error("aarch64 POP of one word would misalign SP");
 }
 
 // ----------------------------------------------------------------------------
@@ -1322,7 +1294,7 @@ static void emit_push_const( code_ctx *ctx, einstr *e ) {
 	if( e->mode != M_PTR ) jit_error("aarch64 PUSH_CONST non-ptr mode");
 	load_immediate(ctx, (int64_t)e->value, ARM_TMP1, true);
 	emit_sp_offs(ctx, -16);
-	emit_sp_word(ctx, false, false, ARM_TMP1);
+	encode_ldr_str_imm(ctx, 3, 0, 0, 0, SP_REG, ARM_TMP1);  // STR X16, [SP]: SP stays aligned
 }
 
 static int reserve_const_segment( code_ctx *ctx, int size, int align );
