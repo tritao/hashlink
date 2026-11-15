@@ -710,6 +710,7 @@ typedef struct {
 	hl_jit_alloc_guard guards[6];
 	int nguards;
 } hl_jit_alloc_data;
+HL_API bool hl_jit_alloc_supported( void );
 HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data);
 HL_API bool hl_jit_box_prepare(hl_type *type, hl_jit_alloc_data *data);
 HL_API vdynamic *hl_jit_box_slow(hl_type *type);

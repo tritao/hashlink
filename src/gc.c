@@ -1091,8 +1091,23 @@ static HL_INLINE hl_thread_info *gc_tlab_thread( int size, int flags ) {
 	return NULL;
 }
 
+// Compiled code allocates small objects and integer boxes from the thread's TLAB on these targets: the prepare functions
+// below describe the fast path, and the JIT backend emits it. Both sides must support a target before it is listed.
+#if defined(GC_TLAB) && defined(__linux__) && defined(__GNUC__) && defined(__x86_64__)
+#	define GC_JIT_INLINE_ALLOC
+#endif
+
+/** Whether compiled code can allocate inline on this target (see GC_JIT_INLINE_ALLOC). */
+HL_API bool hl_jit_alloc_supported( void ) {
+#ifdef GC_JIT_INLINE_ALLOC
+	return true;
+#else
+	return false;
+#endif
+}
+
 HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data) {
-#if defined(__linux__) && defined(__x86_64__) && defined(__GNUC__) && defined(GC_TLAB)
+#ifdef GC_JIT_INLINE_ALLOC
 	if(type->kind != HOBJ) return false;
 	hl_runtime_obj *rt = hl_get_obj_rt(type); // Layout only: methods remain lazy.
 	// Compiled code zeroes the block word by word, so only the original classes (up to five words) are allocated inline.
@@ -2922,7 +2937,7 @@ DEFINE_PRIM(_VOID, set_thread_flags, _I32 _I32);
 
 // They share GC_TLAB_POLICY so runtime policy and generated guards stay in sync.
 HL_API GC_JIT_COLD bool hl_jit_box_prepare(hl_type *type, hl_jit_alloc_data *data) {
-#if defined(GC_TLAB) && defined(__linux__) && defined(__x86_64__) && defined(__GNUC__)
+#ifdef GC_JIT_INLINE_ALLOC
 	if(type->kind != HI32 || type->gc_owner != NULL || sizeof(vdynamic) != 16) return false;
 	memset(data,0,sizeof(*data));
 	data->type = type; data->block = sizeof(vdynamic);
