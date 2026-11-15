@@ -185,6 +185,31 @@ static bool module_contains_trace_address( hl_module *m, void *addr ) {
 	return addr >= (void*)code && addr < (void*)(code + code_size);
 }
 
+/*
+	Whether `ret`, an address in m's code, follows a call instruction, as a live return address always does. A stack scan
+	meets words left by calls that have returned and spilled values that point into code; most do not follow a call.
+	(Adapted from upstream is_call_site.)
+*/
+static bool module_is_call_return( hl_module *m, void *ret ) {
+	unsigned char *p = (unsigned char*)ret;
+#if defined(__x86_64__) || defined(_M_X64)
+	if( !module_contains_address(m,p - 8) ) return false;
+	if( p[-5] == 0xE8 ) return true; // call rel32
+	for(int k=2;k<=7;k++) {
+		int reg = (p[-k + 1] >> 3) & 7;
+		if( p[-k] == 0xFF && (reg == 2 || reg == 3) ) return true; // call r/m
+	}
+	return false;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+	unsigned int ins;
+	if( ((uintptr_t)ret & 3) || !module_contains_address(m,p - 4) ) return false;
+	ins = ((unsigned int*)ret)[-1];
+	return (ins & 0xFC000000) == 0x94000000 || (ins & 0xFFFFFC1F) == 0xD63F0000; // BL imm26, BLR Xn
+#else
+	return true;
+#endif
+}
+
 hl_module **hl_module_registry_snapshot( int *count ) {
 	hl_module **modules;
 	if( count == NULL ) return NULL;
@@ -382,7 +407,7 @@ int hl_module_capture_stack_range_snapshot( hl_module **modules, int module_coun
 		while( stack_ptr < (void**)stack_top ) {
 #if defined(HL_64) && defined(HL_WIN)
 			void *module_addr = *stack_ptr++; // EIP
-			if( module_contains_trace_address(m,module_addr) ) {
+			if( module_contains_trace_address(m,module_addr) && module_is_call_return(m,module_addr) ) {
 				if( out ) {
 					if( count == size ) break;
 					out[count++] = module_addr;
@@ -393,7 +418,7 @@ int hl_module_capture_stack_range_snapshot( hl_module **modules, int module_coun
 			void *stack_addr = *stack_ptr++; // EBP
 			if( stack_addr > stack_bottom && stack_addr < stack_top ) {
 				void *module_addr = *stack_ptr; // EIP
-				if( module_contains_trace_address(m,module_addr) ) {
+				if( module_contains_trace_address(m,module_addr) && module_is_call_return(m,module_addr) ) {
 					if( out ) {
 						if( count == size ) break;
 						out[count++] = module_addr;
@@ -420,6 +445,7 @@ int hl_module_capture_stack_range_snapshot( hl_module **modules, int module_coun
 					unsigned char *code = m->jit_code;
 					int code_size = m->codesize;
 					if( module_contains_trace_address(m,module_addr) ) {
+						if( !module_is_call_return(m,module_addr) ) break; // a stale word, not a frame
 						if( out && count == size ) {
 							stack_ptr = stack_top;
 							break;
@@ -466,6 +492,14 @@ static bool module_reportable_address( hl_module **modules, int module_count, vo
 	return false;
 }
 
+/** Whether `lr` is a reportable JIT return address that follows a call: what a real frame record holds. */
+static bool module_reportable_call_return( hl_module **modules, int module_count, void *lr ) {
+	if( !module_reportable_address(modules,module_count,lr) ) return false;
+	for(int i=0;i<module_count;i++)
+		if( module_contains_address(modules[i],lr) ) return module_is_call_return(modules[i],lr);
+	return false;
+}
+
 /** How far, in words, a capture looks for the next frame after native code, instead of reading the whole stack. */
 #define CAPTURE_RESYNC_WORDS 8192
 
@@ -475,7 +509,7 @@ static void **module_find_frame_record( hl_module **modules, int module_count, v
 	if( end > (void**)stack_top - 1 ) end = (void**)stack_top - 1;
 	for(void **q=from; q<end; q++) {
 		void *saved = q[0];
-		if( saved > (void*)q && saved < stack_top && ((uintptr_t)saved & (sizeof(void*)-1)) == 0 && module_reportable_address(modules,module_count,q[1]) )
+		if( saved > (void*)q && saved < stack_top && ((uintptr_t)saved & (sizeof(void*)-1)) == 0 && module_reportable_call_return(modules,module_count,q[1]) )
 			return q;
 	}
 	return NULL;
