@@ -240,6 +240,24 @@ typedef struct {
 	unsigned char *cur;
 	unsigned char *end;
 } gc_tlab_slot;
+
+/*
+	Free blocks are found in runs, and after a few collections most runs are short: one run per refill made a thread take
+	the global lock for every few allocations. A refill that gets a short run also reserves further runs of pages that
+	already exist, up to a buffer's worth, in its slot's stash; the slot then moves to the next run without the lock.
+	The stashes follow the slots in the thread's buffer allocation (so the JIT's slot layout is unchanged), are made on
+	a slot's first short refill, and are emptied with the slots, by moving to a new epoch.
+*/
+#	define GC_TLAB_STASH	8
+typedef struct {
+	int epoch;
+	int next;
+	int count;
+	unsigned char *start[GC_TLAB_STASH];
+	unsigned char *end[GC_TLAB_STASH];
+} gc_tlab_stash;
+#	define GC_TLAB_STASHES(th)	((gc_tlab_stash**)((gc_tlab_slot*)(th)->gc_tlab + GC_TLAB_ALL_SLOTS))
+static int gc_tlab_epoch = 0;
 #endif
 
 // Publishes this thread's earlier writes before the collector can see it blocked (the collector then clears the
@@ -548,7 +566,7 @@ HL_API void hl_register_thread( void *stack_top ) {
 	hl_thread_info *t = (hl_thread_info*)malloc(sizeof(hl_thread_info));
 	memset(t, 0, sizeof(hl_thread_info));
 #	ifdef GC_TLAB
-	t->gc_tlab = calloc(GC_TLAB_ALL_SLOTS,sizeof(gc_tlab_slot));
+	t->gc_tlab = calloc(1,GC_TLAB_ALL_SLOTS * (sizeof(gc_tlab_slot) + sizeof(gc_tlab_stash*)));
 	if( t->gc_tlab == NULL ) out_of_memory("thread allocation buffers");
 #	endif
 	t->thread_id = hl_thread_id();
@@ -588,6 +606,11 @@ HL_API void hl_unregister_thread() {
 			break;
 		}
 #	ifdef GC_TLAB
+	if( t->gc_tlab ) {
+		gc_tlab_stash **stashes = GC_TLAB_STASHES(t);
+		for(i=0;i<GC_TLAB_ALL_SLOTS;i++)
+			free(stashes[i]);
+	}
 	free(t->gc_tlab);
 #	endif
 	free(t);
@@ -679,6 +702,7 @@ static void gc_stop_world( bool b ) {
 			hl_thread_info *t = gc_threads.threads[i];
 			if( t->gc_tlab ) memset(t->gc_tlab,0,GC_TLAB_ALL_SLOTS*sizeof(gc_tlab_slot));
 		}
+		gc_tlab_epoch++; // and every stash with them
 #		endif
 	} else {
 		// releasing global lock will release all threads; a collection inside an exclusive section leaves them stopped
@@ -1170,23 +1194,55 @@ static void *gc_tlab_alloc( hl_thread_info *th, int size, int flags, int oc ) {
 	int rounded = size + ((-size) & (GC_ALIGN - 1));
 	int part = GC_FIXED_PART(rounded);
 	int block = GC_SIZES[part];
-	gc_tlab_slot *slot = (gc_tlab_slot*)th->gc_tlab + (oc * GC_TLAB_SLOTS + ((part << PAGE_KIND_BITS) | kind));
+	int index = oc * GC_TLAB_SLOTS + ((part << PAGE_KIND_BITS) | kind);
+	gc_tlab_slot *slot = (gc_tlab_slot*)th->gc_tlab + index;
 	if( slot->cur >= slot->end ) {
 		// A buffer is refilled only once it is exactly used up (or emptied by a collection); a cursor past its end
 		// means blocks were handed out that the free lists never reserved.
 		if( slot->cur != slot->end )
 			hl_fatal("GC allocation buffer overran its run");
-		int got;
-		unsigned char *run;
-		gc_global_lock(true);
-		gc_check_mark();
-		run = (unsigned char*)gc_alloc_fixed_run(oc,part,kind,GC_TLAB_RUN / block,&got);
-		gc_stats.allocation_count += got;
-		gc_stats.total_requested += (int64)got * block;
-		gc_stats.total_allocated += (int64)got * block;
-		slot->cur = run;
-		slot->end = run + got * block;
-		gc_global_lock(false);
+		gc_tlab_stash **stashes = GC_TLAB_STASHES(th);
+		gc_tlab_stash *stash = stashes[index];
+		if( stash && stash->epoch == gc_tlab_epoch && stash->next < stash->count ) {
+			slot->cur = stash->start[stash->next];
+			slot->end = stash->end[stash->next];
+			stash->next++;
+		} else {
+			int want = GC_TLAB_RUN / block, got;
+			unsigned char *run;
+			gc_global_lock(true);
+			gc_check_mark();
+			run = (unsigned char*)gc_alloc_fixed_run(oc,part,kind,want,&got,true);
+			gc_stats.allocation_count += got;
+			gc_stats.total_requested += (int64)got * block;
+			gc_stats.total_allocated += (int64)got * block;
+			slot->cur = run;
+			slot->end = run + got * block;
+			if( got < want ) {
+				if( stash == NULL ) {
+					stash = (gc_tlab_stash*)calloc(1,sizeof(gc_tlab_stash));
+					if( stash == NULL ) out_of_memory("thread allocation buffers");
+					stashes[index] = stash;
+				}
+				stash->epoch = gc_tlab_epoch;
+				stash->next = stash->count = 0;
+				int total = got;
+				while( total < want && stash->count < GC_TLAB_STASH ) {
+					unsigned char *more = (unsigned char*)gc_alloc_fixed_run(oc,part,kind,want - total,&got,false);
+					if( more == NULL )
+						break;
+					gc_stats.allocation_count += got;
+					gc_stats.total_requested += (int64)got * block;
+					gc_stats.total_allocated += (int64)got * block;
+					stash->start[stash->count] = more;
+					stash->end[stash->count] = more + got * block;
+					stash->count++;
+					total += got;
+				}
+			} else if( stash != NULL )
+				stash->next = stash->count = 0;
+			gc_global_lock(false);
+		}
 	}
 	unsigned char *ptr = slot->cur;
 	slot->cur += block;

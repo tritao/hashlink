@@ -339,11 +339,12 @@ static void flush_free_list( gc_pheader *ph ) {
 	free_freelist(&old_fl);
 }
 
-// Takes up to `want` consecutive free blocks of one size class, and says how many it took in `got`.
+// Takes up to `want` consecutive free blocks of one size class, and says how many it took in `got`. Without `new_page`, it
+// only takes free blocks of the pages it already has, and returns NULL when they have none.
 // Every block position and run length of a page, including the end of a run that reaches the page's last block.
 typedef char gc_fl_cursor_holds_page_blocks[GC_PAGE_SIZE <= (fl_cursor)~0 ? 1 : -1];
 
-static void *gc_alloc_fixed_run( int oc, int part, int kind, int want, int *got ) {
+static void *gc_alloc_fixed_run( int oc, int part, int kind, int want, int *got, bool new_page ) {
 	int pid = GC_PID(oc,part,kind);
 	gc_pheader *ph = gc_free_pages[pid];
 	gc_allocator_page_data *p = NULL;
@@ -369,6 +370,8 @@ static void *gc_alloc_fixed_run( int oc, int part, int kind, int want, int *got 
 		ph = ph->next_page;
 	}
 	if( ph == NULL ) {
+		if( !new_page )
+			return NULL;
 		ph = gc_allocator_new_page(pid, GC_SIZES[part], GC_PAGE_SIZE, kind, false);
 		p = &ph->alloc;
 		bid = p->free.data->pos;
@@ -398,7 +401,7 @@ static void *gc_alloc_fixed_run( int oc, int part, int kind, int want, int *got 
 
 static void *gc_alloc_fixed( int oc, int part, int kind ) {
 	int got;
-	return gc_alloc_fixed_run(oc,part,kind,1,&got);
+	return gc_alloc_fixed_run(oc,part,kind,1,&got,true);
 }
 
 static void *gc_alloc_var( int oc, int part, int size, int kind ) {
