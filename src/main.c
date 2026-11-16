@@ -444,6 +444,11 @@ int main(int argc, pchar *argv[]) {
 	main_context ctx;
 	bool isExc = false;
 	int first_boot_arg = -1;
+#ifdef HL_WIN_DESKTOP
+	// A library that does not load, or a crash, fails the process instead of waiting on a dialog nobody may see (a test
+	// run, a build). Processes hl starts inherit the mode, so they do not wait on one either.
+	SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+#endif
 	argv++;
 	argc--;
 
