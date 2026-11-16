@@ -400,11 +400,12 @@ HL_PRIM bool hl_condition_timed_wait(hl_condition *cond, double timeout) {
 #	if !defined(HL_THREADS)
 	return true;
 #	elif defined(HL_WIN)
+	// FALSE with ERROR_TIMEOUT when the time ran out: the wait was not signalled.
 	hl_blocking(true);
-	SleepConditionVariableCS(&cond->cond, &cond->cs,
+	BOOL woken = SleepConditionVariableCS(&cond->cond, &cond->cs,
 	                         (DWORD)((FLOAT)timeout * 1000.0));
 	hl_blocking(false);
-	return true;
+	return woken != 0;
 #	else
 	struct timeval tv;
 	struct timespec t;
