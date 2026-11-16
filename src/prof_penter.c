@@ -27,7 +27,9 @@ static void resolve( void ) {
 	/* Not loaded (a tool, or a module initializing before the VM): look again at most once a millisecond. */
 	if( now < next_attempt ) return;
 	next_attempt = now + 1;
+	/* libhl.dll, or the hl executable when libhl is compiled into it (HL_LIBHL_IN_VM). */
 	libhl = GetModuleHandleW(L"libhl.dll");
+	if( libhl == NULL || GetProcAddress(libhl,"hl_prof_on") == NULL ) libhl = GetModuleHandleW(NULL);
 	if( libhl == NULL ) return;
 	on = (volatile int*)GetProcAddress(libhl,"hl_prof_on");
 	prof_enter = (prof_enter_fn)GetProcAddress(libhl,"hl_prof_enter_native");

@@ -941,6 +941,12 @@ static void *resolve_library( const char *lib, bool is_opt ) {
 		return dlopen(NULL,RTLD_LAZY);
 #endif
 
+	/* A VM with libhl compiled in has the `std` primitives itself. */
+#ifdef HL_LIBHL_IN_VM
+	if( strcmp(lib,"std") == 0 )
+		return dlopen(NULL,RTLD_LAZY);
+#endif
+
 	if( strcmp(lib,"std") == 0 ) {
 #	ifdef HL_WIN
 #		ifdef HL_64

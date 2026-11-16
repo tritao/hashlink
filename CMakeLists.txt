@@ -49,6 +49,9 @@ else()
 endif()
 option(DOWNLOAD_DEPENDENCIES "Download & build third-party dependencies" ${_DOWNLOAD_DEPENDENCIES})
 option(WITH_SYSTEM_PCRE2 "Link libhl against system installation of pcre2" OFF)
+# One self-contained VM: libhl is an object library compiled into hl (and into the tools that link it), and hl exports
+# the libhl API to the libraries it loads and resolves `std` primitives from itself. No libhl shared library is built.
+option(HL_LIBHL_IN_VM "Compile libhl into the hl executable instead of linking it" OFF)
 
 if(MSVC)
     if (CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
@@ -178,7 +181,12 @@ if(IOS_PLATFORM)
     )
 endif()
 
-add_library(libhl
+if(HL_LIBHL_IN_VM)
+    set(_libhl_kind OBJECT)
+else()
+    set(_libhl_kind "")
+endif()
+add_library(libhl ${_libhl_kind}
     src/gc.c
     src/prof.c
     src/ryu/d2s.c
@@ -189,6 +197,9 @@ add_library(libhl
 target_include_directories(libhl
     PUBLIC src
 )
+if(HL_LIBHL_IN_VM)
+    set_target_properties(libhl PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 
 # C11 / C++11 are required for features such as unicode strings
 target_compile_features(libhl PUBLIC cxx_std_11 c_std_11)
@@ -325,7 +336,13 @@ if (WITH_VM)
         target_sources(hl PRIVATE src/prof_boundary_linux.c src/prof_boundary_x64_sysv.c)
     endif()
 
+    # With HL_LIBHL_IN_VM, libhl is an object library: linking it puts all of its objects, compiled with LIBHL_EXPORTS,
+    # into hl, which exports them.
     target_link_libraries(hl libhl)
+    if(HL_LIBHL_IN_VM)
+        target_compile_definitions(hl PRIVATE HL_LIBHL_IN_VM)
+        set_target_properties(hl PROPERTIES ENABLE_EXPORTS ON)
+    endif()
 
     if (WIN32)
         target_link_libraries(hl user32 dbghelp)
