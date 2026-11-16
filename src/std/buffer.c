@@ -338,8 +338,9 @@ static void hl_buffer_rec( hl_buffer *b, vdynamic *v, vlist *stack ) {
 			l.next = stack;
 			hl_buffer_char(b,'[');
 			for(i=0;i<a->size;i++) {
+				/* Haxe's Array.toString: "[" + join(",") + "]". */
 				if( i )
-					hl_buffer_str_sub(b,USTR(", "),2);
+					hl_buffer_char(b,',');
 				if( a->t->array_access != NULL ) {
 					vdynamic *element = a->t->array_access->read(a,i);
 					hl_buffer_rec(b,element,&l);
