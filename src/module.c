@@ -935,6 +935,12 @@ static void *resolve_library( const char *lib, bool is_opt ) {
 		return RTLD_DEFAULT;
 #endif
 
+	/* A VM built with the Haxeon runtime compiled in resolves its natives from the executable. */
+#ifdef HAXEON_EMBEDDED_RUNTIME
+	if( strcmp(lib,"haxeon_runtime") == 0 )
+		return dlopen(NULL,RTLD_LAZY);
+#endif
+
 	if( strcmp(lib,"std") == 0 ) {
 #	ifdef HL_WIN
 #		ifdef HL_64
