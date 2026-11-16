@@ -598,9 +598,17 @@ uchar *hl_runtime_module_describe_borrowers( hl_runtime_module *runtime ) {
 	bool typed[4];
 	char text[1024], number[32], stack_floor = 0;
 	int length = 0, count, shown;
+	hl_module_retirement_status status;
 	if( runtime == NULL ) return NULL;
 	count = hl_gc_owner_live_blocks(runtime->module,blocks,typed,4);
-	if( count == 0 ) return NULL;
+	hl_module_retirement_status_get(runtime->module,&status);
+	if( count == 0 && status.registry_readers == 0 ) return NULL;
+	if( status.registry_readers > 0 ) {
+		// A reader of the module registry (a stack walk, the profiler, the debugger) holds its symbols.
+		snprintf(number,sizeof(number),"%d",status.registry_readers);
+		length = append_ascii(text,length,sizeof(text),number);
+		length = append_ascii(text,length,sizeof(text),status.registry_readers == 1 ? " registry reader, " : " registry readers, ");
+	}
 	snprintf(number,sizeof(number),"%d",count);
 	length = append_ascii(text,length,sizeof(text),number);
 	length = append_ascii(text,length,sizeof(text),count == 1 ? " live block" : " live blocks");
