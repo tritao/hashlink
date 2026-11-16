@@ -716,18 +716,21 @@ static bool native_code_address( void *address, double time ) {
 }
 
 /* Keeps the JIT frames and the native frames that are code, and folds runs of gaps (and the native values dropped
-   around them) into one gap frame. Returns the new count. */
+   around them) into one gap frame. The native frames outside the outermost JIT frame are the launcher's (or the
+   thread's start), not the program's, and go too: a chain that keeps frame pointers there, as Apple's arm64 code
+   does, reaches them. Returns the new count. */
 static int keep_sampled_frames( void **frames, unsigned char *kinds, int count, double time ) {
-	int kept = 0;
+	int kept = 0, outermost_jit = -1;
 	bool gap = false;
 	for(int i=0;i<count;i++) {
 		if( kinds[i] == HL_CAPTURE_GAP ) { gap = true; continue; }
 		if( kinds[i] == HL_CAPTURE_NATIVE && !native_code_address(frames[i],time) ) continue;
 		if( gap && kept > 0 ) frames[kept++] = UNWIND_GAP_PC;
 		gap = false;
+		if( kinds[i] == HL_CAPTURE_JIT ) outermost_jit = kept;
 		frames[kept++] = frames[i];
 	}
-	return kept;
+	return outermost_jit >= 0 ? outermost_jit + 1 : kept;
 }
 #endif
 
