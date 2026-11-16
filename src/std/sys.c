@@ -280,7 +280,10 @@ HL_PRIM int64 hl_sys_timestamp_ms() {
 }
 
 HL_PRIM vbyte *hl_sys_get_env( vbyte *v ) {
-	return (vbyte*)getenv((pchar*)v);
+	// A copy: setting the variable again may free or reuse the string getenv returns (the Windows C runtime does),
+	// and the caller keeps it as a String.
+	pchar *value = getenv((pchar*)v);
+	return value == NULL ? NULL : (vbyte*)pstrdup(value,-1);
 }
 
 HL_PRIM bool hl_sys_put_env( vbyte *e, vbyte *v ) {
