@@ -635,7 +635,7 @@ uchar *hl_runtime_module_describe_borrowers( hl_runtime_module *runtime ) {
 			snprintf(number,sizeof(number)," at +%d",offset);
 			length = append_ascii(text,length,sizeof(text),number);
 		} else
-			length = append_ascii(text,length,sizeof(text)," held by nothing found (the caller's own frame?)");
+			length = append_ascii(text,length,sizeof(text)," held by none of the roots, threads, caller's frames or live blocks checked");
 	}
 	return ascii_message(text);
 }
