@@ -22,7 +22,7 @@
 #include <hlmodule.h>
 #include "hlprof.h"
 
-#if defined(__linux__) && defined(__x86_64__)
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__)
 
 #include <dlfcn.h>
 #include <elf.h>

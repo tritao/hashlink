@@ -478,8 +478,8 @@ void hl_prof_boundary_install( void ) {
 	refresh();
 }
 
-#elif !(defined(__linux__) && defined(__x86_64__))
-/* Linux x86-64 has its own: prof_boundary_linux.c. */
+#elif !(defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__))
+/* Linux x86-64 has its own: prof_boundary_linux.c (glibc; Android's libc has no dlmopen, so Android has none). */
 
 void hl_prof_boundary_install( void ) {}
 void hl_prof_boundary_ignore_thread( void ) {}
