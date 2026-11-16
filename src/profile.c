@@ -418,6 +418,21 @@ static bool stopped_in_syscall( void ) {
 	if( !pc || ((uintptr_t)pc & 3) ) return false;
 	if( *pc == 0xd4000001 ) return true;
 	return offset >= 4 && pc[-1] == 0xd4000001;
+#elif defined(HL_MAC) && defined(__x86_64__)
+	struct __darwin_mcontext64 *mcontext = shared_context.context.uc_mcontext;
+	const unsigned char *pc = mcontext ? (const unsigned char*)mcontext->__ss.__rip : NULL;
+	uintptr_t offset = (uintptr_t)pc & 4095;
+	if( !pc ) return false;
+	if( offset <= 4094 && pc[0] == 0x0f && pc[1] == 0x05 ) return true;
+	return offset >= 2 && pc[-2] == 0x0f && pc[-1] == 0x05;
+#elif defined(HL_MAC) && defined(__aarch64__)
+	// Darwin enters the kernel with svc #0x80.
+	struct __darwin_mcontext64 *mcontext = shared_context.context.uc_mcontext;
+	const unsigned int *pc = mcontext ? (const unsigned int*)__darwin_arm_thread_state64_get_pc(mcontext->__ss) : NULL;
+	uintptr_t offset = (uintptr_t)pc & 4095;
+	if( !pc || ((uintptr_t)pc & 3) ) return false;
+	if( *pc == 0xd4001001 ) return true;
+	return offset >= 4 && pc[-1] == 0xd4001001;
 #else
 	return false;
 #endif
@@ -432,6 +447,9 @@ static void *get_thread_frameptr( void ) {
 #elif defined(HL_MAC) && defined(__x86_64__)
 	struct __darwin_mcontext64 *mcontext = shared_context.context.uc_mcontext;
 	return mcontext ? (void*)mcontext->__ss.__rbp : NULL;
+#elif defined(HL_MAC) && defined(__aarch64__)
+	struct __darwin_mcontext64 *mcontext = shared_context.context.uc_mcontext;
+	return mcontext ? (void*)__darwin_arm_thread_state64_get_fp(mcontext->__ss) : NULL;
 #else
 	return NULL;
 #endif
@@ -529,6 +547,13 @@ static void *get_thread_stackptr( thread_handle *t, void **eip ) {
 	if (mcontext != NULL) {
 		*eip = (void*)mcontext->__ss.__rip;
 		return (void*)mcontext->__ss.__rsp;
+	}
+	return NULL;
+#elif defined(HL_MAC) && defined(__aarch64__)
+	struct __darwin_mcontext64 *mcontext = shared_context.context.uc_mcontext;
+	if (mcontext != NULL) {
+		*eip = (void*)__darwin_arm_thread_state64_get_pc(mcontext->__ss);
+		return (void*)__darwin_arm_thread_state64_get_sp(mcontext->__ss);
 	}
 	return NULL;
 #else
