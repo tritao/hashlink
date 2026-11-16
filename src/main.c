@@ -248,20 +248,36 @@ static const char *signal_name( int signum ) {
 static int crash_memory_fd = -1;
 #endif
 
-static void print_crash_frame( void *pc, bool return_address ) {
+/* Prints the frame at `pc` and says whether it did: it does only for compiled (JIT) code, whose location resolves. */
+static bool print_crash_frame( void *pc, bool return_address ) {
 	char symbol[768], line[832], *out = line;
 	// Return addresses point just past the call, whereas the interrupted PC names the faulting instruction.
 	int length = hl_module_resolve_crash_location(return_address ? (char*)pc - 1 : pc,symbol,sizeof(symbol));
-	if( length == 0 ) return;
+	if( length == 0 ) return false;
 	out = append_text(out,"  Called from ",14);
 	out = append_text(out,symbol,(size_t)length);
 	*out++ = '\n';
 	ssize_t written = write(STDERR_FILENO,line,(size_t)(out - line));
 	(void)written;
+	return true;
+}
+
+/* Reads the frame record (saved frame pointer, return address) at `fp` when it lies on the thread's stack above `sp`.
+   /proc/self/mem returns an error for an unmapped frame instead of recursively faulting, including on the guard page. */
+static bool read_crash_record( void **fp, void *sp, void *stack_top, void *record[2] ) {
+	uintptr_t frame = (uintptr_t)fp, top = (uintptr_t)stack_top;
+	if( frame < (uintptr_t)sp || top < 2 * sizeof(void*) || frame > top - 2 * sizeof(void*) || (frame & (sizeof(void*)-1)) != 0 )
+		return false;
+#ifdef HL_LINUX
+	return crash_memory_fd >= 0 && pread(crash_memory_fd,record,2 * sizeof(void*),(off_t)frame) == 2 * sizeof(void*);
+#else
+	record[0] = fp[0]; record[1] = fp[1];
+	return true;
+#endif
 }
 
 static void print_crash_stack( void *context ) {
-	void *pc = NULL, *sp = NULL, **fp = NULL;
+	void *pc = NULL, *sp = NULL, **fp = NULL, *lr = NULL;
 	ucontext_t *uc = (ucontext_t*)context;
 	hl_thread_info *thread = hl_get_thread();
 	if( uc == NULL ) return;
@@ -273,6 +289,7 @@ static void print_crash_stack( void *context ) {
 	pc = (void*)uc->uc_mcontext.pc;
 	sp = (void*)uc->uc_mcontext.sp;
 	fp = (void**)uc->uc_mcontext.regs[29];
+	lr = (void*)uc->uc_mcontext.regs[30];
 #elif defined(HL_MAC) && defined(__x86_64__)
 	pc = (void*)uc->uc_mcontext->__ss.__rip;
 	sp = (void*)uc->uc_mcontext->__ss.__rsp;
@@ -281,23 +298,21 @@ static void print_crash_stack( void *context ) {
 	pc = (void*)uc->uc_mcontext->__ss.__pc;
 	sp = (void*)uc->uc_mcontext->__ss.__sp;
 	fp = (void**)uc->uc_mcontext->__ss.__fp;
+	lr = (void*)uc->uc_mcontext->__ss.__lr;
 #endif
-	print_crash_frame(pc,false);
+	bool compiled = print_crash_frame(pc,false);
 	if( thread == NULL || sp == NULL || thread->stack_top == NULL ) return;
-	// Bound both the walk and each read. /proc/self/mem returns an error for an unmapped
-	// frame instead of recursively faulting, including on the stack guard page.
+	void *record[2];
+	/* An AArch64 call leaves its return address in LR, not on the stack. Native code that faulted before saving a frame
+	   record (a leaf usually never saves one, even with frame pointers) leaves its caller only there: report LR first,
+	   unless the first frame record already holds it. In compiled code LR may be stale, so only native code reads it. */
+	if( !compiled && lr != NULL && !(read_crash_record(fp,sp,thread->stack_top,record) && record[1] == lr) )
+		print_crash_frame(lr,true);
+	// Bound the walk; each read is bounded by read_crash_record.
 	for(int depth=0;depth<128;depth++) {
-		void *record[2];
-		uintptr_t frame = (uintptr_t)fp, top = (uintptr_t)thread->stack_top;
-		if( frame < (uintptr_t)sp || top < sizeof(record) || frame > top - sizeof(record)
-			|| (frame & (sizeof(void*)-1)) != 0 ) break;
-#ifdef HL_LINUX
-		if( crash_memory_fd < 0 || pread(crash_memory_fd,record,sizeof(record),(off_t)frame) != sizeof(record) ) break;
-#else
-		record[0] = fp[0]; record[1] = fp[1];
-#endif
+		if( !read_crash_record(fp,sp,thread->stack_top,record) ) break;
 		print_crash_frame(record[1],true);
-		if( (uintptr_t)record[0] <= frame ) break;
+		if( (uintptr_t)record[0] <= (uintptr_t)fp ) break;
 		fp = (void**)record[0];
 	}
 }
