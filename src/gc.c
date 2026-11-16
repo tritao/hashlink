@@ -1803,6 +1803,47 @@ HL_API int hl_gc_owner_live_count( void *owner ) {
 	return count;
 }
 
+static struct {
+	void **blocks;
+	bool *typed;
+	int max;
+	int count;
+	bool page_typed;
+} gc_owner_live;
+
+static void gc_owner_live_block( void *block, int size ) {
+	(void)size;
+	if( gc_owner_live.count < gc_owner_live.max ) {
+		gc_owner_live.blocks[gc_owner_live.count] = block;
+		gc_owner_live.typed[gc_owner_live.count] = gc_owner_live.page_typed;
+	}
+	gc_owner_live.count++;
+}
+
+/*
+ * The blocks `owner` allocated that a full collection finds live: all are counted, the first `max` stored in `blocks`,
+ * with `typed` saying whether each starts with its type. For saying what keeps an owner from retiring.
+ */
+HL_API int hl_gc_owner_live_blocks( void *owner, void **blocks, bool *typed, int max ) {
+	if( owner == NULL ) return 0;
+	gc_global_lock(true);
+	gc_major();
+	int oc = gc_owner_class_find(owner);
+	gc_owner_live.blocks = blocks;
+	gc_owner_live.typed = typed;
+	gc_owner_live.max = max;
+	gc_owner_live.count = 0;
+	if( oc > 0 )
+		for(int pid=oc*GC_ALL_PAGES;pid<(oc+1)*GC_ALL_PAGES;pid++)
+			for(gc_pheader *ph=gc_pages[pid];ph;ph=ph->next_page) {
+				if( ph->bmp == NULL ) continue;
+				gc_owner_live.page_typed = ph->page_kind == MEM_KIND_DYNAMIC;
+				gc_iter_live_blocks(ph,gc_owner_live_block);
+			}
+	gc_global_lock(false);
+	return gc_owner_live.count;
+}
+
 HL_API void hl_gc_owner_release( void *owner ) {
 	// Most modules have no class (not patchable); do not stop the world to find that out.
 	if( owner == NULL || (gc_owner_class_lookup(owner) < 0 && gc_overflow_count == 0) ) return;

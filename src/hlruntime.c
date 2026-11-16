@@ -571,6 +571,65 @@ hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const
 	return HL_RUNTIME_INCOMPATIBLE;
 }
 
+static int append_ascii( char *text, int length, int size, const char *part ) {
+	while( *part && length < size - 1 ) text[length++] = *part++;
+	text[length] = 0;
+	return length;
+}
+
+static int append_type( char *text, int length, int size, void *block, bool typed ) {
+	if( !typed ) return append_ascii(text,length,size,"untyped block");
+	const uchar *name = hl_type_str(*(hl_type**)block);
+	while( name && *name && length < size - 1 ) {
+		text[length++] = *name < 128 ? (char)*name : '?';
+		name++;
+	}
+	text[length] = 0;
+	return length;
+}
+
+/*
+ * What keeps the module from retiring, for a message: how many of the blocks it allocated are still live, and for the first
+ * few their type and what holds them (a root, a thread's stack or registers, or another live block). NULL when none is
+ * live. The caller frees the result.
+ */
+uchar *hl_runtime_module_describe_borrowers( hl_runtime_module *runtime ) {
+	void *blocks[4];
+	bool typed[4];
+	char text[1024], number[32], stack_floor = 0;
+	int length = 0, count, shown;
+	if( runtime == NULL ) return NULL;
+	count = hl_gc_owner_live_blocks(runtime->module,blocks,typed,4);
+	if( count == 0 ) return NULL;
+	snprintf(number,sizeof(number),"%d",count);
+	length = append_ascii(text,length,sizeof(text),number);
+	length = append_ascii(text,length,sizeof(text),count == 1 ? " live block" : " live blocks");
+	shown = count < 4 ? count : 4;
+	for(int i=0;i<shown;i++) {
+		void **root, *referrer = NULL;
+		int offset = 0, holder;
+		bool referrer_typed = false;
+		length = append_ascii(text,length,sizeof(text),i == 0 ? ": " : "; ");
+		length = append_type(text,length,sizeof(text),blocks[i],typed[i]);
+		// The calling thread's own frames do not count: only its callers', above this one.
+		hl_gc_exclusive_begin();
+		holder = hl_gc_root_holder(blocks[i],&stack_floor,&root);
+		hl_gc_exclusive_end();
+		if( holder == 1 )
+			length = append_ascii(text,length,sizeof(text)," held by a root");
+		else if( holder == 2 )
+			length = append_ascii(text,length,sizeof(text)," held by a thread's stack or registers");
+		else if( (referrer = hl_gc_find_referrer(blocks[i],NULL,&offset,&referrer_typed)) != NULL ) {
+			length = append_ascii(text,length,sizeof(text)," held by ");
+			length = append_type(text,length,sizeof(text),referrer,referrer_typed);
+			snprintf(number,sizeof(number)," at +%d",offset);
+			length = append_ascii(text,length,sizeof(text),number);
+		} else
+			length = append_ascii(text,length,sizeof(text)," held by nothing found (the caller's own frame?)");
+	}
+	return ascii_message(text);
+}
+
 const uchar *hl_runtime_module_patch_message( hl_runtime_module *runtime ) {
 	const uchar *result;
 	if( runtime == NULL ) return NULL;

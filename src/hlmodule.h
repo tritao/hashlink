@@ -593,6 +593,8 @@ typedef enum {
 	/* Nothing applied: stored closures still reach a function the patch removes or cannot adapt; the message says which. */
 	HL_RUNTIME_CLOSURES_HELD
 } hl_runtime_status;
+/* What keeps the module from retiring (its live blocks, their types and holders), or NULL; the caller frees it. */
+HL_EXTERN_C HL_EXPORT uchar *hl_runtime_module_describe_borrowers( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int stable_id, int *result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_void( hl_runtime_module *runtime, int stable_id, vdynamic **exception );
