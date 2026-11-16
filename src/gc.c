@@ -392,23 +392,22 @@ HL_API hl_thread_info *hl_get_thread() {
 
 static void gc_save_context(hl_thread_info *t, void *prev_stack ) {
 	setjmp(t->gc_regs);
-	// some compilers (such as clang) might push/pop some callee registers in call
-	// to gc_save_context (or before) which might hold a gc value !
-	// let's capture them immediately in extra per-thread data
+#	ifdef HL_DEBUG
 	t->stack_cur = &prev_stack;
-
-#	ifndef HL_DEBUG
+#	else
+	// The stack is scanned from `prev_stack`, a local of the collector's entry point, upward: the frames of the collector
+	// itself, below it, are reused by its later calls, whose own words would otherwise be read as roots (they kept a
+	// dropped closure alive). Callee-saved registers that some compilers (such as clang) push between the entry point
+	// and here may hold the caller's values: those frames are copied now, before they are reused, to extra_stack_data.
 	void* stack_cur = &t;
-	// We have no guarantee prev_stack is pointer-aligned
-	// All calls are passing a pointer to a bool, which is aligned on 1 byte
-	// If pointer is wrongly aligned, the extra_stack_data is misaligned
-	// and register pointers save in stack will not be discovered correctly by the GC
+	// prev_stack may be a bool's address: align it down so the scan and the copy see whole pointers.
 	uintptr_t aligned_prev_stack = ((uintptr_t)prev_stack) & ~(sizeof(void*) - 1);
 	prev_stack = (void*)aligned_prev_stack;
+	t->stack_cur = prev_stack;
 	int size = (int)((char*)prev_stack - (char*)stack_cur) / sizeof(void*);
 	if( size > HL_MAX_EXTRA_STACK ) hl_fatal("GC_SAVE_CONTEXT");
 	t->extra_stack_size = size;
-	memcpy(t->extra_stack_data, prev_stack, size*sizeof(void*));
+	memcpy(t->extra_stack_data, stack_cur, size*sizeof(void*));
 #	endif
 }
 
