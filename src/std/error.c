@@ -48,8 +48,8 @@ HL_PRIM void *hl_fatal_error( const char *msg, const char *file, int line ) {
 	hl_blocking(true);
 #	ifdef HL_WIN_DESKTOP
 	if( fatal_error_needs_dialog() ) {
-		char buf[256];
-		sprintf(buf,"%s\n\n%s(%d)",msg,file,line);
+		char buf[1024];
+		snprintf(buf,sizeof(buf),"%s\n\n%s(%d)",msg,file,line);
 		MessageBoxA(NULL,buf,"Fatal Error", MB_OK | MB_ICONERROR);
 	}
 #	endif
@@ -304,10 +304,12 @@ HL_PRIM vdynamic *hl_alloc_strbytes( const uchar *fmt, ... ) {
 }
 
 HL_PRIM void hl_fatal_fmt( const char *file, int line, const char *fmt, ...) {
-	char buf[256];
+	// A message can carry a loader error that names every path it tried: truncate it rather than overrun the buffer
+	// (macOS traps on the overrun, so the message was never printed).
+	char buf[1024];
 	va_list args;
 	va_start(args, fmt);
-	vsprintf(buf,fmt, args);
+	vsnprintf(buf,sizeof(buf),fmt, args);
 	va_end(args);
 	hl_fatal_error(buf,file,line);
 }
