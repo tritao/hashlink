@@ -871,6 +871,13 @@ static void gc_thread_entry( thread_start *_s ) {
 }
 #endif
 
+/*
+	The stack of every thread HashLink starts. Platform defaults differ (512 KB on macOS, 1 MB on Windows, 8 MB on Linux), so
+	how deep a program can recurse off its main thread would depend on the platform: a compiler lowering a long expression on
+	a worker thread overflowed on macOS and not on Linux. Linux's main-thread size, reserved and committed as used.
+*/
+#define HL_THREAD_STACK_SIZE (8 << 20)
+
 HL_PRIM hl_thread *hl_thread_start( void *callback, void *param, bool withGC ) {
 #ifdef HL_THREADS
 	thread_start s = {0};
@@ -887,7 +894,7 @@ HL_PRIM hl_thread *hl_thread_start( void *callback, void *param, bool withGC ) {
 	return NULL;
 #elif defined(HL_WIN)
 	DWORD tid;
-	HANDLE h = CreateThread(NULL,0,callback,param,0,&tid);
+	HANDLE h = CreateThread(NULL,HL_THREAD_STACK_SIZE,callback,param,STACK_SIZE_PARAM_IS_A_RESERVATION,&tid);
 	if( h == NULL )
 		return NULL;
 	CloseHandle(h);
@@ -899,6 +906,7 @@ HL_PRIM hl_thread *hl_thread_start( void *callback, void *param, bool withGC ) {
 	pthread_attr_t attr;
 	pthread_attr_init(&attr);
 	pthread_attr_setdetachstate(&attr,PTHREAD_CREATE_DETACHED);
+	pthread_attr_setstacksize(&attr,HL_THREAD_STACK_SIZE);
 	if( pthread_create(&t,&attr,callback,param) != 0 ) {
 		pthread_attr_destroy(&attr);
 		return NULL;
