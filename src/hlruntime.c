@@ -627,6 +627,8 @@ uchar *hl_runtime_module_describe_borrowers( hl_runtime_module *runtime ) {
 			length = append_ascii(text,length,sizeof(text)," held by a root");
 		else if( holder == 2 )
 			length = append_ascii(text,length,sizeof(text)," held by a thread's stack or registers");
+		else if( holder == 3 )
+			length = append_ascii(text,length,sizeof(text)," held by this thread's registers or stack words saved by its last collection");
 		else if( (referrer = hl_gc_find_referrer(blocks[i],NULL,&offset,&referrer_typed)) != NULL ) {
 			length = append_ascii(text,length,sizeof(text)," held by ");
 			length = append_type(text,length,sizeof(text),referrer,referrer_typed);

@@ -2951,7 +2951,8 @@ static bool gc_range_holds( void **start, void **end, void *value ) {
 
 /*
  * What outside the heap holds `value`: 1 for a root (`hl_add_root`: a native's, or a module global), with `*root` the
- * root's address; 2 for a thread's stack, saved registers or saved stack data; 0 for neither. The calling thread counts
+ * root's address; 2 for a thread's stack, saved registers or saved stack data; 3 for the calling thread's registers or
+ * stack words its last collection saved; 0 for none. The calling thread counts
  * only for its frames above `stack_floor`, its callers'. Only meaningful inside an exclusive section.
  */
 HL_API int hl_gc_root_holder( void *value, void *stack_floor, void ***root ) {
@@ -2962,6 +2963,10 @@ HL_API int hl_gc_root_holder( void *value, void *stack_floor, void ***root ) {
 		hl_thread_info *t = gc_threads.threads[i];
 		if( t == current_thread ) {
 			if( stack_floor && gc_range_holds((void**)stack_floor,(void**)t->stack_top,value) ) return 2;
+			// What the last collection saved of this thread: its registers and the words around the collector's entry.
+			if( gc_range_holds((void**)&t->gc_regs,(void**)&t->gc_regs + (sizeof(jmp_buf) / sizeof(void*) - 1),value)
+				|| gc_range_holds((void**)&t->extra_stack_data,(void**)&t->extra_stack_data + t->extra_stack_size,value) )
+				return 3;
 			continue;
 		}
 		if( gc_range_holds((void**)t->stack_cur,(void**)t->stack_top,value)

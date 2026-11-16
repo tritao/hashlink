@@ -1532,7 +1532,8 @@ static bool check_patch_guards( hl_module *m, hl_patch *patch, void *stack_floor
 		if( owner < 0 || (refused >= 0 && owner != refused) ) continue;
 		if( !patch_holder_path(m,patch,c,path,sizeof(path),6) ) {
 			int holder = hl_gc_root_holder(c,stack_floor,&root);
-			if( holder == 0 ) continue;
+			// What the patching thread's last collection saved is not what it holds now.
+			if( holder == 0 || holder == 3 ) continue;
 			if( holder == 2 ) snprintf(path,sizeof(path),"a running thread");
 			else if( m->globals_data && (unsigned char*)root >= m->globals_data && (unsigned char*)root < m->globals_data + m->globals_size )
 				snprintf(path,sizeof(path),"a global");
