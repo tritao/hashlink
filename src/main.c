@@ -317,6 +317,20 @@ static void print_crash_stack( void *context ) {
 	}
 }
 
+/* Whether kill(), sigqueue() or the like sent the signal rather than a fault. Linux gives those a code of zero or below,
+   macOS SI_USER or SI_QUEUE, both positive. On Apple Silicon macOS gives every SIGSEGV and SIGBUS a fault code, sent or
+   not; there a fault is one whose exception syndrome is an instruction or data abort. */
+static bool sent_externally( int signum, const siginfo_t *info, void *context ) {
+	if( info->si_code <= 0 || info->si_code == SI_USER || info->si_code == SI_QUEUE ) return true;
+#if defined(HL_MAC) && defined(__aarch64__)
+	if( (signum == SIGSEGV || signum == SIGBUS) && context != NULL ) {
+		unsigned int exception_class = (((ucontext_t*)context)->uc_mcontext->__es.__esr >> 26) & 0x3F;
+		return exception_class != 0x20 && exception_class != 0x21 && exception_class != 0x24 && exception_class != 0x25;
+	}
+#endif
+	return false;
+}
+
 static void handle_signal( int signum, siginfo_t *info, void *context ) {
 	static const char prefix[] = "HashLink fatal error: ";
 	static const char signal_prefix[] = " (signal ";
@@ -346,7 +360,7 @@ static void handle_signal( int signum, siginfo_t *info, void *context ) {
 	}
 	out = append_text(out,signal_prefix,sizeof(signal_prefix) - 1);
 	out = append_uint(out,(unsigned int)signum);
-	if( info != NULL && info->si_code > 0 ) {
+	if( info != NULL && !sent_externally(signum,info,context) ) {
 		out = append_text(out,address,sizeof(address) - 1);
 		out = append_pointer(out,info->si_addr);
 	} else {
