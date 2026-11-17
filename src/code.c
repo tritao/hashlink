@@ -421,6 +421,12 @@ static const char *hl_validate_function_control_flow( hl_function *f ) {
 		case OTrap: case OCleanupTrap:
 			if( op->p2 < 0 || !VALID_TARGET(op->p2) ) return "Invalid trap target";
 			break;
+		case OSwitch:
+			/* The JIT emits a jump table of forward offsets only; a missing case is offset 0 (fall through). */
+			if( op->p2 < 0 ) return "Invalid switch size";
+			for( int k = 0; k < op->p2; k++ )
+				if( op->extra[k] < 0 || !VALID_TARGET(op->extra[k]) ) return "Invalid switch target";
+			break;
 		default:
 			break;
 		}
