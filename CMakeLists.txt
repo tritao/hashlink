@@ -20,17 +20,8 @@ include(FindPkgConfig)
 include(CTest)
 
 set(WITH_VM_DEFAULT ON)
-# Detect whether we'll be building the AArch64 JIT backend. On macOS we trust
-# CMAKE_OSX_ARCHITECTURES when it's set (since uname reports the host CPU,
-# not the build CPU). Elsewhere CMAKE_SYSTEM_PROCESSOR is authoritative.
-set(HL_JIT_AARCH64 OFF)
-if(APPLE AND CMAKE_OSX_ARCHITECTURES)
-    if(CMAKE_OSX_ARCHITECTURES MATCHES "arm64" AND NOT CMAKE_OSX_ARCHITECTURES MATCHES "x86_64")
-        set(HL_JIT_AARCH64 ON)
-    endif()
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
-    set(HL_JIT_AARCH64 ON)
-endif()
+# The source lists and HL_JIT_AARCH64, shared with hosts that compile HashLink into their own library.
+include(cmake/hl-sources.cmake)
 # 32-bit ARM still has no JIT backend — fall back to disabling the VM there.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^arm$|^armv7" AND NOT HL_JIT_AARCH64)
     set(WITH_VM_DEFAULT OFF)
@@ -106,93 +97,12 @@ foreach( OUTPUTCONFIG ${CMAKE_CONFIGURATION_TYPES} )
     set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${OUTPUTCONFIG} ${OUTPUT_DIR} )
 endforeach()
 
-file(GLOB pcre_srcs
-    include/pcre/pcre2_auto_possess.c
-    include/pcre/pcre2_chartables.c
-    include/pcre/pcre2_compile.c
-    include/pcre/pcre2_config.c
-    include/pcre/pcre2_context.c
-    include/pcre/pcre2_convert.c
-    include/pcre/pcre2_dfa_match.c
-    include/pcre/pcre2_error.c
-    include/pcre/pcre2_extuni.c
-    include/pcre/pcre2_find_bracket.c
-    include/pcre/pcre2_jit_compile.c
-    include/pcre/pcre2_maketables.c
-    include/pcre/pcre2_match_data.c
-    include/pcre/pcre2_match.c
-    include/pcre/pcre2_newline.c
-    include/pcre/pcre2_ord2utf.c
-    include/pcre/pcre2_pattern_info.c
-    include/pcre/pcre2_script_run.c
-    include/pcre/pcre2_serialize.c
-    include/pcre/pcre2_string_utils.c
-    include/pcre/pcre2_study.c
-    include/pcre/pcre2_substitute.c
-    include/pcre/pcre2_substring.c
-    include/pcre/pcre2_tables.c
-    include/pcre/pcre2_ucd.c
-    include/pcre/pcre2_valid_utf.c
-    include/pcre/pcre2_xclass.c
-)
-
-file(GLOB std_srcs
-    src/std/array.c
-    src/std/buffer.c
-    src/std/bytes.c
-    src/std/cast.c
-    src/std/date.c
-    src/std/debug.c
-    src/std/error.c
-    src/std/file.c
-    src/std/fun.c
-    src/std/maps.c
-    src/std/math.c
-    src/std/obj.c
-    src/std/random.c
-    src/std/regexp.c
-    src/std/socket.c
-    src/std/string.c
-    src/std/sys.c
-    src/std/track.c
-    src/std/types.c
-    src/std/ucs2.c
-    src/std/thread.c
-    src/std/process.c
-)
-
-if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
-    list(APPEND std_srcs
-        include/mdbg/mdbg.c
-        include/mdbg/mach_excServer.c
-        include/mdbg/mach_excUser.c
-    )
-endif()
-
-if(ANDROID)
-    list(APPEND std_srcs
-        src/std/sys_android.c
-    )
-endif()
-
-if(IOS_PLATFORM)
-    list(APPEND std_srcs
-        src/std/sys_ios.m
-    )
-endif()
-
 if(HL_LIBHL_IN_VM)
     set(_libhl_kind OBJECT)
 else()
     set(_libhl_kind "")
 endif()
-add_library(libhl ${_libhl_kind}
-    src/gc.c
-    src/prof.c
-    src/ryu/d2s.c
-    src/ryu/f2s.c
-    ${std_srcs}
-)
+add_library(libhl ${_libhl_kind} ${HL_LIBHL_SOURCES})
 
 target_include_directories(libhl
     PUBLIC src
@@ -238,7 +148,7 @@ set_target_properties(libhl
 if(WITH_SYSTEM_PCRE2)
     target_link_libraries(libhl pcre2-16)
 else()
-    target_sources(libhl PRIVATE ${pcre_srcs})
+    target_sources(libhl PRIVATE ${HL_PCRE_SOURCES})
     target_include_directories(libhl PRIVATE include/pcre)
     target_compile_definitions(libhl PRIVATE HAVE_CONFIG_H PCRE2_STATIC)
 endif()
@@ -260,17 +170,7 @@ else()
 endif()
 
 if (WITH_VM)
-    if(HL_JIT_AARCH64)
-        set(_HL_JIT_SRC
-            src/jit.c
-            src/jit_emit.c
-            src/jit_regs.c
-            src/jit_aarch64.c
-            src/jit_aarch64_emit.c
-            src/jit_dump.c
-            src/jit_gdb.c
-        )
-    else()
+    if(NOT HL_JIT_AARCH64)
         string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" HL_VM_PROCESSOR)
         if(NOT HL_VM_PROCESSOR MATCHES "^(x86_64|amd64|i[3-6]86)$")
             message(FATAL_ERROR
@@ -278,29 +178,8 @@ if (WITH_VM)
                 "configure with -DWITH_VM=OFF for ${CMAKE_SYSTEM_PROCESSOR}"
             )
         endif()
-        set(_HL_JIT_SRC
-            src/jit.c
-            src/jit_emit.c
-            src/jit_regs.c
-            src/jit_x86_64.c
-            src/jit_dump.c
-            src/jit_gdb.c
-        )
     endif()
-    add_executable(hl
-        src/code.c
-        ${_HL_JIT_SRC}
-        src/main.c
-        src/module.c
-        src/hlpatch.c
-        src/hlruntime.c
-        src/debugger.c
-        src/diagnostics.c
-        src/diagnostics_transport.c
-        src/profile.c
-        src/prof_boundary.c
-        include/lz4/lz4.c
-    )
+    add_executable(hl ${HL_VM_SOURCES} ${HL_JIT_SOURCES} src/main.c)
     if(APPLE)
         set_target_properties(hl PROPERTIES
             INSTALL_RPATH "@executable_path;@executable_path/../${CMAKE_INSTALL_LIBDIR}"
