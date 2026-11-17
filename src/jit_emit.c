@@ -50,6 +50,10 @@ typedef struct {
 	// Passed by reference somewhere in the function (ORef): a callee can change it through the address, so the constant it
 	// was last assigned does not describe what a later read sees.
 	bool referenced;
+	// A referenced register is a memory variable: one stack word for its whole life, which every write stores to, every
+	// read loads from and ORef takes the address of, so a write through the reference is seen by every later read,
+	// including a catch's.
+	ereg home;
 } vreg;
 
 #define MAX_TMP_ARGS	256
@@ -128,7 +132,7 @@ typedef struct {
 	int target;
 	int start;
 	emit_block *block;
-	// The catch slots: one stack word per register the region writes (not counting registers passed by reference), holding
+	// The catch slots: one stack word per register the region writes (not counting referenced ones, which live in their home), holding
 	// its latest value, which the catch path reloads. slot_of[r] is the register's slot index, -1 when it has none.
 	ereg slots;
 	int *slot_of;
@@ -549,22 +553,16 @@ static ereg emit_load_reg_block( emit_ctx *ctx, emit_block *b, vreg *r );
 static void emit_store_reg( emit_ctx *ctx, vreg *to, ereg v ) {
 	if( to->t->kind == HVOID ) return;
 	if( IS_NULL(v) ) jit_assert();
-	store_block_var(ctx,ctx->current_block,to,v);
+	if( to->referenced )
+		STORE_MEM(to->home, 0, v);
+	else
+		store_block_var(ctx,ctx->current_block,to,v);
 	if( ctx->trap_count > 0 ) {
-		ereg prev = UNUSED;
 		for(int i=0;i<ctx->trap_count;i++) {
 			trap_inf *t = &ctx->traps[i];
 			int slot = t->slot_of[to->id];
-			if( slot >= 0 ) {
+			if( slot >= 0 )
 				STORE_MEM(t->slots, slot * HL_WSIZE, v);
-				continue;
-			}
-			// A register passed by reference lives at its address, which callees write too: the catch reads it there.
-			if( !to->referenced || to->write_pos < 0 || to->write_pos > t->start ) continue;
-			ereg tv = emit_load_reg_block(ctx, t->block, to);
-			if( tv == prev ) continue;
-			STORE_MEM(emit_gen(ctx,ADDRESS,tv,UNUSED,M_PTR), 0, v);
-			prev = tv;
 		}
 	} else {
 		// arguments are tracked by index by the caller, they have no op position
@@ -711,6 +709,8 @@ static ereg emit_load_reg_block( emit_ctx *ctx, emit_block *b, vreg *r ) {
 }
 
 static ereg emit_load_reg( emit_ctx *ctx, vreg *r ) {
+	if( r->referenced )
+		return LOAD_MEM(r->home, 0, r->t);
 	return emit_load_reg_block(ctx, ctx->current_block, r);
 }
 
@@ -727,7 +727,9 @@ static void emit_debug_scope_phis( emit_ctx *ctx ) {
 			continue;
 		}
 		*int_arr_addr(ctx->debug_live,w++) = id;
-		emit_load_reg_block(ctx, ctx->current_block, r);
+		// A referenced register has no SSA value to carry: it lives in its home.
+		if( !r->referenced )
+			emit_load_reg_block(ctx, ctx->current_block, r);
 	}
 	ctx->debug_live.cur = w;
 }
@@ -1363,10 +1365,26 @@ void hl_emit_function( jit_ctx *jit ) {
 	emit_gen_size(ctx, BLOCK, 0);
 	emit_gen(ctx,ENTER,UNUSED,UNUSED,M_NONE);
 	ctx->op_pos = 0;
+	// The arguments are read first, as the entry expects; then the homes of referenced registers exist before any store.
+	int nargs = f->type->fun->nargs;
+	ereg *arg_values = (ereg*)hl_malloc(&ctx->jit->falloc, sizeof(ereg) * (nargs + 1));
+	for(i=0;i<nargs;i++)
+		arg_values[i] = emit_gen(ctx, LOAD_ARG, UNUSED, UNUSED, hl_type_mode(f->type->fun->args[i]));
+	for(i=0;i<f->nregs;i++) {
+		vreg *r = R(i);
+		r->home = UNUSED;
+		if( !r->referenced || r->t->kind == HVOID ) {
+			r->referenced = false;
+			continue;
+		}
+		r->home = emit_gen_size(ctx, ALLOC_STACK, HL_WSIZE);
+		// An argument's home gets its value below; any other register reads as zero until written, as an unwritten one does.
+		if( i >= nargs )
+			STORE_MEM(r->home, 0, LOAD_CONST(0, r->t));
+	}
 	ctx->in_args = true;
-	for(i=0;i<f->type->fun->nargs;i++) {
-		hl_type *t = f->type->fun->args[i];
-		ereg r = emit_gen(ctx, LOAD_ARG, UNUSED, UNUSED, hl_type_mode(t));
+	for(i=0;i<nargs;i++) {
+		ereg r = arg_values[i];
 		STORE(R(i), r);
 		// track every argument by its index : the compiler emits no assign for `this`,
 		// so assigns cannot be paired with arguments positionally
@@ -2379,7 +2397,8 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 		STORE(dst, LOAD_MEM(LOAD(ra),HL_WSIZE*2,&hlt_i32));
 		break;
 	case ORef:
-		STORE(dst, emit_gen(ctx, ADDRESS, LOAD(ra), UNUSED, M_PTR));
+		// The address of the register's home, as a value of its own.
+		STORE(dst, OFFSET(ra->home, UNUSED, 0, 0));
 		break;
 	case OUnref:
 		STORE(dst, LOAD_MEM(LOAD(ra),0,dst->t));
