@@ -1089,6 +1089,8 @@ HL_API void hl_gc_set_profile_allocation_callback( void (*callback)(hl_type*,int
 }
 
 #ifndef GC_TLAB
+// Without allocation buffers (GC_DEBUG, GC_MEMCHK, no threads) compiled code always allocates through the collector.
+HL_API bool hl_jit_alloc_supported( void ) { return false; }
 HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data) { (void)type; (void)data; return false; }
 #endif
 #ifdef GC_TLAB
