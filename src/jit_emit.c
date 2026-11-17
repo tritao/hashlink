@@ -24,6 +24,12 @@
 #include <setjmp.h>
 #include "data_struct.h"
 
+// Whether an opcode writes its first operand: catch slots track the registers a try region writes.
+#define OP(_,_a,_b,_c) (_a == R),
+#define OP_BEGIN static const bool op_writes_first[] = {
+#define OP_END };
+#include "opcodes.h"
+
 //#define EMIT_DEBUG
 
 #ifdef EMIT_DEBUG
@@ -122,6 +128,10 @@ typedef struct {
 	int target;
 	int start;
 	emit_block *block;
+	// The catch slots: one stack word per register the region writes (not counting registers passed by reference), holding
+	// its latest value, which the catch path reloads. slot_of[r] is the register's slot index, -1 when it has none.
+	ereg slots;
+	int *slot_of;
 } trap_inf;
 
 struct _emit_ctx {
@@ -544,7 +554,13 @@ static void emit_store_reg( emit_ctx *ctx, vreg *to, ereg v ) {
 		ereg prev = UNUSED;
 		for(int i=0;i<ctx->trap_count;i++) {
 			trap_inf *t = &ctx->traps[i];
-			if( to->write_pos < 0 || to->write_pos > t->start ) continue;
+			int slot = t->slot_of[to->id];
+			if( slot >= 0 ) {
+				STORE_MEM(t->slots, slot * HL_WSIZE, v);
+				continue;
+			}
+			// A register passed by reference lives at its address, which callees write too: the catch reads it there.
+			if( !to->referenced || to->write_pos < 0 || to->write_pos > t->start ) continue;
 			ereg tv = emit_load_reg_block(ctx, t->block, to);
 			if( tv == prev ) continue;
 			STORE_MEM(emit_gen(ctx,ADDRESS,tv,UNUSED,M_PTR), 0, v);
@@ -2496,6 +2512,37 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 			int trap_start = ctx->emit_pos;
 			ereg st = emit_gen_size(ctx, ALLOC_STACK, o->op == OCleanupTrap ? sizeof(hl_cleanup_trap_ctx) : sizeof(hl_trap_ctx));
 
+			/*
+				Catch slots. The catch is entered from any instruction of the region (from here to the handler, which is
+				where emission pops the trap), with every register as it was at the throw. A register is a storage
+				location, not one variable: a register allocator reuses it for values that do not overlap, and a copy
+				shares its source's value, so a write is not forwarded into the storage the register's value had here.
+				Instead each register the region writes gets a stack word, set to its value here and on every write in
+				the region, and the catch path below loads them back.
+			*/
+			int *slot_of = (int*)hl_malloc(&ctx->jit->falloc, sizeof(int) * ctx->fun->nregs);
+			int *slot_regs = (int*)hl_malloc(&ctx->jit->falloc, sizeof(int) * ctx->fun->nregs);
+			int nslot_regs = 0;
+			for(int k=0;k<ctx->fun->nregs;k++) slot_of[k] = -1;
+			int region_end = ctx->op_pos + 1 + o->p2;
+			for(int k=ctx->op_pos+1;k<region_end && k<ctx->fun->nops;k++) {
+				hl_opcode *w = ctx->fun->ops + k;
+				// Every opcode that writes its first operand; an inner trap's exception register is written when its catch
+				// runs, inside this region. An end of trap names its trap's register without writing it.
+				bool writes = op_writes_first[w->op] || w->op == OTrap || w->op == OCleanupTrap;
+				if( !writes || w->op == OEndTrap || w->op == OEndCleanupTrap ) continue;
+				vreg *wr = R(w->p1);
+				// This trap's own register is what the catch receives, the exception, whatever the region left in it.
+				if( w->p1 == o->p1 || wr->t->kind == HVOID || wr->referenced || slot_of[w->p1] >= 0 ) continue;
+				slot_of[w->p1] = nslot_regs;
+				slot_regs[nslot_regs++] = w->p1;
+			}
+			ereg slots = nslot_regs ? emit_gen_size(ctx, ALLOC_STACK, nslot_regs * HL_WSIZE) : UNUSED;
+			for(int k=0;k<nslot_regs;k++) {
+				vreg *sr = R(slot_regs[k]);
+				STORE_MEM(slots, k * HL_WSIZE, sr->write_pos >= 0 ? LOAD(sr) : LOAD_CONST(0, sr->t));
+			}
+
 			ereg thread, current_addr;
 			static hl_thread_info *tinf = NULL;
 			static hl_trap_ctx *trap = NULL;
@@ -2564,6 +2611,11 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 			emit_test(ctx, ret, OJNull);
 			int jskip = emit_jump(ctx, true);
 			STORE(dst, tinf ? LOAD_CONST_PTR(&tinf->exc_value) : LOAD_MEM_PTR(thread,(int)(int_val)&tinf->exc_value));
+			// The catch sees each register the region writes as it was at the throw, from its slot.
+			for(int k=0;k<nslot_regs;k++) {
+				vreg *sr = R(slot_regs[k]);
+				STORE(sr, LOAD_MEM(slots, k * HL_WSIZE, sr->t));
+			}
 
 			int jtrap = ctx->emit_pos;
 			emit_gen(ctx, JUMP, UNUSED, UNUSED, 0);
@@ -2578,6 +2630,8 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 			inf->target = o->p2 + 1 + ctx->op_pos;
 			inf->start = trap_start;
 			inf->block = catch_from;
+			inf->slots = slots;
+			inf->slot_of = slot_of;
 		}
 		break;
 	case OEndTrap: case OEndCleanupTrap:
