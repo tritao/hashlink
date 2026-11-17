@@ -1151,10 +1151,11 @@ void hl_emit_flush( jit_ctx *jit ) {
 			int new_loop_end = -1;
 			for(int k=0;k<bl->pred_count;k++) {
 				eblock *pred = jit->blocks + bl->preds[k];
-				if( pred->start_pos <= bl->start_pos )
+				if( pred->start_pos < bl->start_pos )
 					continue;
-				// A back edge. The loop is every block that reaches its source without passing the header, and blocks
-				// can be laid out past the source (the body of an inner loop, say), so take the furthest end of them all.
+				// A back edge, from a later block or from the header itself (a loop of one block, which a conditional jump
+				// back to its own start makes). The loop is every block that reaches its source without passing the header,
+				// and blocks can be laid out past the source (the body of an inner loop, say), so take the furthest end.
 				int stamp = b * jit->block_count + k + 1, top = 0;
 				mark[bl->preds[k]] = stamp;
 				stack[top++] = bl->preds[k];
@@ -1162,6 +1163,8 @@ void hl_emit_flush( jit_ctx *jit ) {
 					eblock *member = jit->blocks + stack[--top];
 					if( member->end_pos - 1 > new_loop_end )
 						new_loop_end = member->end_pos - 1;
+					if( member == bl )
+						continue;
 					for(int j=0;j<member->pred_count;j++) {
 						int from = member->preds[j];
 						if( from == b || mark[from] == stamp )
