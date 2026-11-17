@@ -403,6 +403,77 @@ static void hl_read_function_identities( hl_reader *r, const unsigned char *data
 	if( s->pos != s->size ) ERROR("Trailing function identity data");
 }
 
+/*
+	The JIT takes a trap to be active from its OTrap to its handler, in opcode order: it keeps the registers a try writes
+	for the catch while it emits that range, and pops the trap when emission reaches the handler. Every opcode that can run
+	while the trap is active must therefore lie between the two. This walks what runs from the trap until the OEndTrap that
+	closes it (inner traps counted, an inner handler run with this trap still active) and rejects an opcode outside.
+*/
+static const char *hl_validate_trap_regions( hl_function *f ) {
+	int *depth_at = NULL;
+	int *work_pos = NULL, *work_depth = NULL;
+	const char *error = NULL;
+	for( int i = 0; i < f->nops && !error; i++ ) {
+		hl_opcode *trap = f->ops + i;
+		if( trap->op != OTrap && trap->op != OCleanupTrap ) continue;
+		int handler = i + 1 + trap->p2;
+		if( !depth_at ) {
+			depth_at = (int*)malloc(sizeof(int) * f->nops);
+			work_pos = (int*)malloc(sizeof(int) * f->nops * 2);
+			work_depth = (int*)malloc(sizeof(int) * f->nops * 2);
+			if( !depth_at || !work_pos || !work_depth ) { error = "Out of memory"; break; }
+		}
+		for( int k = 0; k < f->nops; k++ ) depth_at[k] = -1;
+		int top = 0;
+#		define REACH(pos,depth) { int p_ = (pos), d_ = (depth); \
+			if( p_ <= i || p_ >= handler ) { error = "An opcode that runs inside a trap is not between the trap and its handler"; break; } \
+			if( depth_at[p_] < 0 ) { depth_at[p_] = d_; work_pos[top] = p_; work_depth[top] = d_; top++; } }
+		REACH(i + 1, 0);
+		while( top > 0 && !error ) {
+			top--;
+			int pos = work_pos[top], depth = work_depth[top];
+			hl_opcode *o = f->ops + pos;
+			switch( o->op ) {
+			case ORet: case OThrow: case ORethrow:
+				break;
+			case OJAlways:
+				REACH(pos + 1 + o->p1, depth);
+				break;
+			case OJTrue: case OJFalse: case OJNull: case OJNotNull:
+				REACH(pos + 1 + o->p2, depth);
+				REACH(pos + 1, depth);
+				break;
+			case OJSLt: case OJSGte: case OJSGt: case OJSLte: case OJULt: case OJUGte:
+			case OJNotLt: case OJNotGte: case OJEq: case OJNotEq:
+				REACH(pos + 1 + o->p3, depth);
+				REACH(pos + 1, depth);
+				break;
+			case OSwitch:
+				for( int k = 0; k < o->p2 && !error; k++ )
+					REACH(pos + 1 + o->extra[k], depth);
+				if( !error ) REACH(pos + 1, depth);
+				break;
+			case OTrap: case OCleanupTrap:
+				// The inner handler runs with this trap active; the inner region with one more trap set.
+				REACH(pos + 1 + o->p2, depth);
+				REACH(pos + 1, depth + 1);
+				break;
+			case OEndTrap: case OEndCleanupTrap:
+				if( depth > 0 ) REACH(pos + 1, depth - 1);
+				break;
+			default:
+				REACH(pos + 1, depth);
+				break;
+			}
+		}
+#		undef REACH
+	}
+	free(depth_at);
+	free(work_pos);
+	free(work_depth);
+	return error;
+}
+
 static const char *hl_validate_function_control_flow( hl_function *f ) {
 	for( int i = 0; i < f->nops; i++ ) {
 		hl_opcode *op = f->ops + i;
@@ -432,7 +503,7 @@ static const char *hl_validate_function_control_flow( hl_function *f ) {
 		}
 #undef VALID_TARGET
 	}
-	return NULL;
+	return hl_validate_trap_regions(f);
 }
 
 #undef CHK_ERROR
