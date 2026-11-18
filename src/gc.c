@@ -1895,6 +1895,61 @@ HL_API int hl_gc_group_release( void *group ) {
 	return gc_owner_release_counting(group);
 }
 
+/*
+	With HL_GC_REGION_CENSUS set, a release that leaves blocks behind prints them by type to stderr: what escaped a
+	region, so the reference holding them can be found. Typed blocks are named by their type, others by their kind.
+*/
+typedef struct { void *key; int64 count; int64 bytes; } gc_escape_entry;
+
+static int64 gc_class_page_bytes( int oc ) {
+	int64 total = 0;
+	for(int pid=oc*GC_ALL_PAGES;pid<(oc+1)*GC_ALL_PAGES;pid++)
+		for(gc_pheader *ph=gc_pages[pid];ph;ph=ph->next_page) total += ph->page_size;
+	return total;
+}
+
+static void gc_escape_census( int oc ) {
+	static int enabled = -1;
+	if( enabled < 0 ) enabled = getenv("HL_GC_REGION_CENSUS") != NULL;
+	if( !enabled ) return;
+	int cap = 8192, used = 0;
+	gc_escape_entry *entries = (gc_escape_entry*)calloc(cap,sizeof(gc_escape_entry));
+	if( entries == NULL ) return;
+	for(int pid=oc*GC_ALL_PAGES;pid<(oc+1)*GC_ALL_PAGES;pid++) {
+		for(gc_pheader *ph=gc_pages[pid];ph;ph=ph->next_page) {
+			gc_allocator_page_data *p = &ph->alloc;
+			if( ph->bmp == NULL ) continue;
+			for(int bid=p->first_block;bid<p->max_blocks;bid++) {
+				if( !(ph->bmp[bid>>3] & (1 << (bid&7))) ) continue;
+				int size = p->sizes ? p->sizes[bid] * p->block_size : p->block_size;
+				void *key = (void*)(int_val)(ph->page_kind + 1);
+				if( ph->page_kind == MEM_KIND_DYNAMIC ) {
+					hl_type *t = *(hl_type**)(ph->base + bid * p->block_size);
+					if( t ) key = t;
+				}
+				int i = 0;
+				while( i < used && entries[i].key != key ) i++;
+				if( i == used ) {
+					if( used == cap ) continue;
+					entries[used++].key = key;
+				}
+				entries[i].count++;
+				entries[i].bytes += size;
+			}
+		}
+	}
+	for(int a=0;a<used;a++)
+		for(int b=a+1;b<used;b++)
+			if( entries[b].bytes > entries[a].bytes ) { gc_escape_entry e = entries[a]; entries[a] = entries[b]; entries[b] = e; }
+	static const char *kinds[] = {"(dynamic, untyped)","(raw)","(noptr: bytes, strings' text)","(finalizer)"};
+	for(int i=0;i<used && i<40;i++) {
+		int_val k = (int_val)entries[i].key;
+		const char *name = k >= 1 && k <= 4 ? kinds[k-1] : hl_to_utf8(hl_type_str((hl_type*)entries[i].key));
+		fprintf(stderr,"HL region escape: %10lld blocks %10lld bytes %s\n",(long long)entries[i].count,(long long)entries[i].bytes,name);
+	}
+	free(entries);
+}
+
 /* hl_gc_owner_release, returning the owner's live blocks found by the collection (0 when it had no class). */
 static int gc_owner_release_counting( void *owner ) {
 	// Most modules have no class (not patchable); do not stop the world to find that out.
@@ -1907,6 +1962,7 @@ static int gc_owner_release_counting( void *owner ) {
 		// so a block can never end up in a class that now belongs to someone else.
 		gc_major();
 		live = gc_allocator_class_live_blocks(oc);
+		if( live > 0 ) gc_escape_census(oc);
 		if( oc == GC_OVERFLOW_CLASS ) {
 			// The class is shared: the owner leaves the list either way, and the pages go once nothing in them lives.
 			for(int i=0;i<gc_overflow_count;i++)
@@ -1921,7 +1977,9 @@ static int gc_owner_release_counting( void *owner ) {
 			gc_owner_table[oc] = NULL;
 		} else {
 			// The pages holding what escaped stay until it dies; the rest go now.
+			int64 before = gc_class_page_bytes(oc);
 			gc_allocator_release_empty_pages(oc);
+			if( getenv("HL_GC_REGION_CENSUS") ) fprintf(stderr,"HL region pages: %.1f MB before release, %.1f MB kept\n",before/1048576.0,gc_class_page_bytes(oc)/1048576.0);
 			gc_owner_table[oc] = GC_RETIRED_OWNER;
 		}
 	}
