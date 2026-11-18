@@ -29,6 +29,16 @@
 #ifndef _MREHASH
 #define _MREHASH(m,c) _MNAME(hash)(_MKEY(m,c))
 #endif
+/*
+	A probe carries the key, its hash and its length. Only string keys have a length: `_MKLEN` measures it once per
+	operation, `_MHASHN` hashes with it and `_MMATCH`/`_MSET` may read it as `klen`. Other keys leave it 0.
+*/
+#ifndef _MKLEN
+#define _MKLEN(key) 0
+#endif
+#ifndef _MHASHN
+#define _MHASHN(key,klen) _MNAME(hash)(key)
+#endif
 #ifdef _MNO_EXPORTS
 #define _MSTATIC
 #else
@@ -55,12 +65,10 @@ t_map *_MNAME(alloc)() {
 	return m;
 }
 
-_MSTATIC _MVAL_TYPE *_MNAME(find)( t_map *m, t_key key ) {
+static _MVAL_TYPE *_MNAME(probe_find)( t_map *m, t_key key, unsigned int hash, int klen ) {
 	int c, ckey;
-	unsigned int hash;
-
+	(void)klen;
 	if( !m->values ) return NULL;
-	hash = _MNAME(hash)(key);
 	ckey = hash % ((unsigned)m->ncells);
 	c = _MINDEX(m,ckey);
 	while( c >= 0 ) {
@@ -71,11 +79,16 @@ _MSTATIC _MVAL_TYPE *_MNAME(find)( t_map *m, t_key key ) {
 	return NULL;
 }
 
+_MSTATIC _MVAL_TYPE *_MNAME(find)( t_map *m, t_key key ) {
+	int klen = _MKLEN(key);
+	return _MNAME(probe_find)(m,key,_MHASHN(key,klen),klen);
+}
+
 // Moves the live entries, in order, into storage for `maxentries` entries and relinks the chains.
 static void _MNAME(rebuild)( t_map *m, int maxentries ) {
 	t_map old = *m, *o = &old;
 	int i = 0, n = 0, c;
-	int ncells = maxentries >> 2;
+	int ncells = maxentries;
 	while( H_PRIMES[i] < ncells ) i++;
 	ncells = H_PRIMES[i];
 
@@ -113,9 +126,9 @@ static void _MNAME(make_room)( t_map *m ) {
 	_MNAME(rebuild)(m,max);
 }
 
-_MSTATIC void _MNAME(set_impl)( t_map *m, t_key key, _MVAL_TYPE value ) {
+static void _MNAME(probe_set)( t_map *m, t_key key, unsigned int hash, int klen, _MVAL_TYPE value ) {
 	int c, ckey;
-	unsigned int hash = _MNAME(hash)(key);
+	(void)klen;
 	if( m->values ) {
 		ckey = hash % ((unsigned)m->ncells);
 		c = _MINDEX(m,ckey);
@@ -138,28 +151,15 @@ _MSTATIC void _MNAME(set_impl)( t_map *m, t_key key, _MVAL_TYPE value ) {
 	m->nentries++;
 }
 
-#ifndef _MNO_EXPORTS
-
-HL_PRIM void _MNAME(set)( t_map *m, t_key key, _MVAL_TYPE value ) {
-	_MNAME(set_impl)(m,_MNAME(filter)(key),value);
+_MSTATIC void _MNAME(set_impl)( t_map *m, t_key key, _MVAL_TYPE value ) {
+	int klen = _MKLEN(key);
+	_MNAME(probe_set)(m,key,_MHASHN(key,klen),klen,value);
 }
 
-HL_PRIM bool _MNAME(exists)( t_map *m, t_key key ) {
-	return _MNAME(find)(m,_MNAME(filter)(key)) != NULL;
-}
-
-HL_PRIM vdynamic* _MNAME(get)( t_map *m, t_key key ) {
-	vdynamic **v = _MNAME(find)(m,_MNAME(filter)(key));
-	if( v == NULL ) return NULL;
-	return *v;
-}
-
-HL_PRIM bool _MNAME(remove)( t_map *m, t_key key ) {
+static bool _MNAME(probe_remove)( t_map *m, t_key key, unsigned int hash, int klen ) {
 	int c, prev = -1, ckey;
-	unsigned int hash;
+	(void)klen;
 	if( !m->cells ) return false;
-	key = _MNAME(filter)(key);
-	hash = _MNAME(hash)(key);
 	ckey = hash % ((unsigned)m->ncells);
 	c = _MINDEX(m,ckey);
 	while( c >= 0 ) {
@@ -182,6 +182,29 @@ HL_PRIM bool _MNAME(remove)( t_map *m, t_key key ) {
 		c = _MNEXT(m,c);
 	}
 	return false;
+}
+
+#ifndef _MNO_EXPORTS
+
+HL_PRIM void _MNAME(set)( t_map *m, t_key key, _MVAL_TYPE value ) {
+	_MNAME(set_impl)(m,_MNAME(filter)(key),value);
+}
+
+HL_PRIM bool _MNAME(exists)( t_map *m, t_key key ) {
+	return _MNAME(find)(m,_MNAME(filter)(key)) != NULL;
+}
+
+HL_PRIM vdynamic* _MNAME(get)( t_map *m, t_key key ) {
+	vdynamic **v = _MNAME(find)(m,_MNAME(filter)(key));
+	if( v == NULL ) return NULL;
+	return *v;
+}
+
+HL_PRIM bool _MNAME(remove)( t_map *m, t_key key ) {
+	int klen;
+	key = _MNAME(filter)(key);
+	klen = _MKLEN(key);
+	return _MNAME(probe_remove)(m,key,_MHASHN(key,klen),klen);
 }
 
 HL_PRIM varray* _MNAME(keys)( t_map *m ) {
@@ -271,5 +294,7 @@ HL_PRIM int _MNAME(size)( t_map *m ) {
 #undef _MSMALL
 #undef _MDEAD
 #undef _MSTATIC
+#undef _MKLEN
+#undef _MHASHN
 
 #undef _MVALUE_LAYOUT

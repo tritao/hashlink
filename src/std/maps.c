@@ -80,8 +80,10 @@ typedef struct {
 
 // ----- BYTES MAP ---------------------------------
 
+// A null key has length -1, so it never matches a string, not even the empty one.
 typedef struct {
 	unsigned int hash;
+	int len;
 } hl_hb_entry;
 
 typedef struct {
@@ -132,21 +134,52 @@ static inline HB_NO_ASAN size_t hb_ulen( const uchar *s ) {
 #endif
 }
 
-static unsigned hl_hbhash_key( const uchar *key ) {
-	uint64_t h = rapidhash(key,hb_ulen(key) * sizeof(uchar));
+static unsigned hl_hbhash_n( const uchar *key, int len ) {
+	if( len < 0 ) return 0u;
+	uint64_t h = rapidhash(key,(size_t)len * sizeof(uchar));
 	return (unsigned)(h ^ (h >> 32));
 }
 
-#define hl_hbhash(key)	((key) == NULL ? 0u : hl_hbhash_key(key))
+#define _MKLEN(key)	((key) == NULL ? -1 : (int)hb_ulen(key))
+#define _MHASHN(key,klen)	hl_hbhash_n(key,klen)
 #define _MKEY_TYPE	uchar*
 #define _MNAME(n)	hl_hb##n
-#define _MMATCH(c)	(m->entries[c].hash == hash && (m->values[c].key == key || (m->values[c].key != NULL && key != NULL && ucmp(m->values[c].key,key) == 0)))
+#define _MMATCH(c)	(m->entries[c].hash == hash && m->entries[c].len == klen && (m->values[c].key == key || memcmp(m->values[c].key,key,(size_t)klen * sizeof(uchar)) == 0))
 #define _MKEY(m,c)	m->values[c].key
-#define	_MSET(c)	m->entries[c].hash = hash; hl_gc_store_ref(&m->values[c].key,key,&hlt_key)
+#define	_MSET(c)	m->entries[c].hash = hash; m->entries[c].len = klen; hl_gc_store_ref(&m->values[c].key,key,&hlt_key)
 #define _MREHASH(m,c)	((m)->entries[c].hash)
 #define _MERASE(c)  hl_gc_store_ref(&m->values[c].key,NULL,&hlt_key)
 
 #include "maps.h"
+
+/*
+	The same operations for a caller that already knows the key's length in code units, as a String does: the key is
+	neither scanned for its terminator nor compared past it. `key` must still be 0-terminated, since the map keeps it.
+*/
+#define HB_LEN(key,len) ((key) == NULL ? -1 : (len))
+
+HL_API void hl_hbset_n( void *m, uchar *key, int len, vdynamic *value ) {
+	len = HB_LEN(key,len);
+	hl_hbprobe_set((hl_hb_map*)m,key,hl_hbhash_n(key,len),len,value);
+}
+
+HL_API bool hl_hbexists_n( void *m, uchar *key, int len ) {
+	len = HB_LEN(key,len);
+	return hl_hbprobe_find((hl_hb_map*)m,key,hl_hbhash_n(key,len),len) != NULL;
+}
+
+HL_API vdynamic *hl_hbget_n( void *m, uchar *key, int len ) {
+	len = HB_LEN(key,len);
+	vdynamic **v = hl_hbprobe_find((hl_hb_map*)m,key,hl_hbhash_n(key,len),len);
+	return v == NULL ? NULL : *v;
+}
+
+HL_API bool hl_hbremove_n( void *m, uchar *key, int len ) {
+	len = HB_LEN(key,len);
+	return hl_hbprobe_remove((hl_hb_map*)m,key,hl_hbhash_n(key,len),len);
+}
+
+#undef HB_LEN
 
 // ----- OBJECT MAP ---------------------------------
 

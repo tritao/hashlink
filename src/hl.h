@@ -695,6 +695,12 @@ HL_API void hl_array_check( varray *a, int index );
 HL_API void hl_array_ensure( varray *a, int index );
 HL_API HL_NO_RETURN( void hl_array_out_of_bounds( varray *a, int index ) );
 HL_API vdynamic *hl_alloc_dynamic( hl_type *t );
+
+// String-keyed (hl_bytes_map) operations for a 0-terminated key whose length in code units is already known.
+HL_API void hl_hbset_n( void *map, uchar *key, int len, vdynamic *value );
+HL_API bool hl_hbexists_n( void *map, uchar *key, int len );
+HL_API vdynamic *hl_hbget_n( void *map, uchar *key, int len );
+HL_API bool hl_hbremove_n( void *map, uchar *key, int len );
 HL_API vdynamic *hl_alloc_dynbool( bool b );
 HL_API vdynamic *hl_alloc_obj( hl_type *t );
 // Private JIT/runtime contract. The descriptor belongs to one compiled function.
