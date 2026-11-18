@@ -567,6 +567,7 @@ HL_API void hl_register_thread( void *stack_top ) {
 #	ifdef GC_TLAB
 	t->gc_tlab = calloc(1,GC_TLAB_ALL_SLOTS * (sizeof(gc_tlab_slot) + sizeof(gc_tlab_stash*)));
 	if( t->gc_tlab == NULL ) out_of_memory("thread allocation buffers");
+	t->gc_tlab_unowned = t->gc_tlab;
 #	endif
 	t->thread_id = hl_thread_id();
 	#ifdef HL_MAC
@@ -1151,6 +1152,8 @@ HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data) {
 		oc = gc_owner_class_lookup(type->gc_owner);
 		if( oc < 0 ) return false;
 	}
+	// An object of no owner allocates from the thread's unowned slots, which are a group's while one is current.
+	data->tlab_field = oc == 0 ? (int)offsetof(hl_thread_info,gc_tlab_unowned) : (int)offsetof(hl_thread_info,gc_tlab);
 	data->slot_offset = (oc * GC_TLAB_SLOTS + ((part << PAGE_KIND_BITS) | (rt->hasPtr ? MEM_KIND_DYNAMIC : MEM_KIND_NOPTR))) * sizeof(gc_tlab_slot);
 #define GC_TLAB_GUARD(value, bits, width) \
 	data->guards[data->nguards].address = (void*)&(value); \
@@ -1401,7 +1404,13 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 #endif
 
 void *hl_gc_alloc_gen( hl_type *t, int size, int flags ) {
-	return hl_gc_alloc_gen_owner(t,size,flags,t == NULL ? NULL : t->gc_owner);
+	void *owner = t == NULL ? NULL : t->gc_owner;
+	if( owner == NULL ) {
+		// an object of no owner goes to the thread's current allocation group, if any
+		hl_thread_info *th = hl_get_thread();
+		if( th ) owner = th->gc_group;
+	}
+	return hl_gc_alloc_gen_owner(t,size,flags,owner);
 }
 
 // -------------------------  MARKING ----------------------------------------------------------
@@ -1845,15 +1854,59 @@ HL_API int hl_gc_owner_live_blocks( void *owner, void **blocks, bool *typed, int
 	return gc_owner_live.count;
 }
 
+static int gc_owner_release_counting( void *owner );
+
 HL_API void hl_gc_owner_release( void *owner ) {
+	gc_owner_release_counting(owner);
+}
+
+/* Makes `group` the current allocation group of this thread (NULL for none) and returns the one it replaces. */
+HL_API void *hl_gc_group_enter( void *group ) {
+	hl_thread_info *th = hl_get_thread();
+	if( th == NULL ) hl_fatal("Allocation group entered on an unregistered thread");
+	void *previous = th->gc_group;
+	int oc = 0;
+	if( group ) {
+		oc = gc_owner_class_lookup(group);
+		if( oc < 0 ) {
+			gc_global_lock(true);
+			oc = gc_owner_class_register(group);
+			gc_global_lock(false);
+		}
+	}
+	th->gc_group = group;
+#	ifdef GC_TLAB
+	if( th->gc_tlab ) th->gc_tlab_unowned = (gc_tlab_slot*)th->gc_tlab + oc * GC_TLAB_SLOTS;
+#	endif
+	return previous;
+}
+
+/* Restores the group `hl_gc_group_enter` replaced. */
+HL_API void hl_gc_group_leave( void *previous ) {
+	hl_gc_group_enter(previous);
+}
+
+/*
+	Releases `group`: collects, then gives its pages back when none of its blocks is live, and returns how many are, which
+	is what escaped the group. Pages that still hold a live block stay until it dies. No thread may still have it current.
+*/
+HL_API int hl_gc_group_release( void *group ) {
+	if( group == NULL ) return 0;
+	return gc_owner_release_counting(group);
+}
+
+/* hl_gc_owner_release, returning the owner's live blocks found by the collection (0 when it had no class). */
+static int gc_owner_release_counting( void *owner ) {
 	// Most modules have no class (not patchable); do not stop the world to find that out.
-	if( owner == NULL || (gc_owner_class_lookup(owner) < 0 && gc_overflow_count == 0) ) return;
+	if( owner == NULL || (gc_owner_class_lookup(owner) < 0 && gc_overflow_count == 0) ) return 0;
+	int live = 0;
 	gc_global_lock(true);
 	int oc = gc_owner_class_find(owner);
 	if( oc > 0 ) {
 		// Only an owner whose blocks are all dead gives its class back. Anything else keeps the class and its pages,
 		// so a block can never end up in a class that now belongs to someone else.
 		gc_major();
+		live = gc_allocator_class_live_blocks(oc);
 		if( oc == GC_OVERFLOW_CLASS ) {
 			// The class is shared: the owner leaves the list either way, and the pages go once nothing in them lives.
 			for(int i=0;i<gc_overflow_count;i++)
@@ -1861,14 +1914,19 @@ HL_API void hl_gc_owner_release( void *owner ) {
 					gc_overflow_owners[i] = gc_overflow_owners[--gc_overflow_count];
 					break;
 				}
-			if( gc_overflow_count == 0 && gc_allocator_class_live_blocks(oc) == 0 ) gc_allocator_release_class(oc);
-		} else if( gc_allocator_class_live_blocks(oc) == 0 ) {
+			if( gc_overflow_count == 0 && live == 0 ) gc_allocator_release_class(oc);
+			else gc_allocator_release_empty_pages(oc);
+		} else if( live == 0 ) {
 			gc_allocator_release_class(oc);
 			gc_owner_table[oc] = NULL;
-		} else
+		} else {
+			// The pages holding what escaped stay until it dies; the rest go now.
+			gc_allocator_release_empty_pages(oc);
 			gc_owner_table[oc] = GC_RETIRED_OWNER;
+		}
 	}
 	gc_global_lock(false);
+	return live;
 }
 
 HL_API bool hl_is_gc_ptr( void *ptr ) {
@@ -3028,6 +3086,9 @@ DEFINE_PRIM(_F64, gc_heap_bytes, _NO_ARG);
 DEFINE_PRIM(_F64, gc_allocated_since_collection, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_set_mark_threshold, _F64);
 DEFINE_PRIM(_VOID, gc_set_min_trigger, _F64);
+DEFINE_PRIM(_DYN, gc_group_enter, _DYN);
+DEFINE_PRIM(_VOID, gc_group_leave, _DYN);
+DEFINE_PRIM(_I32, gc_group_release, _DYN);
 DEFINE_PRIM(_F64, gc_get_min_trigger, _NO_ARG);
 DEFINE_PRIM(_F64, gc_get_mark_threshold, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_detailed_stats, _REF(_F64) _REF(_F64) _REF(_F64) _REF(_F64));
@@ -3061,6 +3122,7 @@ HL_API GC_JIT_COLD bool hl_jit_box_prepare(hl_type *type, hl_jit_alloc_data *dat
 	intptr_t tls = (intptr_t)((uintptr_t)&current_thread - (uintptr_t)__builtin_thread_pointer());
 	if(tls < (-2147483647-1) || tls > 2147483647) return false;
 	data->tls_offset = (int)tls;
+	data->tlab_field = (int)offsetof(hl_thread_info,gc_tlab_unowned);
 	data->slot_offset = (((sizeof(vdynamic) >> GC_ALIGN_BITS)-1) << PAGE_KIND_BITS | MEM_KIND_NOPTR) * sizeof(gc_tlab_slot);
 #define GC_BOX_GUARD(value, bits, width) \
 	data->guards[data->nguards].address = (void*)&(value); \

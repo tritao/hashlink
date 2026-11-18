@@ -1295,7 +1295,7 @@ static void emit_small_alloc( code_ctx *ctx, ereg out, hl_jit_alloc_data *data )
 	EMIT32(ctx, 0xD53BD040 | ARM_TMP1); // MRS X16, TPIDR_EL0
 	emit_ld_st(ctx, true, M_PTR, ARM_TMP1, ARM_TMP1, data->tls_offset);
 	slow[nslow++] = alloc_cbz(ctx, ARM_TMP1, false);
-	emit_ld_st(ctx, true, M_PTR, ARM_TMP1, ARM_TMP1, (int)offsetof(hl_thread_info, gc_tlab));
+	emit_ld_st(ctx, true, M_PTR, ARM_TMP1, ARM_TMP1, data->tlab_field);
 	slow[nslow++] = alloc_cbz(ctx, ARM_TMP1, false);
 	// Bump the slot's cursor when the block fits below its limit.
 	emit_ld_st(ctx, true, M_PTR, dst, ARM_TMP1, data->slot_offset);

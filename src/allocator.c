@@ -635,6 +635,25 @@ static void gc_allocator_release_class( int oc ) {
 	}
 }
 
+// Returns the pages of an owner class that hold no live block, whatever the empty-page budget says, and keeps the
+// others. The same preconditions as gc_allocator_release_class.
+static void gc_allocator_release_empty_pages( int oc ) {
+	gc_empty_sweep_cancel();
+	for(int pid=oc*GC_ALL_PAGES;pid<(oc+1)*GC_ALL_PAGES;pid++) {
+		gc_pheader **link = &gc_pages[pid];
+		while( *link ) {
+			gc_pheader *ph = *link;
+			if( gc_page_is_empty(ph) ) {
+				*link = ph->next_page;
+				if( gc_free_pages[pid] == ph ) gc_free_pages[pid] = ph->next_page;
+				free_freelist(&ph->alloc.free);
+				gc_free_page(ph,ph->alloc.max_blocks);
+			} else
+				link = &ph->next_page;
+		}
+	}
+}
+
 static int64 gc_allocator_private_memory() {
 	return free_lists_size;
 }

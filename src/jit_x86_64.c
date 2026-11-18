@@ -1455,7 +1455,7 @@ static void emit_small_alloc(code_ctx *ctx, ereg out, hl_jit_alloc_data *data) {
 	emit_ext(ctx,_MOV,RTMP,VAL_CONST,M_PTR,data->tls_offset);
 	B(0x64); emit_mov(ctx,RTMP,MK_ADDR(R11,0),M_PTR);
 	EMIT(_CMP,RTMP,MK_CONST(0),M_PTR); refs[nrefs++] = alloc_branch(ctx,JEq);
-	emit_mov(ctx,RTMP,MK_ADDR(R11,offsetof(hl_thread_info,gc_tlab)),M_PTR);
+	emit_mov(ctx,RTMP,MK_ADDR(R11,data->tlab_field),M_PTR);
 	EMIT(_CMP,RTMP,MK_CONST(0),M_PTR); refs[nrefs++] = alloc_branch(ctx,JEq);
 	emit_mov(ctx,dst,MK_ADDR(R11,data->slot_offset),M_PTR);
 	EMIT(_CMP,dst,MK_CONST(0),M_PTR); refs[nrefs++] = alloc_branch(ctx,JEq);
