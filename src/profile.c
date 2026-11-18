@@ -151,6 +151,86 @@ static void stream_native_symbol( void *address, double time, int tid );
 // An allocation sample's stack, innermost first: the allocator's native frames, then the JIT frames that called it.
 #define ALLOCATION_SAMPLE_FRAMES 64
 
+/*
+	The types allocation samples name. A sample carries a small id, and the first sample of a type in a session follows an
+	ALLOCATION_TYPE event that names it. The table is open addressing on the type pointer, under native_lock; it is cleared
+	when a session configures allocation sampling, so each session names its types again.
+*/
+#define ALLOCATION_TYPE_SLOTS 8192
+static hl_type *allocation_type_keys[ALLOCATION_TYPE_SLOTS];
+static unsigned int allocation_type_ids[ALLOCATION_TYPE_SLOTS];
+static unsigned int allocation_type_count;
+
+// The type's name in ASCII, without allocating: this runs inside the allocator.
+static int allocation_type_name( hl_type *t, char *out, int capacity ) {
+	const uchar *name = NULL;
+	const char *fixed = NULL;
+	int length = 0;
+	if( t == NULL ) fixed = "raw";
+	else switch( t->kind ) {
+	case HOBJ: case HSTRUCT: name = t->obj ? t->obj->name : NULL; break;
+	case HENUM: name = t->tenum ? t->tenum->name : NULL; break;
+	case HABSTRACT: name = t->abs_name; break;
+	case HARRAY: fixed = "array"; break;
+	case HBYTES: fixed = "bytes"; break;
+	case HDYN: fixed = "dynamic"; break;
+	case HFUN: case HMETHOD: fixed = "closure"; break;
+	case HVIRTUAL: fixed = "virtual"; break;
+	case HDYNOBJ: fixed = "dynamic object"; break;
+	case HNULL: fixed = "null box"; break;
+	case HREF: fixed = "ref"; break;
+	default: fixed = "other"; break;
+	}
+	if( name ) {
+		while( name[length] && length < capacity ) {
+			out[length] = name[length] < 128 ? (char)name[length] : '?';
+			length++;
+		}
+	} else {
+		if( fixed == NULL ) fixed = "unnamed";
+		while( fixed[length] && length < capacity ) {
+			out[length] = fixed[length];
+			length++;
+		}
+	}
+	return length;
+}
+
+// The session's id for `type` (1-based), naming it in an ALLOCATION_TYPE event the first time; 0 when the table is full.
+static unsigned int allocation_type_id( hl_type *type ) {
+	unsigned int slot = (unsigned int)(((uintptr_t)type >> 4) * 2654435761U) % ALLOCATION_TYPE_SLOTS, id = 0;
+	unsigned char payload[8 + 256];
+	int length = -1;
+	if( native_lock ) hl_mutex_acquire(native_lock);
+	for(int probe=0;probe<ALLOCATION_TYPE_SLOTS;probe++) {
+		unsigned int at = (slot + probe) % ALLOCATION_TYPE_SLOTS;
+		if( allocation_type_ids[at] && allocation_type_keys[at] == type ) { id = allocation_type_ids[at]; break; }
+		if( allocation_type_ids[at] == 0 ) {
+			if( allocation_type_count * 4 >= ALLOCATION_TYPE_SLOTS * 3 ) break;
+			id = ++allocation_type_count;
+			allocation_type_keys[at] = type;
+			allocation_type_ids[at] = id;
+			length = allocation_type_name(type,(char*)payload + 8,256);
+			break;
+		}
+	}
+	if( native_lock ) hl_mutex_release(native_lock);
+	if( length >= 0 ) {
+		stream_write_u32(payload,id);
+		stream_write_u32(payload + 4,type == NULL ? 0xFFFFFFFFU : (unsigned int)type->kind);
+		hl_prof_event(PROFILE_EVENT_ALLOCATION_TYPE,payload,8 + length);
+	}
+	return id;
+}
+
+static void allocation_types_reset( void ) {
+	if( native_lock ) hl_mutex_acquire(native_lock);
+	memset(allocation_type_keys,0,sizeof(allocation_type_keys));
+	memset(allocation_type_ids,0,sizeof(allocation_type_ids));
+	allocation_type_count = 0;
+	if( native_lock ) hl_mutex_release(native_lock);
+}
+
 static void profile_allocation( hl_type *type, int requested, int allocated, void *return_address ) {
 	static HL_THREAD_VAR unsigned int counter;
 	void *frames[ALLOCATION_SAMPLE_FRAMES];
@@ -181,7 +261,7 @@ static void profile_allocation( hl_type *type, int requested, int allocated, voi
 	stream_write_u32(payload + 16,(unsigned int)interval);
 	stream_write_u32(payload + 20,type == NULL ? 0xFFFFFFFFU : (unsigned int)type->kind);
 	stream_write_u32(payload + 24,(unsigned int)count);
-	stream_write_u32(payload + 28,0);
+	stream_write_u32(payload + 28,allocation_type_id(type));
 	for(int i=0;i<count;i++) {
 		stream_native_symbol(frames[i],hl_sys_time(),thread->thread_id);
 		stream_write_u64(payload + 32 + i * 8,(unsigned long long)(uintptr_t)frames[i]);
@@ -1110,6 +1190,7 @@ void hl_profile_wait_for_start( void ) {
 static bool configure_allocations( int interval ) {
 	extern void hl_gc_set_profile_allocation_callback( void (*callback)(hl_type*,int,int,void*) );
 	if( interval < 0 || interval > 100000000 ) return false;
+	allocation_types_reset();
 	profile_allocation_interval = interval;
 	hl_gc_set_profile_allocation_callback(interval == 0 ? NULL : profile_allocation);
 	return true;

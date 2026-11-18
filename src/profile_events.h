@@ -8,6 +8,8 @@
 #define PROFILE_EVENT_THREAD_NAME 0x484C0002U
 #define PROFILE_EVENT_GC_STATS 0x484C0003U
 #define PROFILE_EVENT_NATIVE_SYMBOL 0x484C0004U
+/* An allocation sample: u64 requested bytes, u64 allocated bytes, u32 sampling interval, u32 type kind, u32 frame count,
+   u32 type id (0 if unknown; named by ALLOCATION_TYPE), then u64 return addresses, innermost first. */
 #define PROFILE_EVENT_ALLOCATION_SAMPLE 0x484C0005U
 /* Follows a NATIVE_SYMBOL for the same pc: u64 pc, u64 module base, u64 module size (0 if unknown), u32 line (0 if
    unknown), u32 file length, then the UTF-8 source file. */
@@ -24,6 +26,9 @@
    thread, u32 count, then per phase u64 begin and u64 end ticks (relative to the session's base, which is the first
    phase's start), u32 name length, u32 0, and the UTF-8 name padded to 8 bytes. */
 #define PROFILE_EVENT_STARTUP 0x484C000AU
+/* Names a type allocation samples refer to, before the first sample of it in a session: u32 type id, u32 kind, then the
+   ASCII name (an object's or enum's name, otherwise its kind: "array", "bytes", "raw" for untyped storage, ...). */
+#define PROFILE_EVENT_ALLOCATION_TYPE 0x484C000BU
 #define PROFILE_EVENT_SPAN_BEGIN 0x484C1001U
 #define PROFILE_EVENT_SPAN_END 0x484C1002U
 /* A program-defined counter sample: f64 value, then the UTF-8 counter name. Keep haxeon.ProfileCounter in sync. */
