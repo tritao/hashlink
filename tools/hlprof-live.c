@@ -51,6 +51,8 @@ static native_symbol *native_symbols;
 static native_function *native_functions[1024];
 /* Which samples a report ranks: 0 those on a CPU (the default), 1 all, 2 those waiting in a system call. */
 static int sample_filter=0;
+/* report --alloc: rank functions by the bytes their allocation samples stand for, instead of by CPU samples. */
+static int rank_allocations=0;static uint64_t allocation_samples=0;
 static uint64_t samples_waiting,samples_ranked,sample_serial;
 static perfetto_gc_state perfetto_gc;
 static uint32_t perfetto_threads[4096];
@@ -207,7 +209,8 @@ static int by_ranked( const void *a,const void *b ){const ranked_function *x=a,*
 static void report( symbols *s,uint64_t samples,uint64_t unresolved,uint64_t dropped,int top,int show_lines ) {
 	symbol **hot=(symbol**)malloc(s->count*sizeof(symbol*));size_t count=0;if(!hot)return;
 	printf("\nsamples=%llu on_cpu=%llu waiting=%llu unresolved_frames=%llu dropped_records=%llu\n",(unsigned long long)samples,(unsigned long long)(samples-samples_waiting),(unsigned long long)samples_waiting,(unsigned long long)unresolved,(unsigned long long)dropped);
-	printf("ranking %s samples (%llu)%s\n",sample_filter==1?"all":sample_filter==2?"waiting":"on-CPU",(unsigned long long)samples_ranked,sample_filter==0?"; --all includes threads waiting in system calls":"");
+	if(rank_allocations)printf("ranking estimated allocated bytes (%.1f MB from %llu allocation samples); self is the innermost Haxe function\n",samples_ranked/1e6,(unsigned long long)allocation_samples);
+	else printf("ranking %s samples (%llu)%s\n",sample_filter==1?"all":sample_filter==2?"waiting":"on-CPU",(unsigned long long)samples_ranked,sample_filter==0?"; --all includes threads waiting in system calls":"");
 	samples=samples_ranked;printf("%8s %8s  %s\n","self","total",show_lines?"location / function":"function");
 	if(health_capacity)printf("buffer=%llu/%llu (%.1f%%) requested_rate=%u effective_rate=%u\n",(unsigned long long)health_used,(unsigned long long)health_capacity,health_used*100.0/health_capacity,health_requested_rate,health_effective_rate);
 	if(health_records)printf("profiler_overhead=%.2fus/sample generated_bytes=%llu\n",health_sample_nanos/1000.0/health_records,(unsigned long long)health_generated);
@@ -223,7 +226,7 @@ static void report( symbols *s,uint64_t samples,uint64_t unresolved,uint64_t dro
 		for(size_t i=0;i<count&&i<(size_t)top;i++)printf("%7.2f%% %7.2f%%  %s%s\n",samples?ranked[i].self*100.0/samples:0.0,samples?ranked[i].total*100.0/samples:0.0,ranked[i].native?"[native] ":"",ranked[i].name);
 		free(ranked);}
 	for(int i=0;i<1024;i++)for(native_function *f=native_functions[i];f;f=f->next)f->self=f->total=0;
-	samples_waiting=samples_ranked=0;
+	samples_waiting=samples_ranked=allocation_samples=0;
 	fflush(stdout);for(size_t i=0;i<s->count;i++){s->items[i].self=s->items[i].total=0;for(uint32_t j=0;j<s->items[i].line_count;j++)s->items[i].lines[j].self=s->items[i].lines[j].total=0;}free(hot);
 }
 static uint32_t stack_hash( const char *text ){uint32_t h=2166136261U;while(*text){h^=(unsigned char)*text++;h*=16777619U;}return h;}
@@ -417,7 +420,7 @@ static int consume( symbols *s,unsigned char *pending,size_t *length,uint64_t *s
 		double event_time=0;if(perfetto||pf){uint64_t time_bits=u64(pending+pos+8);memcpy(&event_time,&time_bits,sizeof(event_time));if(time_origin&&*time_origin<0)*time_origin=event_time;}
 		if(pending[pos+4]==1){uint32_t frames=u32(pending+pos+20),tid=u32(pending+pos+16);uint64_t leaf_pc=frames?u64(pending+pos+24):0;symbol *raw_symbol=frames?resolve(s,leaf_pc):NULL;native_symbol *raw_native=frames?resolve_native(leaf_pc):NULL;source_line *raw_line=raw_symbol?resolve_line(raw_symbol,leaf_pc):NULL;if(body!=20+frames*8U)return 0;symbol *leaf=NULL;native_symbol *native_leaf=NULL;source_line *leaf_line=NULL;char *stack=NULL;size_t stack_len=0,stack_cap=0;(*samples)++;
 			/* Bit 1: the thread was waiting in a system call. Only the samples the filter keeps are ranked or exported. */
-			const int waiting=(pending[pos+5]&2)!=0,counted=sample_filter==1||(sample_filter==0?!waiting:waiting);if(waiting)samples_waiting++;if(counted){samples_ranked++;sample_serial++;}
+			const int waiting=(pending[pos+5]&2)!=0,counted=!rank_allocations&&(sample_filter==1||(sample_filter==0?!waiting:waiting));if(waiting)samples_waiting++;if(counted){samples_ranked++;sample_serial++;}
 			for(uint32_t i=0;i<frames;i++){uint64_t pc=u64(pending+pos+24+i*8);symbol *x=resolve(s,pc);native_symbol *native=x?NULL:resolve_native(pc);if(x){source_line *line=resolve_line(x,pc);if(counted){/* Once per sample, so recursion does not count a function twice. */if(x->seen!=sample_serial){x->seen=sample_serial;x->total++;}if(line)line->total++;}if(!leaf){leaf=x;leaf_line=line;}if(i==0&&counted){x->self++;if(line)line->self++;}}else if(native){if(!leaf&&!native_leaf)native_leaf=native;if(counted&&native->function){if(native->function->seen!=sample_serial){native->function->seen=sample_serial;native->function->total++;}if(i==0)native->function->self++;}}else(*unresolved)++;}
 			if(counted){
 			if(perfetto&&perfetto_threads[tid&4095]!=tid){perfetto_threads[tid&4095]=tid;perfetto_begin_event(perfetto,perfetto_first);fprintf(perfetto,"{\"ph\":\"M\",\"name\":\"thread_name\",\"pid\":%u,\"tid\":%u,\"args\":{\"name\":\"Thread %u\"}}",pid,tid,tid);}
@@ -429,6 +432,8 @@ static int consume( symbols *s,unsigned char *pending,size_t *length,uint64_t *s
 			if(pf&&frames&&!pf_sample(pf,s,event_time,tid,pending+pos+24,launcher_trimmed(s,pending+pos+24,frames),pending[pos+5]&1))return 0;
 			}
 		}else if(pending[pos+4]==2){uint32_t tid=u32(pending+pos+16),event_id=u32(pending+pos+20),payload_size=body-20;const unsigned char *payload=pending+pos+24;if(metadata_dirty&&((event_id==PROFILE_EVENT_MODULE_REVISION&&body==32)||(event_id==PROFILE_EVENT_MODULE_LOADED&&body==28)))*metadata_dirty=1;
+			/* An allocation sample stands for `interval` allocations: its estimated bytes go to the innermost Haxe function (self) and once to every Haxe function on its stack (total). */
+			if(rank_allocations&&event_id==PROFILE_EVENT_ALLOCATION_SAMPLE&&payload_size>=32&&u32(payload+24)<=(payload_size-32)/8){uint32_t frames=u32(payload+24);uint64_t bytes=u64(payload+8)*u32(payload+16);int inner=1;allocation_samples++;samples_ranked+=bytes;sample_serial++;for(uint32_t i=0;i<frames;i++){symbol *x=resolve(s,u64(payload+32+i*8));if(!x)continue;if(x->seen!=sample_serial){x->seen=sample_serial;x->total+=bytes;}if(inner){x->self+=bytes;inner=0;}}}
 			if(event_id==PROFILE_EVENT_NATIVE_SYMBOL&&payload_size>=24){uint32_t module_len=u32(payload+16),name_len=u32(payload+20);if(module_len>payload_size-24||name_len!=payload_size-24-module_len||!add_native(u64(payload),u64(payload+8),payload+24,module_len,payload+24+module_len,name_len))return 0;}
 			if(event_id==PROFILE_EVENT_NATIVE_LOCATION&&!add_native_location(payload,payload_size))return 0;
 			if(pf&&!pf_event(pf,event_time,tid,event_id,payload,payload_size))return 0;
@@ -974,7 +979,7 @@ done:
 	return code;
 }
 
-static void usage( const char *p ){fprintf(stderr,"Usage:\n  %s [--host HOST] [--sources LIST] [--rate HZ] [--alloc-interval N] [--pool MIB] [--interval MS] [--duration SEC] [--max-size MIB] [--paused] [--min-call-us US] [--connect-timeout SEC] [--output FILE] PORT\n  %s report [--top N] [--lines] [--all|--waiting] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format folded [--lines] [--cpu|--waiting] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format perfetto [--lines] [--cpu|--waiting] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n  %s export --format pftrace [--process-name NAME] [--cpu|--waiting] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n",p,p,p,p,p);}
+static void usage( const char *p ){fprintf(stderr,"Usage:\n  %s [--host HOST] [--sources LIST] [--rate HZ] [--alloc-interval N] [--pool MIB] [--interval MS] [--duration SEC] [--max-size MIB] [--paused] [--min-call-us US] [--connect-timeout SEC] [--output FILE] PORT\n  %s report [--top N] [--lines] [--all|--waiting|--alloc] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format folded [--lines] [--cpu|--waiting] [--start-ms N] [--end-ms N] CAPTURE\n  %s export --format perfetto [--lines] [--cpu|--waiting] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n  %s export --format pftrace [--process-name NAME] [--cpu|--waiting] [--start-ms N] [--end-ms N] --output FILE CAPTURE\n",p,p,p,p,p);}
 
 static int offline( int argc,char **argv,int exporting ) {
 	const char *path=NULL,*output_path=NULL;int top=15,code=1,complete=0,format=0,show_lines=0,raw_leaf=0,perfetto_first=1,metadata_dirty=0;FILE *file=NULL,*perfetto=NULL;symbols table={0};folded_table folded_stacks={0};unsigned char header[24],record_header[16],*payload=NULL,*pending=NULL;size_t pending_len=0,pending_cap=512*1024;uint64_t samples=0,unresolved=0,dropped=0,cursor=0,last_time=0,reported_dropped=0,start_ns=0,end_ns=UINT64_MAX;int have_cursor=0;double time_origin=-1;const char *process_name="HashLink";pf_export pf={0};
@@ -987,6 +992,7 @@ static int offline( int argc,char **argv,int exporting ) {
 		else if(!strcmp(argv[i],"--waiting"))sample_filter=2;
 		else if(!strcmp(argv[i],"--lines"))show_lines=1;
 		else if(!strcmp(argv[i],"--raw-leaf")&&!exporting)raw_leaf=1;
+		else if(!strcmp(argv[i],"--alloc")&&!exporting)rank_allocations=1;
 		else if(!strcmp(argv[i],"--start-ms")&&++i<argc)start_ns=(uint64_t)strtoull(argv[i],NULL,10)*1000000ULL;
 		else if(!strcmp(argv[i],"--end-ms")&&++i<argc)end_ns=(uint64_t)strtoull(argv[i],NULL,10)*1000000ULL;
 		else if(!strcmp(argv[i],"--format")&&++i<argc&&exporting){if(!strcmp(argv[i],"folded"))format=1;else if(!strcmp(argv[i],"perfetto"))format=2;else if(!strcmp(argv[i],"pftrace"))format=3;else{fprintf(stderr,"Unsupported export format %s\n",argv[i]);goto done;}}

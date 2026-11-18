@@ -148,9 +148,12 @@ static void stream_write_u32( unsigned char *p, unsigned int value );
 static void stream_write_u64( unsigned char *p, unsigned long long value );
 static void stream_native_symbol( void *address, double time, int tid );
 
+// An allocation sample's stack: the allocator's caller, then the JIT frames above it, innermost first.
+#define ALLOCATION_SAMPLE_FRAMES 64
+
 static void profile_allocation( hl_type *type, int requested, int allocated, void *return_address ) {
 	static HL_THREAD_VAR unsigned int counter;
-	void *frames[1];
+	void *frames[ALLOCATION_SAMPLE_FRAMES];
 	unsigned char payload[32 + sizeof(frames)];
 	int interval = profile_allocation_interval, count = 1;
 	hl_thread_info *thread;
@@ -159,6 +162,9 @@ static void profile_allocation( hl_type *type, int requested, int allocated, voi
 	thread = hl_get_thread();
 	if( thread == NULL || !hl_prof_on ) return;
 	frames[0] = return_address;
+	// The allocating thread walks its own stack, so nothing has to be suspended.
+	if( thread->stack_top )
+		count += hl_module_capture_stack_range(thread->stack_top,(void**)&frames,frames + 1,ALLOCATION_SAMPLE_FRAMES - 1);
 	stream_write_u64(payload,(unsigned long long)requested);
 	stream_write_u64(payload + 8,(unsigned long long)allocated);
 	stream_write_u32(payload + 16,(unsigned int)interval);
