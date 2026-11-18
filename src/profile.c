@@ -148,7 +148,7 @@ static void stream_write_u32( unsigned char *p, unsigned int value );
 static void stream_write_u64( unsigned char *p, unsigned long long value );
 static void stream_native_symbol( void *address, double time, int tid );
 
-// An allocation sample's stack: the allocator's caller, then the JIT frames above it, innermost first.
+// An allocation sample's stack, innermost first: the allocator's native frames, then the JIT frames that called it.
 #define ALLOCATION_SAMPLE_FRAMES 64
 
 static void profile_allocation( hl_type *type, int requested, int allocated, void *return_address ) {
@@ -162,9 +162,20 @@ static void profile_allocation( hl_type *type, int requested, int allocated, voi
 	thread = hl_get_thread();
 	if( thread == NULL || !hl_prof_on ) return;
 	frames[0] = return_address;
-	// The allocating thread walks its own stack, so nothing has to be suspended.
-	if( thread->stack_top )
-		count += hl_module_capture_stack_range(thread->stack_top,(void**)&frames,frames + 1,ALLOCATION_SAMPLE_FRAMES - 1);
+#if defined(__GNUC__) || defined(__clang__)
+	// The allocating thread walks its own frame-pointer chain (libhl keeps frame pointers), so nothing is suspended and no
+	// frame is guessed: a scan for return addresses would also find the stale ones the JIT leaves in its frames.
+	if( thread->stack_top ) {
+		int module_count, captured, kept = 0;
+		unsigned char kinds[ALLOCATION_SAMPLE_FRAMES];
+		hl_module **modules = hl_module_registry_snapshot(&module_count);
+		captured = hl_module_capture_stack_from_frame(modules,module_count,thread->stack_top,(void**)&kinds,(void**)__builtin_frame_address(0),frames,kinds,ALLOCATION_SAMPLE_FRAMES);
+		hl_module_registry_snapshot_free(modules,module_count);
+		for(int i=0;i<captured;i++)
+			if( frames[i] ) frames[kept++] = frames[i]; // drop the markers of chain gaps
+		if( kept > 0 ) count = kept; else frames[0] = return_address;
+	}
+#endif
 	stream_write_u64(payload,(unsigned long long)requested);
 	stream_write_u64(payload + 8,(unsigned long long)allocated);
 	stream_write_u32(payload + 16,(unsigned int)interval);
