@@ -2488,6 +2488,16 @@ HL_PRIM double hl_gc_get_mark_threshold() {
 	return (double)gc_mark_threshold;
 }
 
+// The least allocation between two major collections, in bytes (HL_GC_MIN_TRIGGER at startup). A short process with a
+// large live heap, such as a compile, collects far less often with a larger one, for that much more peak memory.
+HL_PRIM void hl_gc_set_min_trigger( double bytes ) {
+	gc_min_trigger_bytes = bytes < 0 ? 0 : (int64)bytes;
+}
+
+HL_PRIM double hl_gc_get_min_trigger() {
+	return (double)gc_min_trigger_bytes;
+}
+
 HL_PRIM double hl_gc_mark_micros() {
 	return gc_stats.mark_duration_ms * 1000.0;
 }
@@ -3017,6 +3027,8 @@ DEFINE_PRIM(_F64, gc_max_pause_micros, _NO_ARG);
 DEFINE_PRIM(_F64, gc_heap_bytes, _NO_ARG);
 DEFINE_PRIM(_F64, gc_allocated_since_collection, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_set_mark_threshold, _F64);
+DEFINE_PRIM(_VOID, gc_set_min_trigger, _F64);
+DEFINE_PRIM(_F64, gc_get_min_trigger, _NO_ARG);
 DEFINE_PRIM(_F64, gc_get_mark_threshold, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_detailed_stats, _REF(_F64) _REF(_F64) _REF(_F64) _REF(_F64));
 DEFINE_PRIM(_VOID, gc_dump_memory, _BYTES);
