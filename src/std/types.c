@@ -30,8 +30,14 @@ HL_PRIM bool hl_is_string_type( hl_type *t ) {
 	if( t == hl_string_type ) return t != NULL;
 	if( t == NULL || t->kind != HOBJ ) return false;
 	hl_type_obj *o = t->obj;
-	return o->super == NULL && o->nfields == 2 && ucmp(o->name,USTR("String")) == 0
+	return o->super == NULL && (o->nfields == 2 || (o->nfields == 3 && o->fields[2].t->kind == HI32
+		&& ucmp(o->fields[2].name,USTR("hash")) == 0)) && ucmp(o->name,USTR("String")) == 0
 		&& o->fields[0].t->kind == HBYTES && o->fields[1].t->kind == HI32;
+}
+
+// Whether Strings carry the `hash` field (vstring.hash): a String type with three fields was registered.
+HL_PRIM bool hl_string_hashes( void ) {
+	return hl_string_type != NULL && hl_string_type->obj->nfields == 3;
 }
 
 HL_PRIM void hl_register_string_type( hl_type *t ) {

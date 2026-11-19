@@ -884,10 +884,13 @@ static void append_type( char **p, hl_type *t ) {
 		append_type(p,t->tparam);
 		break;
 	case HOBJ:
-		{
+		// A String is `_STRING` whether or not its type declares the cached hash (vstring.hash).
+		if( hl_is_string_type(t) ) {
+			append_type(p,&hlt_bytes);
+			append_type(p,&hlt_i32);
+		} else
 			append_fields(p, t);
-			*(*p)++ = '_';
-		}
+		*(*p)++ = '_';
 		break;
 	case HABSTRACT:
 		*p += utostr(*p,100,t->abs_name);
@@ -1230,6 +1233,8 @@ vdynamic *hl_module_build_constant( hl_module *m, hl_code *code, hl_constant *c 
 	case HSTRUCT:
 		rt = hl_get_obj_rt(t);
 		v = (vdynamic*)hl_malloc(&m->ctx.alloc,rt->size);
+		// Fields the constant does not list (a String's cached hash) start at zero, as in an allocated object.
+		memset(v,0,rt->size);
 		v->t = t;
 		for(int i=0;i<c->nfields;i++) {
 			int idx = c->fields[i];

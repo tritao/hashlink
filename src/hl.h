@@ -1087,11 +1087,19 @@ typedef struct {
 	hl_type *t;
 	uchar *bytes;
 	int length;
+	// The hash string maps use, 0 until one computes it. Only a String type that declares the field has it
+	// (hl_string_hashes); stock String types end at `length`.
+	int hash;
 } vstring;
 
 /* The first loaded module's `String` object type; strings from any module share its layout. */
 HL_API hl_type *hl_string_type;
 HL_API bool hl_is_string_type( hl_type *t );
+HL_API bool hl_string_hashes( void );
+HL_API vdynamic *hl_hbget_s( void *map, vstring *key );
+HL_API bool hl_hbexists_s( void *map, vstring *key );
+HL_API void hl_hbset_s( void *map, vstring *key, vdynamic *value );
+HL_API bool hl_hbremove_s( void *map, vstring *key );
 HL_API void hl_register_string_type( hl_type *t );
 /* Wraps UTF-16 data (not copied) in a String object; NULL when no String type is registered. */
 HL_API vstring *hl_alloc_string( uchar *bytes, int length );

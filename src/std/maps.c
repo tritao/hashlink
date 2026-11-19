@@ -181,6 +181,46 @@ HL_API bool hl_hbremove_n( void *m, uchar *key, int len ) {
 
 #undef HB_LEN
 
+/*
+	The same operations for a String key, whose hash is computed once and kept in the String when its type has room
+	(hl_string_hashes): a key that is the stored String itself is then found without reading its code units.
+*/
+static inline unsigned hl_hbstring_hash( vstring *s ) {
+	if( s == NULL ) return 0u;
+	if( s->t == hl_string_type && hl_string_type->obj->nfields == 3 ) {
+		unsigned h = (unsigned)s->hash;
+		if( h == 0u ) {
+			h = hl_hbhash_n(s->bytes,s->length);
+			s->hash = (int)h;
+		}
+		return h;
+	}
+	return hl_hbhash_n(s->bytes,s->length);
+}
+
+#define HB_SKEY(s) ((s) == NULL ? NULL : (s)->bytes)
+#define HB_SLEN(s) ((s) == NULL ? -1 : (s)->length)
+
+HL_API void hl_hbset_s( void *m, vstring *key, vdynamic *value ) {
+	hl_hbprobe_set((hl_hb_map*)m,HB_SKEY(key),hl_hbstring_hash(key),HB_SLEN(key),value);
+}
+
+HL_API bool hl_hbexists_s( void *m, vstring *key ) {
+	return hl_hbprobe_find((hl_hb_map*)m,HB_SKEY(key),hl_hbstring_hash(key),HB_SLEN(key)) != NULL;
+}
+
+HL_API vdynamic *hl_hbget_s( void *m, vstring *key ) {
+	vdynamic **v = hl_hbprobe_find((hl_hb_map*)m,HB_SKEY(key),hl_hbstring_hash(key),HB_SLEN(key));
+	return v == NULL ? NULL : *v;
+}
+
+HL_API bool hl_hbremove_s( void *m, vstring *key ) {
+	return hl_hbprobe_remove((hl_hb_map*)m,HB_SKEY(key),hl_hbstring_hash(key),HB_SLEN(key));
+}
+
+#undef HB_SKEY
+#undef HB_SLEN
+
 // ----- OBJECT MAP ---------------------------------
 
 typedef void hl_ho_entry;
