@@ -1087,8 +1087,8 @@ typedef struct {
 	hl_type *t;
 	uchar *bytes;
 	int length;
-	// The hash string maps use, 0 until one computes it. Only a String type that declares the field has it
-	// (hl_string_hashes); stock String types end at `length`.
+	// The hash string maps use, 0 until one computes it. Only a String type that declares it, as a third field without a
+	// name, has it (hl_string_hashes); stock String types end at `length`.
 	int hash;
 } vstring;
 

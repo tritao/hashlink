@@ -31,11 +31,12 @@ HL_PRIM bool hl_is_string_type( hl_type *t ) {
 	if( t == NULL || t->kind != HOBJ ) return false;
 	hl_type_obj *o = t->obj;
 	return o->super == NULL && (o->nfields == 2 || (o->nfields == 3 && o->fields[2].t->kind == HI32
-		&& ucmp(o->fields[2].name,USTR("hash")) == 0)) && ucmp(o->name,USTR("String")) == 0
+		&& *o->fields[2].name == 0)) && ucmp(o->name,USTR("String")) == 0
 		&& o->fields[0].t->kind == HBYTES && o->fields[1].t->kind == HI32;
 }
 
-// Whether Strings carry the `hash` field (vstring.hash): a String type with three fields was registered.
+// Whether Strings carry the cached hash (vstring.hash): the registered String type has the third, unnamed field. A field
+// without a name has storage but no lookup entry, so reflection and dynamic access never see it.
 HL_PRIM bool hl_string_hashes( void ) {
 	return hl_string_type != NULL && hl_string_type->obj->nfields == 3;
 }
