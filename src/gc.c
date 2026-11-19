@@ -1433,6 +1433,14 @@ static float gc_mark_threshold = 0.2f;
 // A major collection also waits for at least this much allocation, so a small live heap is not re-marked after every
 // few megabytes of garbage. Large heaps are unaffected: 20% of them is already above it.
 static int64 gc_min_trigger_bytes = 64 << 20;
+
+// When positive, a collection starts once the bytes allocated since the last one exceed this multiple of what the last one
+// found alive, instead of a fraction of the heap. The heap keeps the pages a collection frees, so a heap-sized trigger lets
+// a growing live set drag ever more garbage along; a live-sized one bounds the peak at about (1 + ratio) times live.
+static double gc_live_ratio = 0;
+
+// What the last major collection found alive, in bytes (measured only when `gc_live_ratio` is set).
+static int64 gc_live_bytes = 0;
 static int mark_size = 0;
 static unsigned char *mark_data = NULL;
 static gc_mstack global_mark_stack = {0};
@@ -1769,6 +1777,12 @@ static void gc_major() {
 	dt = TIMESTAMP() - time;
 	gc_stats.mark_count++;
 	gc_stats.mark_time += dt;
+	if( gc_live_ratio > 0 ) {
+		// Sweeping is lazy, so the pages' free space already reflects this mark.
+		gc_stats.free_memory = 0;
+		gc_iter_pages(count_free_memory);
+		gc_live_bytes = gc_stats.pages_total_memory - gc_stats.free_memory;
+	}
 	double mark_ms = (hl_sys_time() - mark_started) * 1000.0;
 	gc_stats.mark_duration_ms += mark_ms;
 	gc_stats.last_mark_ms = mark_ms;
@@ -2102,6 +2116,11 @@ static void gc_check_mark() {
 	int64 b = gc_stats.allocation_count - gc_stats.last_mark_allocs;
 	int64 bytes_limit = (int64)(gc_stats.pages_total_memory * gc_mark_threshold);
 	int64 blocks_limit = (int64)(gc_stats.pages_blocks * gc_mark_threshold);
+	if( gc_live_ratio > 0 ) {
+		// Sized by what is alive: the block count, which the heap's size inflates the same way, does not start one.
+		bytes_limit = (int64)(gc_live_bytes * gc_live_ratio);
+		blocks_limit = INT64_MAX;
+	}
 	if( bytes_limit < gc_min_trigger_bytes ) bytes_limit = gc_min_trigger_bytes;
 	// the same floor for the block count, assuming the smallest blocks are 16 bytes
 	if( blocks_limit < gc_min_trigger_bytes / 16 ) blocks_limit = gc_min_trigger_bytes / 16;
@@ -2706,6 +2725,16 @@ HL_PRIM double hl_gc_get_min_trigger() {
 	return (double)gc_min_trigger_bytes;
 }
 
+// Collect once the bytes allocated since the last collection exceed `ratio` times what it found alive (0: the heap-sized
+// trigger, `hl_gc_set_mark_threshold`). The minimum trigger still applies.
+HL_PRIM void hl_gc_set_live_ratio( double ratio ) {
+	gc_live_ratio = ratio < 0 ? 0 : ratio;
+}
+
+HL_PRIM double hl_gc_get_live_ratio() {
+	return gc_live_ratio;
+}
+
 HL_PRIM double hl_gc_mark_micros() {
 	return gc_stats.mark_duration_ms * 1000.0;
 }
@@ -3240,6 +3269,8 @@ DEFINE_PRIM(_DYN, gc_group_enter, _DYN);
 DEFINE_PRIM(_VOID, gc_group_leave, _DYN);
 DEFINE_PRIM(_I32, gc_group_release, _DYN);
 DEFINE_PRIM(_F64, gc_get_min_trigger, _NO_ARG);
+DEFINE_PRIM(_VOID, gc_set_live_ratio, _F64);
+DEFINE_PRIM(_F64, gc_get_live_ratio, _NO_ARG);
 DEFINE_PRIM(_F64, gc_get_mark_threshold, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_detailed_stats, _REF(_F64) _REF(_F64) _REF(_F64) _REF(_F64));
 DEFINE_PRIM(_VOID, gc_dump_memory, _BYTES);
