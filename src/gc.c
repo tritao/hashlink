@@ -1950,6 +1950,95 @@ static void gc_escape_census( int oc ) {
 	free(entries);
 }
 
+/*
+	With HL_GC_REGION_HOLDERS set as well, it also prints which live blocks outside the region point into its live blocks, by
+	holder and target type: the references that keep the region alive (roots such as globals and stacks are not counted).
+*/
+typedef struct { void *holder; void *target; int64 count; } gc_holder_entry;
+
+static int gc_page_cmp( const void *a, const void *b ) {
+	uintptr_t x = (uintptr_t)*(void**)a, y = (uintptr_t)*(void**)b;
+	return x < y ? -1 : x > y;
+}
+
+static bool gc_block_marked( gc_pheader *ph, int bid ) {
+	return ph->bmp && (ph->bmp[bid>>3] & (1 << (bid&7)));
+}
+
+static void *gc_block_type_key( gc_pheader *ph, void *block ) {
+	if( ph->page_kind != MEM_KIND_DYNAMIC ) return (void*)(int_val)(ph->page_kind + 1);
+	hl_type *t = *(hl_type**)block;
+	if( t && t->kind == HARRAY ) {
+		hl_type *at = ((hl_type**)block)[1];
+		return at ? (void*)((int_val)at | 1) : (void*)t;
+	}
+	return t ? (void*)t : (void*)(int_val)1;
+}
+
+static void gc_type_key_name( void *key, char *out, int size ) {
+	static const char *kinds[] = {"(dynamic, untyped)","(raw)","(noptr)","(finalizer)"};
+	int_val k = (int_val)key;
+	if( k >= 1 && k <= 4 ) { snprintf(out,size,"%s",kinds[k-1]); return; }
+	if( k & 1 ) { snprintf(out,size,"array of %s",hl_to_utf8(hl_type_str((hl_type*)(k & ~(int_val)1)))); return; }
+	snprintf(out,size,"%s",hl_to_utf8(hl_type_str((hl_type*)key)));
+}
+
+static void gc_holder_census( int oc ) {
+	if( getenv("HL_GC_REGION_HOLDERS") == NULL ) return;
+	int npages = 0, cap = 1024;
+	void **pages = (void**)malloc(cap * sizeof(void*));
+	for(int pid=oc*GC_ALL_PAGES;pid<(oc+1)*GC_ALL_PAGES;pid++)
+		for(gc_pheader *ph=gc_pages[pid];ph;ph=ph->next_page) {
+			if( npages == cap ) { cap *= 2; pages = (void**)realloc(pages,cap * sizeof(void*)); }
+			pages[npages++] = ph;
+		}
+	qsort(pages,npages,sizeof(void*),gc_page_cmp);
+	int ecap = 8192, used = 0;
+	gc_holder_entry *entries = (gc_holder_entry*)calloc(ecap,sizeof(gc_holder_entry));
+	for(int pid=0;pid<GC_PAGE_SLOTS;pid++) {
+		if( pid >= oc*GC_ALL_PAGES && pid < (oc+1)*GC_ALL_PAGES ) continue;
+		for(gc_pheader *ph=gc_pages[pid];ph;ph=ph->next_page) {
+			if( ph->page_kind == MEM_KIND_NOPTR || ph->bmp == NULL ) continue;
+			gc_allocator_page_data *p = &ph->alloc;
+			for(int bid=p->first_block;bid<p->max_blocks;bid++) {
+				if( !gc_block_marked(ph,bid) ) continue;
+				int size = p->sizes ? p->sizes[bid] * p->block_size : p->block_size;
+				void **block = (void**)(ph->base + bid * p->block_size);
+				void *holder = NULL;
+				for(int w=0;w<size/(int)sizeof(void*);w++) {
+					void *v = block[w];
+					gc_pheader *tp = v ? GC_GET_PAGE(v) : NULL;
+					if( !tp || !INPAGE(v,tp) ) continue;
+					if( !bsearch(&tp,pages,npages,sizeof(void*),gc_page_cmp) ) continue;
+					int tb = gc_allocator_get_block_id(tp,v);
+					if( tb < 0 || !gc_block_marked(tp,tb) ) continue;
+					if( holder == NULL ) holder = gc_block_type_key(ph,block);
+					void *target = gc_block_type_key(tp,v);
+					int i = 0;
+					while( i < used && (entries[i].holder != holder || entries[i].target != target) ) i++;
+					if( i == used ) {
+						if( used == ecap ) continue;
+						entries[used].holder = holder;
+						entries[used++].target = target;
+					}
+					entries[i].count++;
+				}
+			}
+		}
+	}
+	for(int a=0;a<used;a++)
+		for(int b=a+1;b<used;b++)
+			if( entries[b].count > entries[a].count ) { gc_holder_entry e = entries[a]; entries[a] = entries[b]; entries[b] = e; }
+	char h[160], t[160];
+	for(int i=0;i<used && i<40;i++) {
+		gc_type_key_name(entries[i].holder,h,sizeof(h));
+		gc_type_key_name(entries[i].target,t,sizeof(t));
+		fprintf(stderr,"HL region holder: %10lld  %s  ->  %s\n",(long long)entries[i].count,h,t);
+	}
+	free(entries);
+	free(pages);
+}
+
 /* hl_gc_owner_release, returning the owner's live blocks found by the collection (0 when it had no class). */
 static int gc_owner_release_counting( void *owner ) {
 	// Most modules have no class (not patchable); do not stop the world to find that out.
@@ -1962,7 +2051,10 @@ static int gc_owner_release_counting( void *owner ) {
 		// so a block can never end up in a class that now belongs to someone else.
 		gc_major();
 		live = gc_allocator_class_live_blocks(oc);
-		if( live > 0 ) gc_escape_census(oc);
+		if( live > 0 ) {
+			gc_escape_census(oc);
+			gc_holder_census(oc);
+		}
 		if( oc == GC_OVERFLOW_CLASS ) {
 			// The class is shared: the owner leaves the list either way, and the pages go once nothing in them lives.
 			for(int i=0;i<gc_overflow_count;i++)
