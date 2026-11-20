@@ -173,6 +173,8 @@ struct _gc_pheader {
 	gc_pheader *software_dirty_next;
 	int page_size;
 	int page_kind;
+	// The owner class whose lists hold the page (see allocator.c).
+	int owner_class;
 	gc_allocator_page_data alloc;
 	gc_pheader *next_page;
 #ifdef GC_DEBUG
@@ -216,6 +218,10 @@ static void gc_incremental_discard(void);
 static gc_pheader *gc_alloc_page( int size, int kind, int block_count );
 static void gc_free_page( gc_pheader *page, int block_count );
 static int64 gc_total_allocated_bytes( void );
+static void gc_page_attach( gc_pheader *ph );
+static void gc_page_detach( gc_pheader *ph );
+static gc_pheader *gc_arena_pool_take( int pid, int size );
+static void gc_arena_track_page( gc_pheader *ph );
 
 #ifndef GC_EXTERN_API
 #include "allocator.c"
@@ -279,6 +285,9 @@ static bool gc_overflow_warned = false;
 // allocates there again, and the class is given back once its last block dies.
 static char gc_retired_owner_marker;
 #define GC_RETIRED_OWNER	((void*)&gc_retired_owner_marker)
+// The collection count when each class was retired: it can be reused only once a later collection has counted it.
+static int gc_arena_retired_marks[GC_OWNER_CLASSES + 2];
+static int gc_marks_done( void );
 
 // The class of a registered owner, or -1 when this owner has no class of its own (it must register, or is shared).
 static HL_INLINE int gc_owner_class_lookup( void *owner ) {
@@ -310,9 +319,11 @@ static int gc_owner_class_register( void *owner ) {
 			gc_owner_table[i] = owner;
 			return i;
 		}
-	// A retired class gets no new blocks, so its count from the last collection is current: reuse one that is empty.
+	// A retired class gets no new blocks, so its count from a collection after the retirement is current: reuse one
+	// that is empty. An arena released without a collection retires its class before any collection has seen its blocks.
 	for(int i=1;i<=GC_OWNER_CLASSES;i++)
-		if( gc_owner_table[i] == GC_RETIRED_OWNER && gc_allocator_class_live_blocks(i) == 0 ) {
+		if( gc_owner_table[i] == GC_RETIRED_OWNER && gc_arena_retired_marks[i] < gc_marks_done()
+			&& gc_allocator_class_live_blocks(i) == 0 ) {
 			gc_allocator_release_class(i);
 			gc_owner_table[i] = owner;
 			return i;
@@ -363,6 +374,10 @@ static struct {
 
 static int64 gc_total_allocated_bytes( void ) {
 	return gc_stats.total_allocated;
+}
+
+static int gc_marks_done( void ) {
+	return gc_stats.mark_count;
 }
 
 static struct {
@@ -801,6 +816,16 @@ static gc_pheader *gc_alloc_page( int size, int kind, int block_count ) {
 		hl_fatal("Page memory is not correctly aligned");
 	p->page_size = size;
 	p->page_kind = kind;
+	p->alloc.max_blocks = block_count;
+	gc_stats.pages_allocated++;
+	gc_page_attach(p);
+	gc_arena_track_page(p);
+	return p;
+}
+
+// Makes a page's memory part of the heap: counted, given mark bits at the next collection, found by the page map.
+static void gc_page_attach( gc_pheader *p ) {
+	int block_count = p->alloc.max_blocks;
 	p->bmp = NULL;
 	if( gc_incremental_active ) {
 		p->incremental_bmp = (unsigned char*)calloc(((block_count + 7) >> 3) * 2,1);
@@ -811,14 +836,13 @@ static gc_pheader *gc_alloc_page( int size, int kind, int block_count ) {
 
 	// update stats
 	gc_stats.pages_count++;
-	gc_stats.pages_allocated++;
 	gc_stats.pages_blocks += block_count;
-	gc_stats.pages_total_memory += size;
+	gc_stats.pages_total_memory += p->page_size;
 	gc_stats.mark_bytes += (block_count + 7) >> 3;
 
 	// register page in page map
 	int i;
-	for(i=0;i<size>>GC_MASK_BITS;i++) {
+	for(i=0;i<p->page_size>>GC_MASK_BITS;i++) {
 		void *ptr = p->base + (i<<GC_MASK_BITS);
 		if( GC_GET_LEVEL1(ptr) == gc_level1_null ) {
 			gc_pheader **level = (gc_pheader**)malloc(sizeof(void*) * (1<<GC_LEVEL1_BITS));
@@ -835,25 +859,29 @@ static gc_pheader *gc_alloc_page( int size, int kind, int block_count ) {
 		GC_GET_PAGE(ptr) = p;
 #endif
 	}
-
-	return p;
 }
 
-static void gc_free_page( gc_pheader *ph, int block_count ) {
+// The inverse of gc_page_attach: the memory stays mapped, but nothing finds or counts it as the heap's.
+static void gc_page_detach( gc_pheader *ph ) {
 	int i;
 	for(i=0;i<ph->page_size>>GC_MASK_BITS;i++) {
 		void *ptr = ph->base + (i<<GC_MASK_BITS);
 		GC_GET_PAGE(ptr) = NULL;
 	}
 	gc_stats.pages_count--;
-	gc_stats.pages_blocks -= block_count;
+	gc_stats.pages_blocks -= ph->alloc.max_blocks;
 	gc_stats.pages_total_memory -= ph->page_size;
-	gc_stats.mark_bytes -= (block_count + 7) >> 3;
+	gc_stats.mark_bytes -= (ph->alloc.max_blocks + 7) >> 3;
+	free(ph->incremental_bmp);
+	ph->incremental_bmp = NULL;
+}
+
+static void gc_free_page( gc_pheader *ph, int block_count ) {
+	ph->alloc.max_blocks = block_count;
+	gc_page_detach(ph);
 	gc_free_page_memory(ph->base,ph->page_size);
 	free(ph->scan_profile);
 	ph->scan_profile = NULL;
-	free(ph->incremental_bmp);
-	ph->incremental_bmp = NULL;
 	ph->next_page = gc_free_pheaders;
 	gc_free_pheaders = ph;
 }
@@ -1170,6 +1198,11 @@ HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data) {
 #endif
 }
 
+// Bytes and blocks each owner class allocated since the last collection: an arena released without a collection takes
+// its share out of the count that starts the next one.
+static int64 gc_class_allocated[GC_PAGE_CLASSES];
+static int64 gc_class_allocations[GC_PAGE_CLASSES];
+
 static HL_INLINE void gc_tlab_clear( unsigned char *ptr, int size, int flags, int block ) {
 	if( flags & MEM_ZERO ) {
 #ifdef GC_ALLOC_FAST_SUPPORTED
@@ -1220,6 +1253,8 @@ static void *gc_tlab_alloc( hl_thread_info *th, int size, int flags, int oc ) {
 			gc_stats.allocation_count += got;
 			gc_stats.total_requested += (int64)got * block;
 			gc_stats.total_allocated += (int64)got * block;
+			gc_class_allocations[oc] += got;
+			gc_class_allocated[oc] += (int64)got * block;
 			slot->cur = run;
 			slot->end = run + got * block;
 			if( got < want ) {
@@ -1238,6 +1273,8 @@ static void *gc_tlab_alloc( hl_thread_info *th, int size, int flags, int oc ) {
 					gc_stats.allocation_count += got;
 					gc_stats.total_requested += (int64)got * block;
 					gc_stats.total_allocated += (int64)got * block;
+					gc_class_allocations[oc] += got;
+					gc_class_allocated[oc] += (int64)got * block;
 					stash->start[stash->count] = more;
 					stash->end[stash->count] = more + got * block;
 					stash->count++;
@@ -1329,6 +1366,8 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 			hl_fatal("TODO");
 		}
 		gc_stats.total_allocated += allocated;
+		gc_class_allocations[oc]++;
+		gc_class_allocated[oc] += allocated;
 		if( gc_census_on ) {
 			gc_census_count(t,allocated);
 			if( gc_census_every > 0 ) {
@@ -1771,6 +1810,8 @@ static void gc_major() {
 	double mark_started = hl_sys_time();
 	gc_stats.last_mark = gc_stats.total_allocated;
 	gc_stats.last_mark_allocs = gc_stats.allocation_count;
+	MZERO(gc_class_allocated,sizeof(gc_class_allocated));
+	MZERO(gc_class_allocations,sizeof(gc_class_allocations));
 	gc_stop_world(true);
 	gc_mark();
 	gc_stop_world(false);
@@ -1869,6 +1910,8 @@ HL_API int hl_gc_owner_live_blocks( void *owner, void **blocks, bool *typed, int
 }
 
 static int gc_owner_release_counting( void *owner );
+static void gc_arena_open( int oc );
+static void gc_arena_close( int oc );
 
 HL_API void hl_gc_owner_release( void *owner ) {
 	gc_owner_release_counting(owner);
@@ -1885,6 +1928,7 @@ HL_API void *hl_gc_arena_enter( void *arena ) {
 		if( oc < 0 ) {
 			gc_global_lock(true);
 			oc = gc_owner_class_register(arena);
+			gc_arena_open(oc);
 			gc_global_lock(false);
 		}
 	}
@@ -2081,17 +2125,22 @@ static int gc_owner_release_counting( void *owner ) {
 		} else if( live == 0 ) {
 			gc_allocator_release_class(oc);
 			gc_owner_table[oc] = NULL;
+			gc_arena_close(oc);
 		} else {
 			// The pages holding what escaped stay until it dies; the rest go now.
 			int64 before = gc_class_page_bytes(oc);
 			gc_allocator_release_empty_pages(oc);
 			if( getenv("HL_GC_ARENA_CENSUS") ) fprintf(stderr,"HL arena pages: %.1f MB before release, %.1f MB kept\n",before/1048576.0,gc_class_page_bytes(oc)/1048576.0);
 			gc_owner_table[oc] = GC_RETIRED_OWNER;
+			gc_arena_retired_marks[oc] = gc_stats.mark_count - 1;
+			gc_arena_close(oc);
 		}
 	}
 	gc_global_lock(false);
 	return live;
 }
+
+#include "gc_arena.c"
 
 HL_API bool hl_is_gc_ptr( void *ptr ) {
 	gc_pheader *page = GC_GET_PAGE(ptr);
@@ -3268,6 +3317,8 @@ DEFINE_PRIM(_VOID, gc_set_min_trigger, _F64);
 DEFINE_PRIM(_DYN, gc_arena_enter, _DYN);
 DEFINE_PRIM(_VOID, gc_arena_leave, _DYN);
 DEFINE_PRIM(_I32, gc_arena_release, _DYN);
+DEFINE_PRIM(_I32, gc_arena_free, _DYN);
+DEFINE_PRIM(_VOID, gc_arena_stats, _REF(_F64) _REF(_F64) _REF(_F64) _REF(_F64));
 DEFINE_PRIM(_F64, gc_get_min_trigger, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_set_live_ratio, _F64);
 DEFINE_PRIM(_F64, gc_get_live_ratio, _NO_ARG);

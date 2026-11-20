@@ -726,6 +726,12 @@ typedef struct {
 HL_API void *hl_gc_arena_enter( void *arena );
 HL_API void hl_gc_arena_leave( void *previous );
 HL_API int hl_gc_arena_release( void *arena );
+/*
+	Releases an arena without collecting (gc_arena.c): 0 when nothing outside it pointed into it and its pages were reused at
+	once, otherwise the references found (or -1 when its writes could not be tracked) and its pages are left to the collector.
+*/
+HL_API int hl_gc_arena_free( void *arena );
+HL_API void hl_gc_arena_stats( double *released, double *kept, double *scan_ms, double *check_ms );
 
 HL_API bool hl_jit_alloc_supported( void );
 HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data);

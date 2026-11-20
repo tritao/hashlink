@@ -166,10 +166,20 @@ static gc_pheader *gc_allocator_new_page( int pid, int block, int size, int kind
 		}
 	}
 
+	// A page a released arena left, of this size, partition and kind, has this layout already.
+	gc_pheader *pooled = gc_arena_pool_take(pid,size);
+	if( pooled ) {
+		pooled->owner_class = pid / GC_ALL_PAGES;
+		pooled->next_page = gc_pages[pid];
+		gc_pages[pid] = pooled;
+		return pooled;
+	}
+
 	int start_pos = 0;
 	int max_blocks = size / block;
 
 	gc_pheader *ph = gc_alloc_page(size, kind, max_blocks);
+	ph->owner_class = pid / GC_ALL_PAGES;
 	gc_allocator_page_data *p = &ph->alloc;
 
 	p->block_size = block;
@@ -652,6 +662,17 @@ static void gc_allocator_release_empty_pages( int oc ) {
 				link = &ph->next_page;
 		}
 	}
+}
+
+// Empties a page that keeps its layout: every block free, nothing to flush.
+static void gc_allocator_reset_page( gc_pheader *ph ) {
+	gc_allocator_page_data *p = &ph->alloc;
+	if( p->sizes ) MZERO(p->sizes + p->first_block,p->max_blocks - p->first_block);
+	int bits = p->free.size_bits;
+	free_freelist(&p->free);
+	alloc_freelist(&p->free,bits);
+	freelist_append(&p->free,p->first_block,p->max_blocks - p->first_block);
+	p->need_flush = false;
 }
 
 static int64 gc_allocator_private_memory() {
