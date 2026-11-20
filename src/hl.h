@@ -735,7 +735,9 @@ HL_API void hl_gc_arena_stats( double *released, double *kept, double *scan_ms, 
 /* Type homes: where a type's objects go whatever arena is current (gc.c). */
 HL_API void hl_gc_arena_set_home( hl_type *t, void *arena );
 HL_API void *hl_gc_arena_global( void );
+HL_API void hl_gc_arena_set_home_of( vdynamic *value, void *arena );
 HL_API void *hl_gc_arena_owner( void *home );
+HL_API void *hl_gc_arena_owner_of( void *block );
 
 HL_API bool hl_jit_alloc_supported( void );
 HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data);

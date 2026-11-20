@@ -1472,6 +1472,20 @@ HL_API void *hl_gc_arena_global( void ) {
 	return GC_ARENA_GLOBAL;
 }
 
+/* The owner whose pages hold `block`: its arena or module, or hl_gc_arena_global() for the collector's own pages. */
+HL_API void *hl_gc_arena_owner_of( void *block ) {
+	gc_pheader *ph = GC_GET_PAGE(block);
+	if( !ph || !INPAGE(block,ph) || ph->owner_class == 0 ) return GC_ARENA_GLOBAL;
+	void *owner = ph->owner_class <= GC_OWNER_CLASSES ? gc_owner_table[ph->owner_class] : NULL;
+	// The shared overflow class and a retired one have no single owner: their blocks' growth goes to the collector.
+	return owner == NULL || owner == GC_RETIRED_OWNER ? GC_ARENA_GLOBAL : owner;
+}
+
+/* The home of a value's type, for code that has the value but no way to name its type. */
+HL_API void hl_gc_arena_set_home_of( vdynamic *value, void *arena ) {
+	if( value ) hl_gc_arena_set_home(value->t,arena);
+}
+
 // -------------------------  MARKING ----------------------------------------------------------
 
 typedef struct {
@@ -3348,6 +3362,7 @@ DEFINE_PRIM(_I32, gc_arena_release, _DYN);
 DEFINE_PRIM(_I32, gc_arena_free, _DYN);
 DEFINE_PRIM(_VOID, gc_arena_set_home, _TYPE _DYN);
 DEFINE_PRIM(_DYN, gc_arena_global, _NO_ARG);
+DEFINE_PRIM(_VOID, gc_arena_set_home_of, _DYN _DYN);
 DEFINE_PRIM(_VOID, gc_arena_stats, _REF(_F64) _REF(_F64) _REF(_F64) _REF(_F64));
 DEFINE_PRIM(_F64, gc_get_min_trigger, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_set_live_ratio, _F64);

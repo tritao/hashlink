@@ -22,13 +22,13 @@
 #include <hl.h>
 #include <string.h>
 
-static vbyte *hl_array_alloc_storage( hl_type *at, int capacity ) {
+static vbyte *hl_array_alloc_storage( hl_type *at, int capacity, void *owner ) {
 	int esize = hl_type_size(at);
 	/* Keep a type word in the backing allocation so the precise GC can treat
 	 * it like a dynamic array block.  The public data pointer skips that word. */
 	hl_type **storage = (hl_type**)hl_gc_alloc_gen_owner(&hlt_array,
 		sizeof(hl_type*) + (size_t)esize * capacity,
-		(hl_is_ptr(at) ? MEM_KIND_DYNAMIC : MEM_KIND_NOPTR) | MEM_ZERO, hl_gc_arena_owner(at->gc_owner));
+		(hl_is_ptr(at) ? MEM_KIND_DYNAMIC : MEM_KIND_NOPTR) | MEM_ZERO, owner);
 	*storage = &hlt_array;
 	return (vbyte*)storage;
 }
@@ -43,7 +43,7 @@ HL_PRIM varray *hl_alloc_array( hl_type *at, int size ) {
 	a->at = at;
 	a->size = size;
 	a->capacity = capacity;
-	hl_gc_store_ref(&a->data,hl_array_alloc_storage(at, capacity),&hlt_bytes);
+	hl_gc_store_ref(&a->data,hl_array_alloc_storage(at, capacity, hl_gc_arena_owner(at->gc_owner)),&hlt_bytes);
 	return a;
 }
 
@@ -58,7 +58,8 @@ HL_PRIM void hl_array_reserve( varray *a, int capacity ) {
 		}
 		next = grown;
 	}
-	vbyte *data = hl_array_alloc_storage(a->at, next);
+	// The storage goes where the array is, not to the current arena: an array that outlives an arena can grow inside one.
+	vbyte *data = hl_array_alloc_storage(a->at, next, hl_gc_arena_owner_of(a));
 	int stride = hl_type_size(a->at);
 	if( a->size > 0 )
 		hl_gc_copy_values(data + HL_WSIZE, a->data + HL_WSIZE, (size_t)a->size * stride,a->at);

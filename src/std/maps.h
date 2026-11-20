@@ -93,9 +93,11 @@ static void _MNAME(rebuild)( t_map *m, int maxentries ) {
 	ncells = H_PRIMES[i];
 
 	int ksize = maxentries < _MLIMIT ? 1 : sizeof(int);
-	hl_gc_store_ref(&m->entries,(t_entry*)hl_gc_alloc_noptr(maxentries * sizeof(t_entry)),&hlt_bytes);
-	hl_gc_store_ref(&m->values,(t_value*)hl_gc_alloc_raw(maxentries * sizeof(t_value)),&hlt_bytes);
-	hl_gc_store_ref(&m->cells,hl_gc_alloc_noptr((ncells + maxentries) * ksize),&hlt_bytes);
+	// The storage goes where the map is, not to the current arena: a map that outlives an arena can grow inside one.
+	void *home = hl_gc_arena_owner_of(m);
+	hl_gc_store_ref(&m->entries,(t_entry*)hl_gc_alloc_gen_owner(&hlt_bytes,maxentries * sizeof(t_entry),MEM_KIND_NOPTR,home),&hlt_bytes);
+	hl_gc_store_ref(&m->values,(t_value*)hl_gc_alloc_gen_owner(&hlt_abstract,maxentries * sizeof(t_value),MEM_KIND_RAW,home),&hlt_bytes);
+	hl_gc_store_ref(&m->cells,hl_gc_alloc_gen_owner(&hlt_bytes,(ncells + maxentries) * ksize,MEM_KIND_NOPTR,home),&hlt_bytes);
 	hl_gc_store_ref(&m->nexts,(signed char*)m->cells + ncells * ksize,&hlt_bytes);
 	m->ncells = ncells;
 	m->maxentries = maxentries;
