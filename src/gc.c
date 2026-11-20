@@ -233,8 +233,10 @@ static void gc_arena_track_page( gc_pheader *ph );
 // out without taking the global lock or touching shared counters. A slot is only written by its own thread while it
 // runs, and by the collector once the thread is blocked, so no atomic is needed.
 #	define GC_TLAB_SLOTS	(GC_FIXED_PARTS << PAGE_KIND_BITS)
-// One group of slots per owner class that can take part in the fast path: the unowned class and each registered one.
-#	define GC_TLAB_ALL_SLOTS	((1 + GC_OWNER_CLASSES) * GC_TLAB_SLOTS)
+// One group of slots per owner class: the unowned class and each registered one take part in the fast path. The overflow
+// class has a group too, never filled, because an arena in it is the thread's current one and compiled code then reads
+// its slots, which must exist and stay empty so that every allocation takes the helper.
+#	define GC_TLAB_ALL_SLOTS	(GC_PAGE_CLASSES * GC_TLAB_SLOTS)
 #	define GC_TLAB_RUN		2048
 // The largest object compiled code allocates inline (five words on 64 bits).
 #	define GC_JIT_INLINE_MAX	(5 * (int)sizeof(void*))
