@@ -176,6 +176,14 @@ static bool gc_arena_scan( void ) { return false; }
 // Locked. Called when an arena gets an owner class: it is an arena from now on, tracked if the system allows.
 static void gc_arena_open( int oc ) {
 	if( oc <= 0 || oc > GC_OWNER_CLASSES ) return;
+	static bool std_layouts = false;
+	if( !std_layouts ) {
+		std_layouts = true;
+		hl_gc_arena_register_layout(USTR("hl_bytes_map"),hl_gc_arena_map_layout);
+		hl_gc_arena_register_layout(USTR("hl_int_map"),hl_gc_arena_map_layout);
+		hl_gc_arena_register_layout(USTR("hl_int64_map"),hl_gc_arena_map_layout);
+		hl_gc_arena_register_layout(USTR("hl_obj_map"),hl_gc_arena_map_layout);
+	}
 	gc_arena_opened[oc] = true;
 	gc_arena_start[oc] = gc_arena_tracking_start() ? gc_arena_log_base + gc_arena_log_len : -1;
 	gc_arena_generation[oc] = gc_arena_tracking_generation;
@@ -333,6 +341,11 @@ static HL_INLINE bool gc_arena_points_in( void *value, int oc, uintptr_t low, ui
 	return ph && INPAGE(value,ph) && ph->owner_class == oc;
 }
 
+// How a slot holds its pointer: to a block of its own type (or bytes), to an array's storage of element type `at`, or to an
+// untyped block of a registered layout.
+enum { GC_SLOT_VALUE, GC_SLOT_STORAGE, GC_SLOT_LAYOUT };
+typedef struct { int kind; hl_type *at; hl_gc_arena_layout layout; } gc_slot_kind;
+
 // Whether the heap word `slot` is one the collector reads as a pointer: a pointer field of a typed block (by its layout), or
 // any word of an untyped one. A typed block's integer or float that happens to spell an address is no reference, and must
 // not be rewritten by an evacuation.
@@ -354,28 +367,34 @@ static bool gc_arena_pointer_word( void **slot ) {
 	return (mark_bits[pos >> 5] & (1 << (pos&31))) != 0;
 }
 
-// The slots found pointing into the arena that hold a pointer by contract (heap words, roots), which an evacuation may
-// rewrite, and how many were found that cannot be (a stack or register word may be an integer).
-static void ***gc_arena_slots = NULL;
+// The references found into the arena that are pointer fields of typed blocks, by their layout, which an evacuation may
+// rewrite, and how many were found that it may not (a word of an untyped block, a root, a stack or register word).
+typedef struct { void **slot; gc_slot_kind kind; } gc_arena_slot_entry;
+static gc_arena_slot_entry *gc_arena_slots = NULL;
 static int gc_arena_slot_count = 0, gc_arena_slot_cap = 0, gc_arena_fixed_refs = 0;
+static gc_slot_kind gc_arena_field_kind( void **slot, bool *precise );
 
-static int gc_arena_scan_words( void **from, void **to, int oc, uintptr_t low, uintptr_t high, const char *where, int index, bool holders, bool rewritable ) {
+static int gc_arena_scan_words( void **from, void **to, int oc, uintptr_t low, uintptr_t high, const char *where, int index, bool holders ) {
 	int found = 0;
 	for(void **p=from;p<to;p++)
 		if( gc_arena_points_in(*p,oc,low,high) ) {
 			if( holders && !gc_arena_pointer_word(p) ) continue;
 			found++;
 			gc_arena_report(oc,where,index,holders ? (void*)p : NULL,*p);
-			if( !rewritable ) {
+			bool precise = false;
+			gc_slot_kind kind = { GC_SLOT_VALUE, NULL, NULL };
+			if( holders ) kind = gc_arena_field_kind(p,&precise);
+			if( !precise ) {
 				gc_arena_fixed_refs++;
 				continue;
 			}
 			if( gc_arena_slot_count == gc_arena_slot_cap ) {
 				gc_arena_slot_cap = gc_arena_slot_cap ? gc_arena_slot_cap * 2 : 256;
-				gc_arena_slots = (void***)realloc(gc_arena_slots,sizeof(void**) * gc_arena_slot_cap);
+				gc_arena_slots = (gc_arena_slot_entry*)realloc(gc_arena_slots,sizeof(gc_arena_slot_entry) * gc_arena_slot_cap);
 				if( gc_arena_slots == NULL ) out_of_memory("arena slots");
 			}
-			gc_arena_slots[gc_arena_slot_count++] = p;
+			gc_arena_slots[gc_arena_slot_count].slot = p;
+			gc_arena_slots[gc_arena_slot_count++].kind = kind;
 		}
 	return found;
 }
@@ -399,25 +418,25 @@ static int gc_arena_references( int oc, hl_thread_info *self, void *self_from ) 
 		// A page freed since it was written holds nothing; the arena's own pages point into it freely.
 		if( !ph || !INPAGE((void*)start,ph) || ph->owner_class == oc || !MEM_HAS_PTR(ph->page_kind) ) continue;
 		if( end > (uintptr_t)ph->base + ph->page_size ) end = (uintptr_t)ph->base + ph->page_size;
-		found += gc_arena_scan_words((void**)start,(void**)end,oc,low,high,"page",0,true,true);
+		found += gc_arena_scan_words((void**)start,(void**)end,oc,low,high,"page",0,true);
 	}
 	for(int i=0;i<gc_roots_count;i++)
-		found += gc_arena_scan_words(gc_roots[i],gc_roots[i] + 1,oc,low,high,"root",i,false,true);
+		found += gc_arena_scan_words(gc_roots[i],gc_roots[i] + 1,oc,low,high,"root",i,false);
 	for(gc_pinned_list *l=gc_pinned_lists;l;l=l->next)
-		found += gc_arena_scan_words(l->values,l->values + l->count,oc,low,high,"pinned",0,false,false);
+		found += gc_arena_scan_words(l->values,l->values + l->count,oc,low,high,"pinned",0,false);
 	for(int i=0;i<gc_threads.count;i++) {
 		hl_thread_info *t = gc_threads.threads[i];
 		if( t == self ) {
-			found += gc_arena_scan_words((void**)self_from,(void**)t->stack_top,oc,low,high,"stack of thread",i,false,false);
+			found += gc_arena_scan_words((void**)self_from,(void**)t->stack_top,oc,low,high,"stack of thread",i,false);
 #			ifdef GC_ARENA_FREE_STUB
 			// The entry pushed the caller's callee-saved registers on the stack read above: what the registers hold
 			// since is the release's own work, not the program's.
 			continue;
 #			endif
 		} else
-			found += gc_arena_scan_words((void**)t->stack_cur,(void**)t->stack_top,oc,low,high,"stack of thread",i,false,false);
-		found += gc_arena_scan_words((void**)&t->gc_regs,(void**)&t->gc_regs + (sizeof(jmp_buf) / sizeof(void*)),oc,low,high,"registers of thread",i,false,false);
-		found += gc_arena_scan_words((void**)&t->extra_stack_data,(void**)&t->extra_stack_data + t->extra_stack_size,oc,low,high,"saved registers of thread",i,false,false);
+			found += gc_arena_scan_words((void**)t->stack_cur,(void**)t->stack_top,oc,low,high,"stack of thread",i,false);
+		found += gc_arena_scan_words((void**)&t->gc_regs,(void**)&t->gc_regs + (sizeof(jmp_buf) / sizeof(void*)),oc,low,high,"registers of thread",i,false);
+		found += gc_arena_scan_words((void**)&t->extra_stack_data,(void**)&t->extra_stack_data + t->extra_stack_size,oc,low,high,"saved registers of thread",i,false);
 	}
 	return found;
 }
@@ -606,22 +625,69 @@ HL_API int hl_gc_arena_free( void *arena ) {
 #endif
 
 /*
-	Copying out at a unit's finish: hl_gc_arena_copy(value, arena, target) returns `value` with every block of `arena` it
+	Copying out at a unit's finish: hl_gc_arena_copy(value, arena, target) returns `value` with the blocks of `arena` it
 	reaches copied to `target` (an arena, or NULL or hl_gc_arena_global() for the collector's pages), pointers between them
-	rewritten, sharing and cycles kept; blocks outside `arena` are shared, not copied. Typed blocks are copied by their
-	layout. Untyped blocks (a map's tables) are read word by word, and a word is taken for a pointer only when it is the
-	start of a block of the arena. A pointer the copy does not follow (into a block's middle, or out of a finalized block)
-	is left as it is, so the arena's release finds it and keeps the arena: the copy can only be incomplete, never wrong.
-	No collection runs while it copies.
+	rewritten, sharing and cycles kept; blocks outside `arena` are shared, not copied.
+
+	Only words known to be pointers are ever rewritten, by the layout of the block that holds them: a pointer field of an
+	object, an enum constructor's pointer parameter, a closure's bound value, an array's storage and, when the array's
+	element type is a pointer, its elements, and the words a registered layout names for an untyped block (a map's tables,
+	hl_gc_arena_register_layout). A block whose layout is not known (an untyped block reached any other way, a virtual,
+	a dynamic object) is not copied: the pointer to it stays, the arena's release finds it and keeps the arena. A word
+	that merely looks like an address is never changed. No collection runs while it copies.
 */
+typedef struct { const uchar *name; hl_gc_arena_layout layout; } gc_arena_layout_entry;
+static gc_arena_layout_entry *gc_arena_layouts = NULL;
+static int gc_arena_layout_count = 0;
+
+/* Says that an untyped block reached through a field of the abstract type `name` has the pointers `layout` visits. */
+HL_API void hl_gc_arena_register_layout( const uchar *name, hl_gc_arena_layout layout ) {
+	gc_global_lock(true);
+	for(int i=0;i<gc_arena_layout_count;i++)
+		if( ucmp(gc_arena_layouts[i].name,name) == 0 ) {
+			gc_arena_layouts[i].layout = layout;
+			gc_global_lock(false);
+			return;
+		}
+	gc_arena_layouts = (gc_arena_layout_entry*)realloc(gc_arena_layouts,sizeof(gc_arena_layout_entry) * (gc_arena_layout_count + 1));
+	if( gc_arena_layouts == NULL ) out_of_memory("arena layouts");
+	gc_arena_layouts[gc_arena_layout_count].name = name;
+	gc_arena_layouts[gc_arena_layout_count++].layout = layout;
+	gc_global_lock(false);
+}
+
+static hl_gc_arena_layout gc_arena_layout_of( hl_type *t ) {
+	if( t == NULL || t->kind != HABSTRACT || t->abs_name == NULL ) return NULL;
+	for(int i=0;i<gc_arena_layout_count;i++)
+		if( ucmp(gc_arena_layouts[i].name,t->abs_name) == 0 ) return gc_arena_layouts[i].layout;
+	return NULL;
+}
+
+
+// The kind of a slot whose static type is `t`, or false when what it points to cannot be copied by layout.
+static bool gc_arena_slot_kind_of( hl_type *t, gc_slot_kind *k ) {
+	k->at = NULL;
+	k->layout = NULL;
+	if( t && t->kind == HABSTRACT ) {
+		k->kind = GC_SLOT_LAYOUT;
+		k->layout = gc_arena_layout_of(t);
+		return k->layout != NULL;
+	}
+	k->kind = GC_SLOT_VALUE;
+	return true;
+}
+
 // An entry belongs to the copy whose epoch it has: starting a copy empties the table by moving to the next epoch.
 typedef struct { void *from, *to; uint64 epoch; } gc_arena_copy_entry;
+typedef struct { void *block; gc_slot_kind kind; } gc_arena_copy_work;
 static uint64 gc_arena_copy_epoch = 0;
 static int64 gc_arena_copy_bytes = 0;
 static gc_arena_copy_entry *gc_arena_copy_table;
 static int64 gc_arena_copy_cap, gc_arena_copy_count;
-static void **gc_arena_copy_stack;
+static gc_arena_copy_work *gc_arena_copy_stack;
 static int64 gc_arena_copy_depth, gc_arena_copy_stack_cap;
+static int gc_arena_copy_class;
+static void *gc_arena_copy_target;
 
 static gc_arena_copy_entry *gc_arena_copy_slot( void *from ) {
 	uint64 h = ((uint64)(uintptr_t)from * 0x9E3779B97F4A7C15ULL) >> 17;
@@ -642,69 +708,155 @@ static void gc_arena_copy_grow( void ) {
 	free(old);
 }
 
-// The copy of `value` when it is a block of class `oc`, made now if it was not yet, or `value` itself.
-static void *gc_arena_copy_block( void *value, int oc, void *target, bool exact ) {
+static void gc_arena_copy_begin( int oc, void *target ) {
+	gc_arena_copy_count = 0;
+	gc_arena_copy_epoch++;
+	gc_arena_copy_depth = 0;
+	gc_arena_copy_class = oc;
+	gc_arena_copy_target = target;
+}
+
+// A boxed scalar (a Dynamic holding an Int, a Float, a Bool): bytes with a type word, no pointer.
+static bool gc_arena_scalar_box( hl_type *t ) {
+	switch( t->kind ) {
+	case HUI8: case HUI16: case HI32: case HI64: case HF32: case HF64: case HBOOL: return true;
+	default: return false;
+	}
+}
+
+// The copy of the block `value` points to, when it is a block of the arena whose layout `kind` gives, made now if it was not
+// yet; `value` itself otherwise.
+static void *gc_arena_copy_block( void *value, gc_slot_kind kind ) {
 	if( value == NULL ) return NULL;
+	int oc = gc_arena_copy_class;
 	gc_pheader *ph = GC_GET_PAGE(value);
 	if( !ph || !INPAGE(value,ph) || ph->owner_class != oc ) return value;
-	if( ph->page_kind == MEM_KIND_FINALIZER ) return value;
-	// A pointer may be inside its block (a map's second table is a part of its first): it moves with the block.
 	void *start = value;
 	if( gc_allocator_get_block_interior(ph,&start) < 0 || (ph->alloc.sizes && ph->alloc.sizes[((unsigned char*)start - ph->base) / ph->alloc.block_size] == 0) )
 		return value;
-	if( start != value ) {
-		if( exact ) return value;
-		return (char*)gc_arena_copy_block(start,oc,target,exact) + ((char*)value - (char*)start);
+	// The block's layout: bytes, an object of its own type, an array's storage, or a registered untyped layout.
+	hl_type *t = ph->page_kind == MEM_KIND_DYNAMIC ? *(hl_type**)start : NULL;
+	switch( ph->page_kind ) {
+	case MEM_KIND_NOPTR:
+		break;
+	case MEM_KIND_RAW:
+		if( kind.kind != GC_SLOT_LAYOUT ) return value;
+		break;
+	case MEM_KIND_DYNAMIC:
+		if( start != value ) return value; // a typed block is pointed to by its start
+		if( kind.kind == GC_SLOT_STORAGE ) {
+			if( t != &hlt_array ) return value;
+			break;
+		}
+		if( kind.kind != GC_SLOT_VALUE || !t || !gc_plausible_type(t) ) return value;
+		if( t->kind == HOBJ ) {
+			if( !t->obj->rt ) return value;
+		} else if( t->kind == HARRAY ) {
+			if( t != &hlt_array || !gc_plausible_type(((varray*)start)->at) ) return value;
+		} else if( t->kind != HENUM && t->kind != HFUN && !gc_arena_scalar_box(t) )
+			return value;
+		break;
+	default:
+		return value; // finalized blocks
 	}
+	if( start != value )
+		return (char*)gc_arena_copy_block(start,kind) + ((char*)value - (char*)start);
 	if( (gc_arena_copy_count + 1) * 2 > gc_arena_copy_cap ) gc_arena_copy_grow();
 	gc_arena_copy_entry *e = gc_arena_copy_slot(value);
 	if( e->epoch == gc_arena_copy_epoch ) return e->to;
 	int size = gc_allocator_fast_block_size(ph,value);
-	hl_type *t = ph->page_kind == MEM_KIND_DYNAMIC ? *(hl_type**)value : NULL;
-	void *copy = hl_gc_alloc_gen_owner(t,size,ph->page_kind,target);
+	void *copy = hl_gc_alloc_gen_owner(t,size,ph->page_kind,gc_arena_copy_target);
 	memcpy(copy,value,size);
 	gc_arena_copy_bytes += size;
-	e = gc_arena_copy_slot(value); // the allocation may not move the table, but stay safe
+	e = gc_arena_copy_slot(value);
 	e->from = value;
 	e->to = copy;
 	e->epoch = gc_arena_copy_epoch;
 	gc_arena_copy_count++;
-	if( MEM_HAS_PTR(ph->page_kind) ) {
+	if( ph->page_kind != MEM_KIND_NOPTR ) {
 		if( gc_arena_copy_depth == gc_arena_copy_stack_cap ) {
 			gc_arena_copy_stack_cap = gc_arena_copy_stack_cap ? gc_arena_copy_stack_cap * 2 : 1024;
-			gc_arena_copy_stack = (void**)realloc(gc_arena_copy_stack,sizeof(void*) * gc_arena_copy_stack_cap);
+			gc_arena_copy_stack = (gc_arena_copy_work*)realloc(gc_arena_copy_stack,sizeof(gc_arena_copy_work) * gc_arena_copy_stack_cap);
 			if( gc_arena_copy_stack == NULL ) out_of_memory("arena copy");
 		}
-		gc_arena_copy_stack[gc_arena_copy_depth++] = copy;
+		gc_arena_copy_stack[gc_arena_copy_depth].block = copy;
+		gc_arena_copy_stack[gc_arena_copy_depth++].kind = kind;
 	}
 	return copy;
 }
 
-// Rewrites the pointers of a copied block to their copies, as the collector would read them.
-static void gc_arena_copy_fields( void **block, int oc, void *target ) {
-	gc_pheader *page = GC_GET_PAGE(block);
-	int nwords = gc_allocator_fast_block_size(page,block) / HL_WSIZE, pos = 0;
-	unsigned int *mark_bits = NULL;
-	if( page->page_kind == MEM_KIND_DYNAMIC ) {
-		hl_type *t = *(hl_type**)block;
-		if( !t ) return;
-		if( t->mark_bits && t->kind != HFUN ) {
+static void gc_arena_copy_slot_to( void **slot, hl_type *static_type ) {
+	gc_slot_kind k;
+	if( *slot && gc_arena_slot_kind_of(static_type,&k) ) *slot = gc_arena_copy_block(*slot,k);
+}
 
-			mark_bits = t->mark_bits;
-			if( t->kind == HENUM ) {
-				mark_bits += ((venum*)block)->index;
-				block += 2;
-				nwords -= 2;
-			} else {
-				block++;
-				pos++;
+static void gc_arena_copy_visit( void **slot, void *layout, void *ctx ) {
+	(void)ctx;
+	gc_slot_kind k = { layout ? GC_SLOT_LAYOUT : GC_SLOT_VALUE, NULL, (hl_gc_arena_layout)layout };
+	if( *slot ) *slot = gc_arena_copy_block(*slot,k);
+}
+
+// Rewrites the pointers of a copied block, by its layout, to their copies.
+static void gc_arena_copy_fields( gc_arena_copy_work *w ) {
+	void *block = w->block;
+	gc_pheader *ph = GC_GET_PAGE(block);
+	int size = gc_allocator_fast_block_size(ph,block);
+	if( w->kind.kind == GC_SLOT_LAYOUT ) {
+		w->kind.layout(block,size,gc_arena_copy_visit,NULL);
+		return;
+	}
+	if( w->kind.kind == GC_SLOT_STORAGE ) {
+		hl_type *at = w->kind.at;
+		if( !hl_is_ptr(at) || at->kind == HSTRUCT || at->kind == HPACKED ) return;
+		for(int word=1;word<size / HL_WSIZE;word++) gc_arena_copy_slot_to((void**)block + word,at);
+		return;
+	}
+	hl_type *t = *(hl_type**)block;
+	switch( t->kind ) {
+	case HOBJ: {
+		hl_runtime_obj *rt = t->obj->rt;
+		hl_type *chain[64]; int depth = 0;
+		for(hl_type *c=t;c && depth<64;c=c->obj->super) chain[depth++] = c;
+		int index = 0;
+		for(int d=depth-1;d>=0;d--) {
+			hl_type_obj *o = chain[d]->obj;
+			for(int f=0;f<o->nfields;f++,index++) {
+				hl_type *ft = o->fields[f].t;
+				if( index < rt->nfields && hl_is_ptr(ft) && ft->kind != HPACKED )
+					gc_arena_copy_slot_to((void**)((char*)block + rt->fields_indexes[index]),ft);
 			}
 		}
+		break;
 	}
-	for(;pos<nwords;pos++,block++) {
-		if( mark_bits && (mark_bits[pos >> 5] & (1 << (pos&31))) == 0 ) continue;
-		void *v = *block;
-		if( v ) *block = gc_arena_copy_block(v,oc,target,false);
+	case HENUM: {
+		int index = ((venum*)block)->index;
+		if( index < 0 || index >= t->tenum->nconstructs ) break;
+		hl_enum_construct *c = &t->tenum->constructs[index];
+		for(int p=0;p<c->nparams;p++)
+			if( hl_is_ptr(c->params[p]) && c->params[p]->kind != HPACKED )
+				gc_arena_copy_slot_to((void**)((char*)block + c->offsets[p]),c->params[p]);
+		break;
+	}
+	case HARRAY: {
+		varray *a = (varray*)block;
+		gc_slot_kind k = { GC_SLOT_STORAGE, a->at, NULL };
+		if( a->data ) a->data = (vbyte*)gc_arena_copy_block(a->data,k);
+		break;
+	}
+	case HFUN: {
+		vclosure *c = (vclosure*)block;
+		if( c->hasValue ) gc_arena_copy_slot_to(&c->value,NULL);
+		break;
+	}
+	default:
+		break;
+	}
+}
+
+static void gc_arena_copy_drain( void ) {
+	while( gc_arena_copy_depth > 0 ) {
+		gc_arena_copy_work w = gc_arena_copy_stack[--gc_arena_copy_depth];
+		gc_arena_copy_fields(&w);
 	}
 }
 
@@ -723,22 +875,38 @@ HL_API vdynamic *hl_gc_arena_copy( vdynamic *value, void *arena, void *target ) 
 	// The copies are reachable from nowhere the collector sees until the copy returns.
 	bool active = gc_is_active;
 	gc_is_active = false;
-	gc_arena_copy_count = 0;
-	gc_arena_copy_epoch++;
-	gc_arena_copy_depth = 0;
-	void *result = gc_arena_copy_block(value,oc,target,false);
-	while( gc_arena_copy_depth > 0 )
-		gc_arena_copy_fields((void**)gc_arena_copy_stack[--gc_arena_copy_depth],oc,target);
+	gc_arena_copy_begin(oc,target);
+	gc_slot_kind k = { GC_SLOT_VALUE, NULL, NULL };
+	void *result = gc_arena_copy_block(value,k);
+	gc_arena_copy_drain();
 	gc_is_active = active;
 	return (vdynamic*)result;
 }
 
 /*
-	An evacuating release (hl_gc_arena_set_evacuation): when everything that points into an arena is a slot that holds a
-	pointer by contract (a heap word, a root) and nothing else does (no stack or register word), what those slots reach in
-	the arena is copied out, each to the owner of the page holding its slot (the collector's pages for a root), the slots
-	are rewritten to the copies, and the arena is released. The copies are then the only live version of what they copy,
-	so nothing can tell them from the originals but their address. A stack or register reference keeps the arena as before.
+	The layout of a map of the VM's std library (maps.h): its first four words point to its cell table (bytes), its chain table
+	(inside the cell table), its entries (bytes) and its values (an untyped block every word of which is a pointer: a key or a
+	value). Libraries whose map types are these maps register their abstract names with it.
+*/
+static void gc_arena_pointers_layout( void *block, int size, hl_gc_arena_visit visit, void *ctx ) {
+	for(int word=0;word<size / HL_WSIZE;word++) visit((void**)block + word,NULL,ctx);
+}
+
+HL_API void hl_gc_arena_map_layout( void *block, int size, hl_gc_arena_visit visit, void *ctx ) {
+	(void)size;
+	void **words = (void**)block;
+	visit(&words[0],NULL,ctx);
+	visit(&words[1],NULL,ctx);
+	visit(&words[2],NULL,ctx);
+	visit(&words[3],(void*)gc_arena_pointers_layout,ctx);
+}
+
+/*
+	An evacuating release (hl_gc_arena_set_evacuation): when every reference into an arena is a pointer field of a block
+	outside it, read by that block's layout as hl_gc_arena_copy reads one, what those fields reach is copied out, each to the
+	owner of the page holding the field, the fields are rewritten to the copies, and the arena is released. The copies are
+	then the only live version of what they copy. Any other reference keeps the arena: a word of an untyped block, a root, a
+	stack or register word, a field whose target has no known layout.
 */
 static bool gc_arena_evacuation = false;
 static int64 gc_arena_evacuated = 0, gc_arena_evacuated_bytes = 0;
@@ -756,24 +924,73 @@ HL_API double hl_gc_arena_evacuated_bytes( void ) {
 	return (double)gc_arena_evacuated_bytes;
 }
 
-// Locked, world stopped, after gc_arena_references found only rewritable slots.
+// The static type of the pointer field at `slot` of a typed block, by the block's layout, with `*precise` set; `*precise`
+// false when the slot is a word of an untyped block, which no evacuation may rewrite.
+static gc_slot_kind gc_arena_field_kind( void **slot, bool *precise ) {
+	gc_slot_kind k = { GC_SLOT_VALUE, NULL, NULL };
+	*precise = false;
+	gc_pheader *ph = GC_GET_PAGE(slot);
+	if( !ph || !INPAGE(slot,ph) || ph->page_kind != MEM_KIND_DYNAMIC ) return k;
+	void *start = slot;
+	if( gc_allocator_get_block_interior(ph,&start) < 0 ) return k;
+	hl_type *t = *(hl_type**)start;
+	if( !t || !gc_plausible_type(t) ) return k;
+	int offset = (int)((char*)slot - (char*)start);
+	switch( t->kind ) {
+	case HOBJ: {
+		hl_runtime_obj *rt = t->obj->rt;
+		if( !rt ) return k;
+		hl_type *chain[64]; int depth = 0;
+		for(hl_type *c=t;c && depth<64;c=c->obj->super) chain[depth++] = c;
+		int index = 0;
+		for(int d=depth-1;d>=0;d--) {
+			hl_type_obj *o = chain[d]->obj;
+			for(int f=0;f<o->nfields;f++,index++)
+				if( index < rt->nfields && rt->fields_indexes[index] == offset && hl_is_ptr(o->fields[f].t) && o->fields[f].t->kind != HPACKED ) {
+					*precise = gc_arena_slot_kind_of(o->fields[f].t,&k);
+					return k;
+				}
+		}
+		return k;
+	}
+	case HENUM: {
+		int index = ((venum*)start)->index;
+		if( index < 0 || index >= t->tenum->nconstructs ) return k;
+		hl_enum_construct *c = &t->tenum->constructs[index];
+		for(int p=0;p<c->nparams;p++)
+			if( c->offsets[p] == offset && hl_is_ptr(c->params[p]) && c->params[p]->kind != HPACKED ) {
+				*precise = gc_arena_slot_kind_of(c->params[p],&k);
+				return k;
+			}
+		return k;
+	}
+	case HARRAY:
+		if( t == &hlt_array && offset == (int)offsetof(varray,data) && gc_plausible_type(((varray*)start)->at) ) {
+			k.kind = GC_SLOT_STORAGE;
+			k.at = ((varray*)start)->at;
+			*precise = true;
+		}
+		return k;
+	case HFUN:
+		if( offset == (int)offsetof(vclosure,value) && ((vclosure*)start)->hasValue ) *precise = true;
+		return k;
+	default:
+		return k;
+	}
+}
+
+// Locked, world stopped, after gc_arena_references found only precise fields.
 static void gc_arena_evacuate( int oc ) {
 	bool active = gc_is_active;
 	gc_is_active = false;
-	gc_arena_copy_count = 0;
-	gc_arena_copy_epoch++;
-	gc_arena_copy_depth = 0;
 	int64 before = gc_arena_copy_bytes;
+	gc_arena_copy_begin(oc,NULL);
 	for(int i=0;i<gc_arena_slot_count;i++) {
-		void **slot = gc_arena_slots[i];
-		gc_pheader *ph = GC_GET_PAGE(slot);
-		void *target = ph && INPAGE(slot,ph) ? hl_gc_arena_owner_of(slot) : NULL;
-		if( target == GC_ARENA_GLOBAL ) target = NULL;
-		*slot = gc_arena_copy_block(*slot,oc,target,false);
-		while( gc_arena_copy_depth > 0 ) {
-			void **block = (void**)gc_arena_copy_stack[--gc_arena_copy_depth];
-			gc_arena_copy_fields(block,oc,target);
-		}
+		void **slot = gc_arena_slots[i].slot;
+		void *target = hl_gc_arena_owner_of(slot);
+		gc_arena_copy_target = target == GC_ARENA_GLOBAL ? NULL : target;
+		*slot = gc_arena_copy_block(*slot,gc_arena_slots[i].kind);
+		gc_arena_copy_drain();
 	}
 	gc_is_active = active;
 	gc_arena_evacuated++;

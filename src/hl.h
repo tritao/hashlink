@@ -739,6 +739,16 @@ HL_API void hl_gc_arena_set_home_of( vdynamic *value, void *arena );
 HL_API void *hl_gc_arena_owner( void *home );
 HL_API void *hl_gc_arena_owner_of( void *block );
 HL_API vdynamic *hl_gc_arena_copy( vdynamic *value, void *arena, void *target );
+/*
+	The pointers of an untyped block: a layout visits each word of `block` (of `size` bytes) that holds a pointer, with the
+	layout of the untyped block it points to, or NULL when that block is typed or bytes. Arenas copy and evacuate only along
+	these and typed layouts; a library registers the abstract types whose blocks have one.
+*/
+typedef void (*hl_gc_arena_visit)( void **slot, void *layout, void *ctx ); // layout: an hl_gc_arena_layout, or NULL
+typedef void (*hl_gc_arena_layout)( void *block, int size, hl_gc_arena_visit visit, void *ctx );
+HL_API void hl_gc_arena_register_layout( const uchar *abstract_name, hl_gc_arena_layout layout );
+/* The layout of the std library's maps (maps.h). */
+HL_API void hl_gc_arena_map_layout( void *block, int size, hl_gc_arena_visit visit, void *ctx );
 HL_API void hl_gc_arena_set_evacuation( bool on );
 HL_API double hl_gc_arena_evacuated( void );
 HL_API double hl_gc_arena_evacuated_bytes( void );
