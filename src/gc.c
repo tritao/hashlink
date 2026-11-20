@@ -1821,6 +1821,8 @@ static void count_free_memory( gc_pheader *page, int size ) {
 	gc_stats.free_memory += gc_free_memory(page);
 }
 
+// gc_census.c: the census HL_GC_CENSUS_AT asks for, after a collection's mark.
+static void gc_census_after_mark( int collection );
 static void gc_major() {
 
 	if( gc_flags & GC_PROFILE_MEM ) {
@@ -1860,6 +1862,7 @@ static void gc_major() {
 	MZERO(gc_class_allocations,sizeof(gc_class_allocations));
 	gc_stop_world(true);
 	gc_mark();
+	gc_census_after_mark(gc_stats.mark_count + 1);
 	gc_stop_world(false);
 	dt = TIMESTAMP() - time;
 	gc_stats.mark_count++;
@@ -3461,3 +3464,4 @@ HL_API GC_JIT_COLD vdynamic *hl_jit_box_slow(hl_type *type) {
 }
 
 #undef GC_JIT_COLD
+#include "gc_census.c"
