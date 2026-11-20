@@ -2052,12 +2052,21 @@ static bool gc_block_marked( gc_pheader *ph, int bid ) {
 	return ph->bmp && (ph->bmp[bid>>3] & (1 << (bid&7)));
 }
 
+// Whether a block's first word can be read as a type: a free block, or one a conservative pointer found, may hold anything.
+static bool gc_plausible_type( hl_type *t ) {
+	if( (int_val)t < 65536 || ((int_val)t & (sizeof(void*) - 1)) ) return false;
+	gc_pheader *p = GC_GET_PAGE(t);
+	if( p && INPAGE(t,p) ) return false;
+	return t->kind >= 0 && t->kind < HLAST;
+}
+
 static void *gc_block_type_key( gc_pheader *ph, void *block ) {
 	if( ph->page_kind != MEM_KIND_DYNAMIC ) return (void*)(int_val)(ph->page_kind + 1);
 	hl_type *t = *(hl_type**)block;
+	if( t && !gc_plausible_type(t) ) return (void*)(int_val)1;
 	if( t && t->kind == HARRAY ) {
 		hl_type *at = ((hl_type**)block)[1];
-		return at ? (void*)((int_val)at | 1) : (void*)t;
+		return at && gc_plausible_type(at) ? (void*)((int_val)at | 1) : (void*)t;
 	}
 	return t ? (void*)t : (void*)(int_val)1;
 }
