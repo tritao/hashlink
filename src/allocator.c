@@ -225,6 +225,7 @@ static void flush_emit_run( void *context, int pos, int count ) {
 
 static void flush_free_list( gc_pheader *ph ) {
 	gc_allocator_page_data *p = &ph->alloc;
+	p->released = 0; // a flushed page is about to be allocated from
 
 	int bid = p->first_block;
 	int last = p->max_blocks;
@@ -583,6 +584,7 @@ static bool gc_empty_sweep_slice(double deadline, bool deferred) {
 		if( (!deferred || p->need_flush) && gc_page_is_empty(ph) ) {
 			if( GC_PID_PART(gc_empty_pid-1) != GC_LARGE_PART && ph->page_size <= gc_empty_budget-gc_empty_retained ) {
 				gc_empty_retained += ph->page_size;
+				if( !p->released ) gc_release_page_memory(ph);
 			} else {
 				gc_pheader *next = ph->next_page;
 				*gc_empty_link = next;

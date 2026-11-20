@@ -25,6 +25,8 @@ typedef struct {
 	unsigned char need_flush;
 	short first_block;
 	int max_blocks;
+	// The page's memory went back to the OS while it sat empty; cleared once it is handed out again.
+	unsigned char released;
 	// mutable
 	gc_freelist free;
 	unsigned char *sizes;

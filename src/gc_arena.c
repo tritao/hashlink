@@ -450,6 +450,7 @@ static void gc_arena_pool_put( gc_pheader *ph, int slot ) {
 	}
 	gc_page_detach(ph);
 	gc_allocator_reset_page(ph);
+	gc_release_page_memory(ph);
 	ph->bmp = NULL;
 	ph->next_page = gc_arena_pool[slot];
 	gc_arena_pool[slot] = ph;
@@ -464,6 +465,7 @@ static gc_pheader *gc_arena_pool_take( int pid, int size ) {
 		if( ph->page_size != size ) continue;
 		*link = ph->next_page;
 		ph->next_page = NULL;
+		ph->alloc.released = 0;
 		gc_arena_pool_bytes -= ph->page_size;
 		gc_page_attach(ph);
 		return ph;

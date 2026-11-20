@@ -217,6 +217,7 @@ static void gc_incremental_discard(void);
 
 static gc_pheader *gc_alloc_page( int size, int kind, int block_count );
 static void gc_free_page( gc_pheader *page, int block_count );
+static void gc_release_page_memory( gc_pheader *ph );
 static int64 gc_total_allocated_bytes( void );
 static void gc_page_attach( gc_pheader *ph );
 static void gc_page_detach( gc_pheader *ph );
@@ -2713,6 +2714,29 @@ static void gc_free_page_memory( void *ptr, int size ) {
 	}
 	munmap(ptr,size);
 #endif
+}
+
+// Gives an empty page's memory back to the OS but keeps the mapping, so reusing the page costs page faults and no
+// mmap or page map update. The allocator zeroes or overwrites every block it hands out, and the only metadata in a page's
+// memory, the block sizes, is read on an empty page only to step over free blocks, so the page may come back zeroed, with
+// its old contents, or a mix of both.
+static void gc_release_page_memory( gc_pheader *ph ) {
+#if defined(GC_DEBUG)
+	// Debug builds check that free blocks keep their 0xDD fill.
+	(void)ph;
+#elif defined(HL_WIN)
+	VirtualAlloc(ph->base,ph->page_size,MEM_RESET,PAGE_READWRITE);
+#elif defined(HL_CONSOLE) || defined(HL_EMSCRIPTEN)
+	(void)ph;
+#elif defined(__linux__)
+	// MADV_FREE would leave the pages counted as resident until the system runs short of memory; DONTNEED drops them now.
+	madvise(ph->base,ph->page_size,MADV_DONTNEED);
+#elif defined(MADV_FREE)
+	madvise(ph->base,ph->page_size,MADV_FREE);
+#else
+	posix_madvise(ph->base,ph->page_size,POSIX_MADV_DONTNEED);
+#endif
+	ph->alloc.released = 1;
 }
 
 vdynamic *hl_alloc_dynamic( hl_type *t ) {
