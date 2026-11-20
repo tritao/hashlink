@@ -908,6 +908,9 @@ typedef struct {
 } gc_census_stack;
 
 static bool gc_census_on = false;
+// HL_GC_ARENA_SITES: blocks allocated in arenas record their call stacks (gc_arena.c), through the locked path.
+static bool gc_arena_sites = false;
+static void gc_arena_site_record( void *block, void **frames, int nframes );
 static int gc_census_every = 0;
 static int64 gc_census_budget = 0;
 static unsigned int gc_census_rng = 2463534242u;
@@ -1128,6 +1131,7 @@ HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data) { (void
 #define GC_TLAB_POLICY(X) \
 	X(gc_flags, GC_PROFILE|GC_FORCE_MAJOR, 4) \
 	X(gc_census_on, 1, 1) \
+	X(gc_arena_sites, 1, 1) \
 	X(gc_incremental_active, 1, 1) \
 	X(gc_profile_allocation_callback, ~(uint64)0, sizeof(void*)) \
 	GC_TLAB_TRACK_POLICY(X)
@@ -1397,6 +1401,13 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 #	endif
 	if( gc_incremental_active ) gc_incremental_allocated(ptr);
 	gc_global_lock(false);
+	if( gc_arena_sites && oc > 0 && hl_get_thread() != NULL ) {
+		void *frames[CENSUS_FRAMES + 4];
+		int n = hl_setup.capture_stack ? hl_setup.capture_stack(frames,CENSUS_FRAMES + 4) : 0;
+		gc_global_lock(true);
+		gc_arena_site_record(ptr,frames,n);
+		gc_global_lock(false);
+	}
 	if( census_sample && hl_get_thread() != NULL ) {
 		void *frames[CENSUS_FRAMES + 4];
 		int n = hl_setup.capture_stack ? hl_setup.capture_stack(frames,CENSUS_FRAMES + 4) : 0;
@@ -2182,6 +2193,7 @@ static int gc_owner_release_counting( void *owner ) {
 	return live;
 }
 
+static bool gc_is_active;
 #include "gc_arena.c"
 
 HL_API bool hl_is_gc_ptr( void *ptr ) {
@@ -2310,6 +2322,7 @@ static void hl_gc_init() {
 		gc_flags |= GC_PROFILE_MEM;
 	if( getenv("HL_DUMP_MEMORY") )
 		gc_flags |= GC_DUMP_MEM;
+	gc_arena_sites = getenv("HL_GC_ARENA_SITES") != NULL;
 	// HL_GC_MIN_TRIGGER=<bytes>: the least allocation between two major collections (default 64 MB).
 	const char *min_trigger = getenv("HL_GC_MIN_TRIGGER");
 	if( min_trigger && atoll(min_trigger) >= 0 )
@@ -3363,6 +3376,10 @@ DEFINE_PRIM(_I32, gc_arena_free, _DYN);
 DEFINE_PRIM(_VOID, gc_arena_set_home, _TYPE _DYN);
 DEFINE_PRIM(_DYN, gc_arena_global, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_arena_set_home_of, _DYN _DYN);
+DEFINE_PRIM(_DYN, gc_arena_copy, _DYN _DYN _DYN);
+DEFINE_PRIM(_VOID, gc_arena_set_evacuation, _BOOL);
+DEFINE_PRIM(_F64, gc_arena_evacuated, _NO_ARG);
+DEFINE_PRIM(_F64, gc_arena_evacuated_bytes, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_arena_stats, _REF(_F64) _REF(_F64) _REF(_F64) _REF(_F64));
 DEFINE_PRIM(_F64, gc_get_min_trigger, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_set_live_ratio, _F64);

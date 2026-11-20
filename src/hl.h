@@ -738,6 +738,10 @@ HL_API void *hl_gc_arena_global( void );
 HL_API void hl_gc_arena_set_home_of( vdynamic *value, void *arena );
 HL_API void *hl_gc_arena_owner( void *home );
 HL_API void *hl_gc_arena_owner_of( void *block );
+HL_API vdynamic *hl_gc_arena_copy( vdynamic *value, void *arena, void *target );
+HL_API void hl_gc_arena_set_evacuation( bool on );
+HL_API double hl_gc_arena_evacuated( void );
+HL_API double hl_gc_arena_evacuated_bytes( void );
 
 HL_API bool hl_jit_alloc_supported( void );
 HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data);
