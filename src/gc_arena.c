@@ -334,9 +334,9 @@ static void gc_arena_handover( int oc ) {
 		int to = pid % GC_ALL_PAGES;
 		last->next_page = gc_pages[to];
 		gc_pages[to] = first;
-		// The allocation cursor starts at the list's head again at the next collection; until then the pages are reached
-		// only once it has run out.
-		if( gc_free_pages[to] == NULL ) gc_free_pages[to] = first;
+		// The allocation cursor moves to them, so their free blocks serve the next allocations rather than new pages; the
+		// pages it passed are walked again, quickly, as they have nothing free.
+		gc_free_pages[to] = first;
 		gc_pages[pid] = NULL;
 		gc_free_pages[pid] = NULL;
 	}
