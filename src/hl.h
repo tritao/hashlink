@@ -715,7 +715,7 @@ typedef struct {
 	int tls_offset, slot_offset, block;
 	// the hl_thread_info field holding the slots slot_offset is relative to: gc_tlab, or gc_tlab_unowned for no owner
 	int tlab_field;
-	hl_jit_alloc_guard guards[6];
+	hl_jit_alloc_guard guards[8];
 	int nguards;
 } hl_jit_alloc_data;
 /*
@@ -732,6 +732,10 @@ HL_API int hl_gc_arena_release( void *arena );
 */
 HL_API int hl_gc_arena_free( void *arena );
 HL_API void hl_gc_arena_stats( double *released, double *kept, double *scan_ms, double *check_ms );
+/* Type homes: where a type's objects go whatever arena is current (gc.c). */
+HL_API void hl_gc_arena_set_home( hl_type *t, void *arena );
+HL_API void *hl_gc_arena_global( void );
+HL_API void *hl_gc_arena_owner( void *home );
 
 HL_API bool hl_jit_alloc_supported( void );
 HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data);

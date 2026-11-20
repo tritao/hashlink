@@ -28,7 +28,7 @@ static vbyte *hl_array_alloc_storage( hl_type *at, int capacity ) {
 	 * it like a dynamic array block.  The public data pointer skips that word. */
 	hl_type **storage = (hl_type**)hl_gc_alloc_gen_owner(&hlt_array,
 		sizeof(hl_type*) + (size_t)esize * capacity,
-		(hl_is_ptr(at) ? MEM_KIND_DYNAMIC : MEM_KIND_NOPTR) | MEM_ZERO, at->gc_owner);
+		(hl_is_ptr(at) ? MEM_KIND_DYNAMIC : MEM_KIND_NOPTR) | MEM_ZERO, hl_gc_arena_owner(at->gc_owner));
 	*storage = &hlt_array;
 	return (vbyte*)storage;
 }

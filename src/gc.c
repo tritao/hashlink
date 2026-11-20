@@ -274,6 +274,10 @@ static int gc_tlab_epoch = 0;
 #	define gc_release_fence()
 #endif
 
+// The home of types whose objects never go to the current arena (hl_gc_arena_set_home): the collector's own pages.
+static char gc_arena_global_key;
+#define GC_ARENA_GLOBAL	((void*)&gc_arena_global_key)
+
 // Owner classes. The table is written under the global lock and read without it: an entry only ever says "this owner
 // has this class", the class itself being nothing but static page lists, so a stale read just takes the locked path.
 static void * volatile gc_owner_table[GC_OWNER_CLASSES + 1];
@@ -1176,12 +1180,13 @@ HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data) {
 	// An owner's objects live in the owner's pages, so they use that owner's slots. The class is fixed when the module
 	// registers, before it is compiled. Without a class of its own the type allocates through the helper.
 	int oc = 0;
-	if( type->gc_owner != NULL ) {
+	bool home = type->gc_owner != NULL;
+	if( home && type->gc_owner != GC_ARENA_GLOBAL ) {
 		oc = gc_owner_class_lookup(type->gc_owner);
 		if( oc < 0 ) return false;
 	}
 	// An object of no owner allocates from the thread's unowned slots, which are an arena's while one is current.
-	data->tlab_field = oc == 0 ? (int)offsetof(hl_thread_info,gc_tlab_unowned) : (int)offsetof(hl_thread_info,gc_tlab);
+	data->tlab_field = !home ? (int)offsetof(hl_thread_info,gc_tlab_unowned) : (int)offsetof(hl_thread_info,gc_tlab);
 	data->slot_offset = (oc * GC_TLAB_SLOTS + ((part << PAGE_KIND_BITS) | (rt->hasPtr ? MEM_KIND_DYNAMIC : MEM_KIND_NOPTR))) * sizeof(gc_tlab_slot);
 #define GC_TLAB_GUARD(value, bits, width) \
 	data->guards[data->nguards].address = (void*)&(value); \
@@ -1190,6 +1195,8 @@ HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data) {
 	GC_TLAB_POLICY(GC_TLAB_GUARD)
 	// A pending collection must force a safepoint through the existing slow path.
 	GC_TLAB_GUARD(gc_threads.stopping_world,1,1)
+	// A home given after compilation takes the helper, which reads it.
+	if( !home ) GC_TLAB_GUARD(type->gc_owner,~(uint64)0,sizeof(void*))
 #undef GC_TLAB_GUARD
 	return true;
 #else
@@ -1310,6 +1317,7 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 	int time = 0;
 	int allocated = 0;
 	int census_sample = 0;
+	if( owner == GC_ARENA_GLOBAL ) owner = NULL;
 	if( size == 0 )
 		return NULL;
 	if( size < 0 )
@@ -1419,6 +1427,7 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 
 #ifdef GC_ALLOC_FAST_SUPPORTED
 void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
+	if( owner == GC_ARENA_GLOBAL ) owner = NULL;
 	if( gc_alloc_fast && size > 0 ) {
 		int oc = owner == NULL ? 0 : gc_owner_class_lookup(owner);
 		hl_thread_info *th = oc < 0 ? NULL : gc_tlab_thread(size,flags);
@@ -1443,13 +1452,31 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 #endif
 
 void *hl_gc_alloc_gen( hl_type *t, int size, int flags ) {
-	void *owner = t == NULL ? NULL : t->gc_owner;
-	if( owner == NULL ) {
-		// an object of no owner goes to the thread's current arena, if any
-		hl_thread_info *th = hl_get_thread();
-		if( th ) owner = th->gc_arena;
+	return hl_gc_alloc_gen_owner(t,size,flags,hl_gc_arena_owner(t == NULL ? NULL : t->gc_owner));
+}
+
+/* The owner an allocation of a type with this owner (its home) takes: the home, or the thread's current arena, if any. */
+HL_API void *hl_gc_arena_owner( void *home ) {
+	if( home == NULL ) {
+		hl_thread_info *th = current_thread;
+		if( th ) return th->gc_arena;
 	}
-	return hl_gc_alloc_gen_owner(t,size,flags,owner);
+	return home;
+}
+
+/*
+	Gives a type a home: its objects go to `arena` whatever arena is current, or to the collector's own pages when `arena`
+	is hl_gc_arena_global(); NULL makes them follow the current arena again. Compiled code that allocates the type inline
+	reads its home on every allocation, so a home can be set at any time. A patchable module's types have the module as
+	home, which this replaces.
+*/
+HL_API void hl_gc_arena_set_home( hl_type *t, void *arena ) {
+	if( t == NULL ) return;
+	t->gc_owner = arena;
+}
+
+HL_API void *hl_gc_arena_global( void ) {
+	return GC_ARENA_GLOBAL;
 }
 
 // -------------------------  MARKING ----------------------------------------------------------
@@ -3318,6 +3345,8 @@ DEFINE_PRIM(_DYN, gc_arena_enter, _DYN);
 DEFINE_PRIM(_VOID, gc_arena_leave, _DYN);
 DEFINE_PRIM(_I32, gc_arena_release, _DYN);
 DEFINE_PRIM(_I32, gc_arena_free, _DYN);
+DEFINE_PRIM(_VOID, gc_arena_set_home, _TYPE _DYN);
+DEFINE_PRIM(_DYN, gc_arena_global, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_arena_stats, _REF(_F64) _REF(_F64) _REF(_F64) _REF(_F64));
 DEFINE_PRIM(_F64, gc_get_min_trigger, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_set_live_ratio, _F64);
