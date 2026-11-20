@@ -291,9 +291,6 @@ static bool gc_overflow_warned = false;
 // allocates there again, and the class is given back once its last block dies.
 static char gc_retired_owner_marker;
 #define GC_RETIRED_OWNER	((void*)&gc_retired_owner_marker)
-// The collection count when each class was retired: it can be reused only once a later collection has counted it.
-static int gc_arena_retired_marks[GC_OWNER_CLASSES + 2];
-static int gc_marks_done( void );
 
 // The class of a registered owner, or -1 when this owner has no class of its own (it must register, or is shared).
 static HL_INLINE int gc_owner_class_lookup( void *owner ) {
@@ -325,11 +322,9 @@ static int gc_owner_class_register( void *owner ) {
 			gc_owner_table[i] = owner;
 			return i;
 		}
-	// A retired class gets no new blocks, so its count from a collection after the retirement is current: reuse one
-	// that is empty. An arena released without a collection retires its class before any collection has seen its blocks.
+	// A retired class gets no new blocks, so its count from the last collection is current: reuse one that is empty.
 	for(int i=1;i<=GC_OWNER_CLASSES;i++)
-		if( gc_owner_table[i] == GC_RETIRED_OWNER && gc_arena_retired_marks[i] < gc_marks_done()
-			&& gc_allocator_class_live_blocks(i) == 0 ) {
+		if( gc_owner_table[i] == GC_RETIRED_OWNER && gc_allocator_class_live_blocks(i) == 0 ) {
 			gc_allocator_release_class(i);
 			gc_owner_table[i] = owner;
 			return i;
@@ -380,10 +375,6 @@ static struct {
 
 static int64 gc_total_allocated_bytes( void ) {
 	return gc_stats.total_allocated;
-}
-
-static int gc_marks_done( void ) {
-	return gc_stats.mark_count;
 }
 
 static struct {
@@ -2170,7 +2161,6 @@ static int gc_owner_release_counting( void *owner ) {
 			gc_allocator_release_empty_pages(oc);
 			if( getenv("HL_GC_ARENA_CENSUS") ) fprintf(stderr,"HL arena pages: %.1f MB before release, %.1f MB kept\n",before/1048576.0,gc_class_page_bytes(oc)/1048576.0);
 			gc_owner_table[oc] = GC_RETIRED_OWNER;
-			gc_arena_retired_marks[oc] = gc_stats.mark_count - 1;
 			gc_arena_close(oc);
 		}
 	}

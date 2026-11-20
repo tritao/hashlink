@@ -11,8 +11,8 @@
 
 	When nothing points in, the arena's pages go to a pool that later pages of the same size and kind are taken from, and
 	what the arena allocated no longer counts toward the next collection. When something does, or when writes could not
-	be tracked for the whole life of the arena, its pages are handed to the collector, which frees them as their blocks
-	die. The check is conservative (any word that looks like a pointer into the arena counts), so it can only keep pages
+	be tracked for the whole life of the arena, its pages join the unowned ones, which the collector frees as their blocks
+	die. Either way its owner class is free for the next arena at once. The check is conservative (any word that looks like a pointer into the arena counts), so it can only keep pages
 	that could have been freed, never free a page that is still referenced.
 */
 
@@ -21,11 +21,11 @@ static int64 gc_arena_pool_cap = 256LL << 20;
 static int64 gc_arena_pool_bytes = 0;
 static gc_pheader *gc_arena_pool[GC_ALL_PAGES];
 
-// Per owner class: the log position when it was opened as an arena (-1 when it is not one, or was opened untracked), the
-// tracking generation it was opened in, and the mark count when it was retired without a collection.
+// Per owner class: whether it is an open arena, the log position when it was opened (-1 when opened untracked), and the
+// tracking generation it was opened in.
+static bool gc_arena_opened[GC_PAGE_CLASSES];
 static int64 gc_arena_start[GC_PAGE_CLASSES];
 static uint64 gc_arena_generation[GC_PAGE_CLASSES];
-static int gc_arena_retired_marks[GC_PAGE_CLASSES];
 
 typedef struct { uintptr_t start, end; } gc_arena_range;
 static gc_arena_range *gc_arena_log = NULL;
@@ -41,6 +41,11 @@ static int64 gc_arena_log_len = 0, gc_arena_log_cap = 0, gc_arena_log_base = 0;
 #		include <fcntl.h>
 #		include <unistd.h>
 #	endif
+#endif
+
+// The release entry is a stub that pushes the caller's registers (below), on this target.
+#if defined(__x86_64__) && defined(__GNUC__) && defined(__linux__)
+#	define GC_ARENA_FREE_STUB
 #endif
 
 // 0: not started, 1: every heap page is tracked, -1: unavailable (or failed: no arena can be released without a collection).
@@ -171,16 +176,17 @@ static bool gc_arena_scan( void ) { return false; }
 // Locked. Called when an arena gets an owner class: it is an arena from now on, tracked if the system allows.
 static void gc_arena_open( int oc ) {
 	if( oc <= 0 || oc > GC_OWNER_CLASSES ) return;
+	gc_arena_opened[oc] = true;
 	gc_arena_start[oc] = gc_arena_tracking_start() ? gc_arena_log_base + gc_arena_log_len : -1;
 	gc_arena_generation[oc] = gc_arena_tracking_generation;
 }
 
 // Locked. Forgets the log before the oldest open arena.
 static void gc_arena_close( int oc ) {
-	gc_arena_start[oc] = -1;
+	gc_arena_opened[oc] = false;
 	int64 oldest = gc_arena_log_base + gc_arena_log_len;
 	for(int i=1;i<=GC_OWNER_CLASSES;i++)
-		if( gc_arena_start[i] >= 0 && gc_arena_start[i] < oldest ) oldest = gc_arena_start[i];
+		if( gc_arena_opened[i] && gc_arena_start[i] >= 0 && gc_arena_start[i] < oldest ) oldest = gc_arena_start[i];
 	int64 drop = oldest - gc_arena_log_base;
 	if( drop <= 0 ) return;
 	memmove(gc_arena_log,gc_arena_log + drop,sizeof(gc_arena_range) * (gc_arena_log_len - drop));
@@ -253,8 +259,15 @@ static int gc_arena_references( int oc, hl_thread_info *self, void *self_from ) 
 		found += gc_arena_scan_words(l->values,l->values + l->count,oc,low,high,"pinned",0,false);
 	for(int i=0;i<gc_threads.count;i++) {
 		hl_thread_info *t = gc_threads.threads[i];
-		void *from = t == self && self_from > t->stack_cur ? self_from : t->stack_cur;
-		found += gc_arena_scan_words((void**)from,(void**)t->stack_top,oc,low,high,"stack of thread",i,false);
+		if( t == self ) {
+			found += gc_arena_scan_words((void**)self_from,(void**)t->stack_top,oc,low,high,"stack of thread",i,false);
+#			ifdef GC_ARENA_FREE_STUB
+			// The entry pushed the caller's callee-saved registers on the stack read above: what the registers hold
+			// since is the release's own work, not the program's.
+			continue;
+#			endif
+		} else
+			found += gc_arena_scan_words((void**)t->stack_cur,(void**)t->stack_top,oc,low,high,"stack of thread",i,false);
 		found += gc_arena_scan_words((void**)&t->gc_regs,(void**)&t->gc_regs + (sizeof(jmp_buf) / sizeof(void*)),oc,low,high,"registers of thread",i,false);
 		found += gc_arena_scan_words((void**)&t->extra_stack_data,(void**)&t->extra_stack_data + t->extra_stack_size,oc,low,high,"saved registers of thread",i,false);
 	}
@@ -306,15 +319,41 @@ static void gc_arena_recycle( int oc ) {
 	}
 }
 
+// Locked, world stopped. Moves every page of class `oc` to the unowned class, where the collector frees its blocks as they
+// die like any other's, and empties the class for the next arena.
+static void gc_arena_handover( int oc ) {
+	gc_empty_sweep_cancel();
+	for(int pid=oc*GC_ALL_PAGES;pid<(oc+1)*GC_ALL_PAGES;pid++) {
+		gc_pheader *first = gc_pages[pid];
+		if( first == NULL ) continue;
+		gc_pheader *last = first;
+		for(gc_pheader *ph=first;ph;ph=ph->next_page) {
+			ph->owner_class = 0;
+			last = ph;
+		}
+		int to = pid % GC_ALL_PAGES;
+		last->next_page = gc_pages[to];
+		gc_pages[to] = first;
+		// The allocation cursor starts at the list's head again at the next collection; until then the pages are reached
+		// only once it has run out.
+		if( gc_free_pages[to] == NULL ) gc_free_pages[to] = first;
+		gc_pages[pid] = NULL;
+		gc_free_pages[pid] = NULL;
+	}
+}
+
 /*
 	Releases `arena` without collecting. Returns 0 when nothing outside it pointed into it: its pages are reused at once
-	and what it allocated no longer counts toward the next collection. Otherwise its pages are handed to the collector,
-	which frees them as their blocks die, and it returns the number of references found, or -1 when the writes made
+	and what it allocated no longer counts toward the next collection. Otherwise its pages join the unowned ones, which
+	the collector frees as their blocks die, and it returns the number of references found, or -1 when the writes made
 	while it was open could not all be tracked (the system has no write tracking, or it was opened before tracking
 	started). No thread may still have the arena current. With HL_GC_ARENA_CENSUS set, the first references found are
 	printed, by holder.
 */
-HL_API int hl_gc_arena_free( void *arena ) {
+#ifdef GC_ARENA_FREE_STUB
+__attribute__((visibility("hidden"),used,noinline))
+#endif
+int gc_arena_free_from( void *arena, void *stack_from ) {
 	if( arena == NULL ) return 0;
 	hl_thread_info *self = hl_get_thread();
 	gc_global_lock(true);
@@ -333,12 +372,8 @@ HL_API int hl_gc_arena_free( void *arena ) {
 	}
 	double started = hl_sys_time();
 	gc_stop_world(true);
-	// This thread's stack is read from this frame up: the frames below it, where the world was stopped, are reused by the
-	// calls that check, whose locals (the pages scanned, the arena's bounds) would read as references. Every value of the
-	// callers is above this frame, in a register saved when the world stopped, or in the frames copied then.
-	void * volatile anchor = NULL;
 	int found = -1;
-	bool tracked = gc_arena_tracking > 0 && gc_arena_start[oc] >= 0
+	bool tracked = gc_arena_tracking > 0 && gc_arena_opened[oc] && gc_arena_start[oc] >= 0
 		&& gc_arena_generation[oc] == gc_arena_tracking_generation && !gc_incremental_active && !gc_inc_reclaiming;
 	for(int i=0;i<gc_threads.count;i++)
 		if( gc_threads.threads[i]->gc_arena == arena ) {
@@ -356,7 +391,7 @@ HL_API int hl_gc_arena_free( void *arena ) {
 			static int report = -1;
 			if( report < 0 ) report = getenv("HL_GC_ARENA_CENSUS") != NULL;
 			gc_arena_report_left = report ? 16 : 0;
-			found = gc_arena_references(oc,self,(void*)((uintptr_t)&anchor & ~(uintptr_t)(sizeof(void*) - 1)));
+			found = gc_arena_references(oc,self,stack_from);
 			gc_arena_check_ms += (hl_sys_time() - scanned) * 1000.0;
 		}
 	}
@@ -368,8 +403,8 @@ HL_API int hl_gc_arena_free( void *arena ) {
 		gc_stats.last_mark_allocs += gc_class_allocations[oc];
 		gc_arena_released++;
 	} else {
-		gc_owner_table[oc] = GC_RETIRED_OWNER;
-		gc_arena_retired_marks[oc] = gc_stats.mark_count;
+		gc_arena_handover(oc);
+		gc_owner_table[oc] = NULL;
 		gc_arena_kept++;
 	}
 	gc_class_allocated[oc] = 0;
@@ -388,3 +423,31 @@ HL_API void hl_gc_arena_stats( double *released, double *kept, double *scan_ms, 
 	*scan_ms = gc_arena_scan_ms;
 	*check_ms = gc_arena_check_ms;
 }
+
+/*
+	The entry: this thread's stack is read from the caller's frame up, with the caller's callee-saved registers pushed just
+	below it. Frames made after the arena's work returned (this call's, and the checker's) reuse the stack that work used,
+	and their slots not yet written still hold its values, which would read as references into the arena.
+*/
+#ifdef GC_ARENA_FREE_STUB
+__asm__(
+	".text\n"
+	".globl hl_gc_arena_free\n"
+	".type hl_gc_arena_free,@function\n"
+	"hl_gc_arena_free:\n"
+	"	push %rbx\n	push %rbp\n	push %r12\n	push %r13\n	push %r14\n	push %r15\n"
+	"	mov %rsp,%rsi\n"
+	"	sub $8,%rsp\n"
+	"	call gc_arena_free_from\n"
+	"	add $8,%rsp\n"
+	"	pop %r15\n	pop %r14\n	pop %r13\n	pop %r12\n	pop %rbp\n	pop %rbx\n"
+	"	ret\n"
+	".size hl_gc_arena_free,.-hl_gc_arena_free\n"
+);
+#else
+// Elsewhere the stack is read from this frame up: its unwritten slots may still keep an arena (a false reference).
+HL_API int hl_gc_arena_free( void *arena ) {
+	void * volatile anchor = NULL;
+	return gc_arena_free_from(arena,(void*)((uintptr_t)&anchor & ~(uintptr_t)(sizeof(void*) - 1)));
+}
+#endif
