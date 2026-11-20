@@ -719,13 +719,13 @@ typedef struct {
 	int nguards;
 } hl_jit_alloc_data;
 /*
-	Allocation groups: while a group is current on a thread, everything the thread allocates that has no owner of its own
-	goes to the group's pages. Releasing a group collects and returns how many of its blocks are still live: zero when
-	everything it allocated is dead, when its pages go back. A group is identified by any pointer its user keeps alive.
+	Arenas: while an arena is current on a thread, everything the thread allocates that has no owner of its own
+	goes to the arena's pages. Releasing an arena collects and returns how many of its blocks are still live: zero when
+	everything it allocated is dead, when its pages go back. An arena is identified by any pointer its user keeps alive.
 */
-HL_API void *hl_gc_group_enter( void *group );
-HL_API void hl_gc_group_leave( void *previous );
-HL_API int hl_gc_group_release( void *group );
+HL_API void *hl_gc_arena_enter( void *arena );
+HL_API void hl_gc_arena_leave( void *previous );
+HL_API int hl_gc_arena_release( void *arena );
 
 HL_API bool hl_jit_alloc_supported( void );
 HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data);
@@ -1198,9 +1198,9 @@ typedef struct {
 	pthread_t pthread_id;
 	#endif
 	hl_cleanup_trap_ctx *cleanup_trap;
-	// The allocation group current on this thread (hl_gc_group_enter), or NULL, and the allocation slots that objects
-	// of no owner take: gc_tlab's own, or the group's while one is current. Compiled code reads the second.
-	void *gc_group;
+	// The arena current on this thread (hl_gc_arena_enter), or NULL, and the allocation slots that objects
+	// of no owner take: gc_tlab's own, or the arena's while one is current. Compiled code reads the second.
+	void *gc_arena;
 	void *gc_tlab_unowned;
 } hl_thread_info;
 

@@ -1152,7 +1152,7 @@ HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data) {
 		oc = gc_owner_class_lookup(type->gc_owner);
 		if( oc < 0 ) return false;
 	}
-	// An object of no owner allocates from the thread's unowned slots, which are a group's while one is current.
+	// An object of no owner allocates from the thread's unowned slots, which are an arena's while one is current.
 	data->tlab_field = oc == 0 ? (int)offsetof(hl_thread_info,gc_tlab_unowned) : (int)offsetof(hl_thread_info,gc_tlab);
 	data->slot_offset = (oc * GC_TLAB_SLOTS + ((part << PAGE_KIND_BITS) | (rt->hasPtr ? MEM_KIND_DYNAMIC : MEM_KIND_NOPTR))) * sizeof(gc_tlab_slot);
 #define GC_TLAB_GUARD(value, bits, width) \
@@ -1406,9 +1406,9 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 void *hl_gc_alloc_gen( hl_type *t, int size, int flags ) {
 	void *owner = t == NULL ? NULL : t->gc_owner;
 	if( owner == NULL ) {
-		// an object of no owner goes to the thread's current allocation group, if any
+		// an object of no owner goes to the thread's current arena, if any
 		hl_thread_info *th = hl_get_thread();
-		if( th ) owner = th->gc_group;
+		if( th ) owner = th->gc_arena;
 	}
 	return hl_gc_alloc_gen_owner(t,size,flags,owner);
 }
@@ -1874,44 +1874,44 @@ HL_API void hl_gc_owner_release( void *owner ) {
 	gc_owner_release_counting(owner);
 }
 
-/* Makes `group` the current allocation group of this thread (NULL for none) and returns the one it replaces. */
-HL_API void *hl_gc_group_enter( void *group ) {
+/* Makes `arena` the current arena of this thread (NULL for none) and returns the one it replaces. */
+HL_API void *hl_gc_arena_enter( void *arena ) {
 	hl_thread_info *th = hl_get_thread();
-	if( th == NULL ) hl_fatal("Allocation group entered on an unregistered thread");
-	void *previous = th->gc_group;
+	if( th == NULL ) hl_fatal("Arena entered on an unregistered thread");
+	void *previous = th->gc_arena;
 	int oc = 0;
-	if( group ) {
-		oc = gc_owner_class_lookup(group);
+	if( arena ) {
+		oc = gc_owner_class_lookup(arena);
 		if( oc < 0 ) {
 			gc_global_lock(true);
-			oc = gc_owner_class_register(group);
+			oc = gc_owner_class_register(arena);
 			gc_global_lock(false);
 		}
 	}
-	th->gc_group = group;
+	th->gc_arena = arena;
 #	ifdef GC_TLAB
 	if( th->gc_tlab ) th->gc_tlab_unowned = (gc_tlab_slot*)th->gc_tlab + oc * GC_TLAB_SLOTS;
 #	endif
 	return previous;
 }
 
-/* Restores the group `hl_gc_group_enter` replaced. */
-HL_API void hl_gc_group_leave( void *previous ) {
-	hl_gc_group_enter(previous);
+/* Restores the arena `hl_gc_arena_enter` replaced. */
+HL_API void hl_gc_arena_leave( void *previous ) {
+	hl_gc_arena_enter(previous);
 }
 
 /*
-	Releases `group`: collects, then gives its pages back when none of its blocks is live, and returns how many are, which
-	is what escaped the group. Pages that still hold a live block stay until it dies. No thread may still have it current.
+	Releases `arena`: collects, then gives its pages back when none of its blocks is live, and returns how many are, which
+	is what escaped the arena. Pages that still hold a live block stay until it dies. No thread may still have it current.
 */
-HL_API int hl_gc_group_release( void *group ) {
-	if( group == NULL ) return 0;
-	return gc_owner_release_counting(group);
+HL_API int hl_gc_arena_release( void *arena ) {
+	if( arena == NULL ) return 0;
+	return gc_owner_release_counting(arena);
 }
 
 /*
-	With HL_GC_REGION_CENSUS set, a release that leaves blocks behind prints them by type to stderr: what escaped a
-	region, so the reference holding them can be found. Typed blocks are named by their type, others by their kind.
+	With HL_GC_ARENA_CENSUS set, a release that leaves blocks behind prints them by type to stderr: what escaped an
+	arena, so the reference holding them can be found. Typed blocks are named by their type, others by their kind.
 */
 typedef struct { void *key; int64 count; int64 bytes; } gc_escape_entry;
 
@@ -1924,7 +1924,7 @@ static int64 gc_class_page_bytes( int oc ) {
 
 static void gc_escape_census( int oc ) {
 	static int enabled = -1;
-	if( enabled < 0 ) enabled = getenv("HL_GC_REGION_CENSUS") != NULL;
+	if( enabled < 0 ) enabled = getenv("HL_GC_ARENA_CENSUS") != NULL;
 	if( !enabled ) return;
 	int cap = 8192, used = 0;
 	gc_escape_entry *entries = (gc_escape_entry*)calloc(cap,sizeof(gc_escape_entry));
@@ -1959,14 +1959,14 @@ static void gc_escape_census( int oc ) {
 	for(int i=0;i<used && i<40;i++) {
 		int_val k = (int_val)entries[i].key;
 		const char *name = k >= 1 && k <= 4 ? kinds[k-1] : hl_to_utf8(hl_type_str((hl_type*)entries[i].key));
-		fprintf(stderr,"HL region escape: %10lld blocks %10lld bytes %s\n",(long long)entries[i].count,(long long)entries[i].bytes,name);
+		fprintf(stderr,"HL arena escape: %10lld blocks %10lld bytes %s\n",(long long)entries[i].count,(long long)entries[i].bytes,name);
 	}
 	free(entries);
 }
 
 /*
-	With HL_GC_REGION_HOLDERS set as well, it also prints which live blocks outside the region point into its live blocks, by
-	holder and target type: the references that keep the region alive (roots such as globals and stacks are not counted).
+	With HL_GC_ARENA_HOLDERS set as well, it also prints which live blocks outside the arena point into its live blocks, by
+	holder and target type: the references that keep the arena alive (roots such as globals and stacks are not counted).
 */
 typedef struct { void *holder; void *target; int64 count; } gc_holder_entry;
 
@@ -1998,7 +1998,7 @@ static void gc_type_key_name( void *key, char *out, int size ) {
 }
 
 static void gc_holder_census( int oc ) {
-	if( getenv("HL_GC_REGION_HOLDERS") == NULL ) return;
+	if( getenv("HL_GC_ARENA_HOLDERS") == NULL ) return;
 	int npages = 0, cap = 1024;
 	void **pages = (void**)malloc(cap * sizeof(void*));
 	for(int pid=oc*GC_ALL_PAGES;pid<(oc+1)*GC_ALL_PAGES;pid++)
@@ -2047,7 +2047,7 @@ static void gc_holder_census( int oc ) {
 	for(int i=0;i<used && i<40;i++) {
 		gc_type_key_name(entries[i].holder,h,sizeof(h));
 		gc_type_key_name(entries[i].target,t,sizeof(t));
-		fprintf(stderr,"HL region holder: %10lld  %s  ->  %s\n",(long long)entries[i].count,h,t);
+		fprintf(stderr,"HL arena holder: %10lld  %s  ->  %s\n",(long long)entries[i].count,h,t);
 	}
 	free(entries);
 	free(pages);
@@ -2085,7 +2085,7 @@ static int gc_owner_release_counting( void *owner ) {
 			// The pages holding what escaped stay until it dies; the rest go now.
 			int64 before = gc_class_page_bytes(oc);
 			gc_allocator_release_empty_pages(oc);
-			if( getenv("HL_GC_REGION_CENSUS") ) fprintf(stderr,"HL region pages: %.1f MB before release, %.1f MB kept\n",before/1048576.0,gc_class_page_bytes(oc)/1048576.0);
+			if( getenv("HL_GC_ARENA_CENSUS") ) fprintf(stderr,"HL arena pages: %.1f MB before release, %.1f MB kept\n",before/1048576.0,gc_class_page_bytes(oc)/1048576.0);
 			gc_owner_table[oc] = GC_RETIRED_OWNER;
 		}
 	}
@@ -3265,9 +3265,9 @@ DEFINE_PRIM(_F64, gc_heap_bytes, _NO_ARG);
 DEFINE_PRIM(_F64, gc_allocated_since_collection, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_set_mark_threshold, _F64);
 DEFINE_PRIM(_VOID, gc_set_min_trigger, _F64);
-DEFINE_PRIM(_DYN, gc_group_enter, _DYN);
-DEFINE_PRIM(_VOID, gc_group_leave, _DYN);
-DEFINE_PRIM(_I32, gc_group_release, _DYN);
+DEFINE_PRIM(_DYN, gc_arena_enter, _DYN);
+DEFINE_PRIM(_VOID, gc_arena_leave, _DYN);
+DEFINE_PRIM(_I32, gc_arena_release, _DYN);
 DEFINE_PRIM(_F64, gc_get_min_trigger, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_set_live_ratio, _F64);
 DEFINE_PRIM(_F64, gc_get_live_ratio, _NO_ARG);
