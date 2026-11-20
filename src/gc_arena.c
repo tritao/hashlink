@@ -753,6 +753,8 @@ static void *gc_arena_copy_block( void *value, gc_slot_kind kind ) {
 			if( !t->obj->rt ) return value;
 		} else if( t->kind == HARRAY ) {
 			if( t != &hlt_array || !gc_plausible_type(((varray*)start)->at) ) return value;
+		} else if( t->kind == HABSTRACT ) {
+			if( !gc_arena_layout_of(t) ) return value; // a box of an abstract value: copied only when its layout is known
 		} else if( t->kind != HENUM && t->kind != HFUN && !gc_arena_scalar_box(t) )
 			return value;
 		break;
@@ -846,6 +848,13 @@ static void gc_arena_copy_fields( gc_arena_copy_work *w ) {
 	case HFUN: {
 		vclosure *c = (vclosure*)block;
 		if( c->hasValue ) gc_arena_copy_slot_to(&c->value,NULL);
+		break;
+	}
+	case HABSTRACT: {
+		// A Dynamic holding an abstract value (a map stored in a table of references): the value has the abstract's layout.
+		gc_slot_kind k = { GC_SLOT_LAYOUT, NULL, gc_arena_layout_of(t) };
+		vdynamic *box = (vdynamic*)block;
+		if( k.layout && box->v.ptr ) box->v.ptr = gc_arena_copy_block(box->v.ptr,k);
 		break;
 	}
 	default:
@@ -973,6 +982,12 @@ static gc_slot_kind gc_arena_field_kind( void **slot, bool *precise ) {
 		return k;
 	case HFUN:
 		if( offset == (int)offsetof(vclosure,value) && ((vclosure*)start)->hasValue ) *precise = true;
+		return k;
+	case HABSTRACT:
+		if( offset == (int)offsetof(vdynamic,v) && (k.layout = gc_arena_layout_of(t)) != NULL ) {
+			k.kind = GC_SLOT_LAYOUT;
+			*precise = true;
+		}
 		return k;
 	default:
 		return k;
