@@ -333,6 +333,27 @@ static HL_INLINE bool gc_arena_points_in( void *value, int oc, uintptr_t low, ui
 	return ph && INPAGE(value,ph) && ph->owner_class == oc;
 }
 
+// Whether the heap word `slot` is one the collector reads as a pointer: a pointer field of a typed block (by its layout), or
+// any word of an untyped one. A typed block's integer or float that happens to spell an address is no reference, and must
+// not be rewritten by an evacuation.
+static bool gc_arena_pointer_word( void **slot ) {
+	gc_pheader *ph = GC_GET_PAGE(slot);
+	if( !ph || !INPAGE(slot,ph) || ph->page_kind != MEM_KIND_DYNAMIC ) return true;
+	void *start = slot;
+	if( gc_allocator_get_block_interior(ph,&start) < 0 ) return true;
+	hl_type *t = *(hl_type**)start;
+	if( !t || !gc_plausible_type(t) || !t->mark_bits || t->kind == HFUN ) return true;
+	int pos = (int)((void**)slot - (void**)start);
+	unsigned int *mark_bits = t->mark_bits;
+	if( t->kind == HENUM ) {
+		if( pos < 2 ) return false;
+		mark_bits += ((venum*)start)->index;
+		pos -= 2;
+	} else if( pos == 0 )
+		return false;
+	return (mark_bits[pos >> 5] & (1 << (pos&31))) != 0;
+}
+
 // The slots found pointing into the arena that hold a pointer by contract (heap words, roots), which an evacuation may
 // rewrite, and how many were found that cannot be (a stack or register word may be an integer).
 static void ***gc_arena_slots = NULL;
@@ -342,6 +363,7 @@ static int gc_arena_scan_words( void **from, void **to, int oc, uintptr_t low, u
 	int found = 0;
 	for(void **p=from;p<to;p++)
 		if( gc_arena_points_in(*p,oc,low,high) ) {
+			if( holders && !gc_arena_pointer_word(p) ) continue;
 			found++;
 			gc_arena_report(oc,where,index,holders ? (void*)p : NULL,*p);
 			if( !rewritable ) {
