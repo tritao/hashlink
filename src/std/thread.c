@@ -108,10 +108,13 @@ struct _hl_condition {
 	pthread_cond_t cond;
 };
 
+typedef struct _tls_store tls_store;
+
 struct _hl_tls {
 	void (*free)( hl_tls * );
 	pthread_key_t key;
 	bool gc;
+	tls_store *stores; // every thread's store, for letting go of them when the key is deleted
 };
 
 #endif
@@ -496,10 +499,18 @@ static void _tls_set( hl_tls *t, void *store ) {
 	has left the GC, so it cannot remove the root: it clears it and keeps the store on a free list that
 	the next store allocation reuses. The free list's lock is not the GC's, so it is safe there too.
 */
+#ifdef HL_WIN
 typedef struct _tls_store tls_store;
+#endif
 struct _tls_store {
 	void *value; // the GC root
 	tls_store *next;
+#	ifndef HL_WIN
+	// pthread_key_delete runs no destructor, so the key keeps its stores to clear them itself.
+	hl_tls *owner;
+	tls_store *owner_prev;
+	tls_store *owner_next;
+#	endif
 };
 static tls_store *tls_free_stores = NULL;
 #ifdef HL_WIN
@@ -512,10 +523,21 @@ static pthread_mutex_t tls_free_lock = PTHREAD_MUTEX_INITIALIZER;
 #	define tls_free_release() pthread_mutex_unlock(&tls_free_lock)
 #endif
 
+#ifndef HL_WIN
+static void tls_store_unlink( tls_store *s ) {
+	if( s->owner_prev ) s->owner_prev->owner_next = s->owner_next; else s->owner->stores = s->owner_next;
+	if( s->owner_next ) s->owner_next->owner_prev = s->owner_prev;
+	s->owner = NULL;
+}
+#endif
+
 static void tls_store_release( void *ptr ) {
 	tls_store *s = (tls_store*)ptr;
 	s->value = NULL;
 	tls_free_acquire();
+#	ifndef HL_WIN
+	if( s->owner ) tls_store_unlink(s);
+#	endif
 	s->next = tls_free_stores;
 	tls_free_stores = s;
 	tls_free_release();
@@ -528,7 +550,7 @@ static void WINAPI tls_store_release_fls( void *ptr ) {
 }
 #endif
 
-static void **tls_store_alloc() {
+static void **tls_store_alloc( hl_tls *l ) {
 	tls_free_acquire();
 	tls_store *s = tls_free_stores;
 	if( s ) tls_free_stores = s->next;
@@ -538,8 +560,36 @@ static void **tls_store_alloc() {
 		s->value = NULL;
 		hl_add_root(&s->value);
 	}
+#	ifndef HL_WIN
+	tls_free_acquire();
+	s->owner = l;
+	s->owner_prev = NULL;
+	s->owner_next = l->stores;
+	if( l->stores ) l->stores->owner_prev = s;
+	l->stores = s;
+	tls_free_release();
+#	endif
 	return &s->value;
 }
+
+#ifndef HL_WIN
+/*
+	Lets go of every thread's value for a key being deleted. A store stays out of the free list: a thread
+	that is ending may be in the destructor for it, which then puts it on the free list.
+*/
+static void tls_release_stores( hl_tls *l ) {
+	tls_free_acquire();
+	tls_store *s = l->stores;
+	while( s ) {
+		tls_store *next = s->owner_next;
+		s->value = NULL;
+		s->owner = NULL;
+		s = next;
+	}
+	l->stores = NULL;
+	tls_free_release();
+}
+#endif
 #endif
 
 HL_PRIM hl_tls *hl_tls_alloc( bool gc_value ) {
@@ -565,6 +615,7 @@ HL_PRIM hl_tls *hl_tls_alloc( bool gc_value ) {
 	hl_tls *l = (hl_tls*)hl_gc_alloc_finalizer(sizeof(hl_tls));
 	l->free = hl_tls_free;
 	l->gc = gc_value;
+	l->stores = NULL;
 	pthread_key_create(&l->key,gc_value ? tls_store_release : NULL);
 	return l;
 #	endif
@@ -581,6 +632,7 @@ HL_PRIM void hl_tls_free( hl_tls *l ) {
 #	else
 	if( l->free ) {
 		pthread_key_delete(l->key);
+		if( l->gc ) tls_release_stores(l);
 		l->free = NULL;
 	}
 #	endif
@@ -595,7 +647,7 @@ HL_PRIM void hl_tls_set( hl_tls *l, void *v ) {
 		if( !store) {
 			if( !v )
 				return;
-			store = tls_store_alloc();
+			store = tls_store_alloc(l);
 			_tls_set(l, store);
 		} else {
 			if( !v ) {
