@@ -47,16 +47,6 @@ void hl_jit_error( const char *msg, const char *func, int line ) {
 	fflush(stdout);
 }
 
-void hl_jit_null_field_access( int fhash ) {
-	vbyte *field = hl_field_name(fhash);
-	hl_buffer *b = hl_alloc_buffer();
-	hl_buffer_str(b, USTR("Null access ."));
-	hl_buffer_str(b, (uchar*)field);
-	vdynamic *d = hl_alloc_dynamic(&hlt_bytes);
-	d->v.ptr = hl_buffer_content(b,NULL);
-	hl_throw(d);
-}
-
 void hl_jit_assert() {
 	vdynamic *d = hl_alloc_dynamic(&hlt_bytes);
 	d->v.ptr = USTR("Assert");

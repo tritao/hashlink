@@ -7,6 +7,8 @@
 #   HL_LIBHL_SOURCES   libhl: the GC, the profiler, number formatting and the standard library natives for this platform
 #   HL_VM_SOURCES      the VM, less main.c: the bytecode loader, patching, the debugger, diagnostics and the profiler
 #   HL_JIT_SOURCES     the JIT for this processor
+#   HL_NO_JIT_SOURCES  in place of HL_JIT_SOURCES, the JIT's entry points for a VM without it, whose modules were compiled
+#                      ahead of time (hl_module_init_aot)
 
 set(_hl_root "${CMAKE_CURRENT_LIST_DIR}/..")
 get_filename_component(_hl_root "${_hl_root}" ABSOLUTE)
@@ -64,3 +66,5 @@ endif()
 foreach(_source IN ITEMS jit.c jit_emit.c jit_regs.c ${_hl_jit_backend} jit_dump.c jit_gdb.c)
     list(APPEND HL_JIT_SOURCES "${_hl_root}/src/${_source}")
 endforeach()
+
+set(HL_NO_JIT_SOURCES "${_hl_root}/src/jit_none.c")

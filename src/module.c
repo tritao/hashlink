@@ -1427,6 +1427,17 @@ int hl_module_init( hl_module *m, int flags ) {
 	return 1;
 }
 
+/* The error of a null object's field access in compiled code, the JIT's or code compiled ahead of time. */
+void hl_jit_null_field_access( int fhash ) {
+	vbyte *field = hl_field_name(fhash);
+	hl_buffer *b = hl_alloc_buffer();
+	hl_buffer_str(b, USTR("Null access ."));
+	hl_buffer_str(b, (uchar*)field);
+	vdynamic *d = hl_alloc_dynamic(&hlt_bytes);
+	d->v.ptr = hl_buffer_content(b,NULL);
+	hl_throw(d);
+}
+
 /*
 	Initializes a module whose functions were compiled ahead of time: `functions[findex]` is the code of each function of the
 	module, as the JIT would have made it. Nothing is compiled; the module is otherwise initialized as `hl_module_init` does
