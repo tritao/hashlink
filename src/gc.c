@@ -3401,6 +3401,7 @@ DEFINE_PRIM(_DYN, gc_arena_enter, _DYN);
 DEFINE_PRIM(_VOID, gc_arena_leave, _DYN);
 DEFINE_PRIM(_I32, gc_arena_release, _DYN);
 DEFINE_PRIM(_I32, gc_arena_free, _DYN);
+DEFINE_PRIM(_BOOL, gc_arena_tracking_available, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_arena_set_home, _TYPE _DYN);
 DEFINE_PRIM(_DYN, gc_arena_global, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_arena_set_home_of, _DYN _DYN);

@@ -598,6 +598,15 @@ HL_API void hl_gc_arena_stats( double *released, double *kept, double *scan_ms, 
 	*check_ms = gc_arena_check_ms;
 }
 
+/* Whether releases are checked (hl_gc_arena_free can return 0): the system tracks writes, HL_GC_ARENA_TRACKING is not 0
+   and the incremental collector is off. Starts tracking as opening the first arena would; false once tracking failed. */
+HL_API bool hl_gc_arena_tracking_available( void ) {
+	gc_global_lock(true);
+	bool available = gc_arena_tracking_start();
+	gc_global_lock(false);
+	return available;
+}
+
 /*
 	The entry: this thread's stack is read from the caller's frame up, with the caller's callee-saved registers pushed just
 	below it. Frames made after the arena's work returned (this call's, and the checker's) reuse the stack that work used,

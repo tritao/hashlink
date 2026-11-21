@@ -731,6 +731,7 @@ HL_API int hl_gc_arena_release( void *arena );
 	once, otherwise the references found (or -1 when its writes could not be tracked) and its pages are left to the collector.
 */
 HL_API int hl_gc_arena_free( void *arena );
+HL_API bool hl_gc_arena_tracking_available( void );
 HL_API void hl_gc_arena_stats( double *released, double *kept, double *scan_ms, double *check_ms );
 /* Type homes: where a type's objects go whatever arena is current (gc.c). */
 HL_API void hl_gc_arena_set_home( hl_type *t, void *arena );
