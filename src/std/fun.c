@@ -114,7 +114,8 @@ HL_PRIM bool hl_fun_compare( vdynamic *a, vdynamic *b ) {
 
 // ------------ DYNAMIC CALLS
 
-#define HL_MAX_ARGS 9
+// The most arguments a dynamic call passes: the JIT's limit (MAX_ARGS in jit.h), which its static call checks too.
+#define HL_MAX_ARGS 16
 
 HL_PRIM vdynamic* hl_call_method( vdynamic *c, varray *args ) {
 	vclosure *cl = (vclosure*)c;
@@ -251,6 +252,9 @@ HL_PRIM void *hl_wrapper_call( void *_c, void **args, vdynamic *ret ) {
 	void *pret, *aret;
 	if( ret == NULL )
 		ret = &out;
+	// The arguments go through tmp and vargs, which hold HL_MAX_ARGS (and the closure's value).
+	if( tfun->nargs > HL_MAX_ARGS || (w->fun != fun_var_args && w->t->fun->nargs > HL_MAX_ARGS) )
+		hl_error("Too many arguments for wrapped call");
 	if( w->fun == fun_var_args ) {
 		varray *a;
 		w = (vclosure*)w->value; // the real callback

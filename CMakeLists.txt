@@ -300,6 +300,20 @@ if(BUILD_TESTING)
     )
 
     #####################
+    # wrapper_call_args.hl
+
+    add_custom_command(OUTPUT ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/wrapper_call_args.hl
+        COMMAND ${HAXE_COMPILER}
+            ${HAXE_HL_FLAGS}
+            -hl ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/wrapper_call_args.hl
+            -cp ${CMAKE_SOURCE_DIR}/other/tests -main WrapperCallArgs
+        DEPENDS ${CMAKE_SOURCE_DIR}/other/tests/WrapperCallArgs.hx
+    )
+    add_custom_target(wrapper_call_args.hl ALL
+        DEPENDS ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/wrapper_call_args.hl
+    )
+
+    #####################
     # threads.hl
 
     add_custom_command(OUTPUT ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/threads.hl
@@ -423,6 +437,9 @@ if(BUILD_TESTING)
 
         add_test(NAME hello.hl
             COMMAND hl ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/hello.hl
+        )
+        add_test(NAME wrapper_call_args.hl
+            COMMAND hl ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/wrapper_call_args.hl
         )
         add_test(NAME threads.hl
             COMMAND hl ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test/threads.hl
