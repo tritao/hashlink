@@ -184,10 +184,14 @@
 #	endif
 #endif
 
-#ifdef HL_WIN
-#	define HL_IMPORT __declspec( dllimport )
-#else
-#	define HL_IMPORT extern
+/* A program that links libhl statically on Windows (an executable compiled ahead of time) defines HL_IMPORT as extern: its
+   references to libhl are then direct, not through a DLL's import table. */
+#ifndef HL_IMPORT
+#	ifdef HL_WIN
+#		define HL_IMPORT __declspec( dllimport )
+#	else
+#		define HL_IMPORT extern
+#	endif
 #endif
 
 #ifdef HL_64
