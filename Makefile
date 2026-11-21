@@ -48,7 +48,7 @@ HL_JIT_OBJ = src/jit.o src/jit_emit.o src/jit_regs.o src/jit_x86_64.o src/jit_du
 endif
 
 HL_OBJ = src/code.o src/hlpatch.o src/hlruntime.o $(HL_JIT_OBJ) src/main.o src/module.o src/debugger.o src/diagnostics.o src/diagnostics_transport.o src/profile.o \
-	src/prof_boundary.o include/lz4/lz4.o
+	src/prof_boundary.o src/prof_boundary_linux.o src/prof_boundary_x64_sysv.o include/lz4/lz4.o
 HLPROF_LIVE = hlprof-live$(EXE_SUFFIX)
 ifeq ($(OS),Windows_NT)
 HLPROF_LIVE_LDLIBS = -lws2_32
