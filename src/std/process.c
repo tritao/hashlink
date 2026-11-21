@@ -33,6 +33,11 @@
 #	include <errno.h>
 #	include <fcntl.h>
 #	include <signal.h>
+#	if (defined(__linux__) && !defined(__ANDROID__)) || defined(HL_MAC)
+#		include <spawn.h>
+#		define HL_POSIX_SPAWN
+extern char **environ;
+#	endif
 #	if !defined(HL_MAC)
 #		if defined(HL_BSD) || defined (HL_IOS) || defined (HL_TVOS)
 #			include <sys/wait.h>
@@ -173,6 +178,27 @@ HL_PRIM vprocess *hl_process_run( vbyte *cmd, varray *vargs, bool detached ) {
 		return NULL;
 	}
 	p = (vprocess*)hl_gc_alloc_finalizer(sizeof(vprocess));
+#ifdef HL_POSIX_SPAWN
+	// posix_spawn starts the child without copying the parent's page tables, as fork does (vfork on Linux): from a large process
+	// each fork is slow, and the parent then faults on each page it writes. If it cannot start the command, fork does, and its
+	// child reports it.
+	{
+		posix_spawn_file_actions_t actions;
+		pid_t pid;
+		int r = posix_spawn_file_actions_init(&actions);
+		if( r == 0 ) {
+			if( (r = posix_spawn_file_actions_adddup2(&actions,input[0],0)) == 0
+				&& (r = posix_spawn_file_actions_adddup2(&actions,output[1],1)) == 0
+				&& (r = posix_spawn_file_actions_adddup2(&actions,error[1],2)) == 0 )
+				r = posix_spawnp(&pid,argv[0],&actions,NULL,argv,environ);
+			posix_spawn_file_actions_destroy(&actions);
+		}
+		if( r == 0 ) {
+			p->pid = pid;
+			goto parent;
+		}
+	}
+#endif
 #ifdef HL_TVOS
 	hl_error("hl_process_run() not available for this platform");
 	p->pid = -1;
@@ -208,7 +234,9 @@ HL_PRIM vprocess *hl_process_run( vbyte *cmd, varray *vargs, bool detached ) {
 		fprintf(stderr,"Command not found : %s\n",cmd);
 		exit(1);
 	}
-	// parent
+#ifdef HL_POSIX_SPAWN
+parent:
+#endif
 	close(input[0]);
 	close(output[1]);
 	close(error[1]);
