@@ -487,6 +487,43 @@ static void _tls_set( hl_tls *t, void *store ) {
 }
 #endif
 
+#if defined(HL_THREADS) && !defined(HL_WIN)
+/*
+	A thread-local GC value lives in a store registered as a GC root. When a thread ends, the key's
+	destructor lets go of the value. It runs after the thread has left the GC, so it cannot remove the
+	root: it clears it and keeps the store on a free list that the next store allocation reuses.
+*/
+typedef struct _tls_store tls_store;
+struct _tls_store {
+	void *value; // the GC root
+	tls_store *next;
+};
+static pthread_mutex_t tls_free_lock = PTHREAD_MUTEX_INITIALIZER;
+static tls_store *tls_free_stores = NULL;
+
+static void tls_store_release( void *ptr ) {
+	tls_store *s = (tls_store*)ptr;
+	s->value = NULL;
+	pthread_mutex_lock(&tls_free_lock);
+	s->next = tls_free_stores;
+	tls_free_stores = s;
+	pthread_mutex_unlock(&tls_free_lock);
+}
+
+static void **tls_store_alloc() {
+	pthread_mutex_lock(&tls_free_lock);
+	tls_store *s = tls_free_stores;
+	if( s ) tls_free_stores = s->next;
+	pthread_mutex_unlock(&tls_free_lock);
+	if( !s ) {
+		s = (tls_store*)malloc(sizeof(tls_store));
+		s->value = NULL;
+		hl_add_root(&s->value);
+	}
+	return &s->value;
+}
+#endif
+
 HL_PRIM hl_tls *hl_tls_alloc( bool gc_value ) {
 #	if !defined(HL_THREADS)
 	hl_tls *l = (hl_tls*)hl_gc_alloc_finalizer(sizeof(hl_tls));
@@ -504,7 +541,7 @@ HL_PRIM hl_tls *hl_tls_alloc( bool gc_value ) {
 	hl_tls *l = (hl_tls*)hl_gc_alloc_finalizer(sizeof(hl_tls));
 	l->free = hl_tls_free;
 	l->gc = gc_value;
-	pthread_key_create(&l->key,NULL);
+	pthread_key_create(&l->key,gc_value ? tls_store_release : NULL);
 	return l;
 #	endif
 }
@@ -534,13 +571,21 @@ HL_PRIM void hl_tls_set( hl_tls *l, void *v ) {
 		if( !store) {
 			if( !v )
 				return;
+#			ifdef HL_WIN
 			store = (void**)malloc(sizeof(void*));
 			hl_add_root(store);
+#			else
+			store = tls_store_alloc();
+#			endif
 			_tls_set(l, store);
 		} else {
 			if( !v ) {
+#				ifdef HL_WIN
 				hl_remove_root(store);
 				free(store);
+#				else
+				tls_store_release(store);
+#				endif
 				_tls_set(l, NULL);
 				return;
 			}
