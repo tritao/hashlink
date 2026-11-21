@@ -1118,6 +1118,11 @@ HL_API void hl_gc_set_profile_allocation_callback( void (*callback)(hl_type*,int
 	gc_profile_allocation_callback = callback;
 }
 
+// Bytes and blocks each owner class allocated since the last collection: an arena released without a collection takes
+// its share out of the count that starts the next one. Kept with allocation buffers or without.
+static int64 gc_class_allocated[GC_PAGE_CLASSES];
+static int64 gc_class_allocations[GC_PAGE_CLASSES];
+
 #ifndef GC_TLAB
 // Without allocation buffers (GC_DEBUG, GC_MEMCHK, no threads) compiled code always allocates through the collector.
 HL_API bool hl_jit_alloc_supported( void ) { return false; }
@@ -1202,11 +1207,6 @@ HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data) {
 	return false;
 #endif
 }
-
-// Bytes and blocks each owner class allocated since the last collection: an arena released without a collection takes
-// its share out of the count that starts the next one.
-static int64 gc_class_allocated[GC_PAGE_CLASSES];
-static int64 gc_class_allocations[GC_PAGE_CLASSES];
 
 static HL_INLINE void gc_tlab_clear( unsigned char *ptr, int size, int flags, int block ) {
 	if( flags & MEM_ZERO ) {
