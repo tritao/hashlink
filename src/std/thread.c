@@ -473,6 +473,7 @@ DEFINE_PRIM(_VOID, condition_broadcast, _CONDITION)
 #if defined(HL_THREADS)
 static void **_tls_get( hl_tls *t ) {
 #	ifdef HL_WIN
+	if( t->gc ) return (void**)FlsGetValue(t->tid);
 	return (void**)TlsGetValue(t->tid);
 #	else
 	return (void**)pthread_getspecific(t->key);
@@ -480,41 +481,58 @@ static void **_tls_get( hl_tls *t ) {
 }
 static void _tls_set( hl_tls *t, void *store ) {
 #	ifdef HL_WIN
-	TlsSetValue(t->tid, store);
+	if( t->gc ) FlsSetValue(t->tid, store);
+	else TlsSetValue(t->tid, store);
 #	else
 	pthread_setspecific(t->key, store);
 #	endif
 }
 #endif
 
-#if defined(HL_THREADS) && !defined(HL_WIN)
+#if defined(HL_THREADS)
 /*
 	A thread-local GC value lives in a store registered as a GC root. When a thread ends, the key's
-	destructor lets go of the value. It runs after the thread has left the GC, so it cannot remove the
-	root: it clears it and keeps the store on a free list that the next store allocation reuses.
+	destructor (a fiber-local storage callback on Windows) lets go of the value. It runs after the thread
+	has left the GC, so it cannot remove the root: it clears it and keeps the store on a free list that
+	the next store allocation reuses. The free list's lock is not the GC's, so it is safe there too.
 */
 typedef struct _tls_store tls_store;
 struct _tls_store {
 	void *value; // the GC root
 	tls_store *next;
 };
-static pthread_mutex_t tls_free_lock = PTHREAD_MUTEX_INITIALIZER;
 static tls_store *tls_free_stores = NULL;
+#ifdef HL_WIN
+static SRWLOCK tls_free_lock = SRWLOCK_INIT;
+#	define tls_free_acquire() AcquireSRWLockExclusive(&tls_free_lock)
+#	define tls_free_release() ReleaseSRWLockExclusive(&tls_free_lock)
+#else
+static pthread_mutex_t tls_free_lock = PTHREAD_MUTEX_INITIALIZER;
+#	define tls_free_acquire() pthread_mutex_lock(&tls_free_lock)
+#	define tls_free_release() pthread_mutex_unlock(&tls_free_lock)
+#endif
 
 static void tls_store_release( void *ptr ) {
 	tls_store *s = (tls_store*)ptr;
 	s->value = NULL;
-	pthread_mutex_lock(&tls_free_lock);
+	tls_free_acquire();
 	s->next = tls_free_stores;
 	tls_free_stores = s;
-	pthread_mutex_unlock(&tls_free_lock);
+	tls_free_release();
 }
 
+#ifdef HL_WIN
+// FlsFree also calls this, on the freeing thread, for the value of every thread still holding one.
+static void WINAPI tls_store_release_fls( void *ptr ) {
+	tls_store_release(ptr);
+}
+#endif
+
 static void **tls_store_alloc() {
-	pthread_mutex_lock(&tls_free_lock);
+	tls_free_acquire();
 	tls_store *s = tls_free_stores;
 	if( s ) tls_free_stores = s->next;
-	pthread_mutex_unlock(&tls_free_lock);
+	tls_free_release();
 	if( !s ) {
 		s = (tls_store*)malloc(sizeof(tls_store));
 		s->value = NULL;
@@ -533,9 +551,15 @@ HL_PRIM hl_tls *hl_tls_alloc( bool gc_value ) {
 #	elif defined(HL_WIN)
 	hl_tls *l = (hl_tls*)hl_gc_alloc_finalizer(sizeof(hl_tls));
 	l->free = hl_tls_free;
-	l->tid = TlsAlloc();
 	l->gc = gc_value;
-	TlsSetValue(l->tid,NULL);
+	if( gc_value ) {
+		// Fiber-local storage for its callback at thread exit, which plain thread-local storage lacks.
+		l->tid = FlsAlloc(tls_store_release_fls);
+		FlsSetValue(l->tid,NULL);
+	} else {
+		l->tid = TlsAlloc();
+		TlsSetValue(l->tid,NULL);
+	}
 	return l;
 #	else
 	hl_tls *l = (hl_tls*)hl_gc_alloc_finalizer(sizeof(hl_tls));
@@ -551,7 +575,7 @@ HL_PRIM void hl_tls_free( hl_tls *l ) {
 	free(l);
 #	elif defined(HL_WIN)
 	if( l->free ) {
-		TlsFree(l->tid);
+		if( l->gc ) FlsFree(l->tid); else TlsFree(l->tid);
 		l->free = NULL;
 	}
 #	else
@@ -571,21 +595,11 @@ HL_PRIM void hl_tls_set( hl_tls *l, void *v ) {
 		if( !store) {
 			if( !v )
 				return;
-#			ifdef HL_WIN
-			store = (void**)malloc(sizeof(void*));
-			hl_add_root(store);
-#			else
 			store = tls_store_alloc();
-#			endif
 			_tls_set(l, store);
 		} else {
 			if( !v ) {
-#				ifdef HL_WIN
-				hl_remove_root(store);
-				free(store);
-#				else
 				tls_store_release(store);
-#				endif
 				_tls_set(l, NULL);
 				return;
 			}
