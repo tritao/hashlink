@@ -906,7 +906,8 @@ HL_API vdynamic *hl_gc_arena_copy( vdynamic *value, void *arena, void *target ) 
 /*
 	The layout of a map of the VM's std library (maps.h): its first four words point to its cell table (bytes), its chain table
 	(inside the cell table), its entries (bytes) and its values (an untyped block every word of which is a pointer: a key or a
-	value). Libraries whose map types are these maps register their abstract names with it.
+	value; a map of scalar values keeps them in bytes). Libraries whose map types are these maps register their abstract
+	names with it.
 */
 static void gc_arena_pointers_layout( void *block, int size, hl_gc_arena_visit visit, void *ctx ) {
 	for(int word=0;word<size / HL_WSIZE;word++) visit((void**)block + word,NULL,ctx);

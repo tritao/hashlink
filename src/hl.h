@@ -1127,6 +1127,11 @@ HL_API vdynamic *hl_hbget_s( void *map, vstring *key );
 HL_API bool hl_hbexists_s( void *map, vstring *key );
 HL_API void hl_hbset_s( void *map, vstring *key, vdynamic *value );
 HL_API bool hl_hbremove_s( void *map, vstring *key );
+/* The same for a String-keyed map of scalar values (hl_hbs_, maps.c), which boxes nothing. */
+HL_API void hl_hbs_set_s( void *map, vstring *key, int64 value );
+HL_API bool hl_hbs_exists_s( void *map, vstring *key );
+HL_API int hl_hbs_index_s( void *map, vstring *key );
+HL_API bool hl_hbs_remove_s( void *map, vstring *key );
 HL_API void hl_register_string_type( hl_type *t );
 /* Wraps UTF-16 data (not copied) in a String object; NULL when no String type is registered. */
 HL_API vstring *hl_alloc_string( uchar *bytes, int length );

@@ -1,7 +1,22 @@
+#ifndef _MVALUE_LAYOUT
 #ifdef _MNO_EXPORTS
 #define _MVALUE_LAYOUT hlt_i32
 #else
 #define _MVALUE_LAYOUT hlt_dyn
+#endif
+#endif
+
+/*
+	Where an entry's value lives, and how the values block is allocated. By default the value is in `values`, which the
+	collector scans as pointers. A map of scalar values (_MSCALAR) keeps them where no pointer scan reads them: in a values
+	block without pointers, or in `entries` when `values` also holds the key.
+*/
+#ifndef _MVALUE
+#define _MVALUE(m,c) (m)->values[c].value
+#endif
+#ifndef _MVALUES_KIND
+#define _MVALUES_KIND MEM_KIND_RAW
+#define _MVALUES_TYPE hlt_abstract
 #endif
 
 /*
@@ -65,18 +80,24 @@ t_map *_MNAME(alloc)() {
 	return m;
 }
 
-static _MVAL_TYPE *_MNAME(probe_find)( t_map *m, t_key key, unsigned int hash, int klen ) {
+// The entry holding `key`, or -1.
+static int _MNAME(probe_index)( t_map *m, t_key key, unsigned int hash, int klen ) {
 	int c, ckey;
 	(void)klen;
-	if( !m->values ) return NULL;
+	if( !m->values ) return -1;
 	ckey = hash % ((unsigned)m->ncells);
 	c = _MINDEX(m,ckey);
 	while( c >= 0 ) {
 		if( _MMATCH(c) )
-			return &m->values[c].value;
+			return c;
 		c = _MNEXT(m,c);
 	}
-	return NULL;
+	return -1;
+}
+
+static _MVAL_TYPE *_MNAME(probe_find)( t_map *m, t_key key, unsigned int hash, int klen ) {
+	int c = _MNAME(probe_index)(m,key,hash,klen);
+	return c < 0 ? NULL : &_MVALUE(m,c);
 }
 
 _MSTATIC _MVAL_TYPE *_MNAME(find)( t_map *m, t_key key ) {
@@ -96,7 +117,7 @@ static void _MNAME(rebuild)( t_map *m, int maxentries ) {
 	// The storage goes where the map is, not to the current arena: a map that outlives an arena can grow inside one.
 	void *home = hl_gc_arena_owner_of(m);
 	hl_gc_store_ref(&m->entries,(t_entry*)hl_gc_alloc_gen_owner(&hlt_bytes,maxentries * sizeof(t_entry),MEM_KIND_NOPTR,home),&hlt_bytes);
-	hl_gc_store_ref(&m->values,(t_value*)hl_gc_alloc_gen_owner(&hlt_abstract,maxentries * sizeof(t_value),MEM_KIND_RAW,home),&hlt_bytes);
+	hl_gc_store_ref(&m->values,(t_value*)hl_gc_alloc_gen_owner(&_MVALUES_TYPE,maxentries * sizeof(t_value),_MVALUES_KIND,home),&hlt_bytes);
 	hl_gc_store_ref(&m->cells,hl_gc_alloc_gen_owner(&hlt_bytes,(ncells + maxentries) * ksize,MEM_KIND_NOPTR,home),&hlt_bytes);
 	hl_gc_store_ref(&m->nexts,(signed char*)m->cells + ncells * ksize,&hlt_bytes);
 	m->ncells = ncells;
@@ -136,7 +157,7 @@ static void _MNAME(probe_set)( t_map *m, t_key key, unsigned int hash, int klen,
 		c = _MINDEX(m,ckey);
 		while( c >= 0 ) {
 			if( _MMATCH(c) ) {
-				hl_gc_copy_values(&m->values[c].value,&value,sizeof(value),&_MVALUE_LAYOUT);
+				hl_gc_copy_values(&_MVALUE(m,c),&value,sizeof(value),&_MVALUE_LAYOUT);
 				return;
 			}
 			c = _MNEXT(m,c);
@@ -149,7 +170,7 @@ static void _MNAME(probe_set)( t_map *m, t_key key, unsigned int hash, int klen,
 	_MSET(c);
 	_MSETNEXT(m,c,_MINDEX(m,ckey));
 	_MSETINDEX(m,ckey,c);
-	hl_gc_copy_values(&m->values[c].value,&value,sizeof(value),&_MVALUE_LAYOUT);
+	hl_gc_copy_values(&_MVALUE(m,c),&value,sizeof(value),&_MVALUE_LAYOUT);
 	m->nentries++;
 }
 
@@ -175,7 +196,7 @@ static bool _MNAME(probe_remove)( t_map *m, t_key key, unsigned int hash, int kl
 			_MSETNEXT(m,c,_MDEAD);
 			m->nentries--;
 			_MERASE(c);
-			hl_gc_store_ref(&m->values[c].value,NULL,&hlt_dyn);
+			hl_gc_clear_values(&_MVALUE(m,c),sizeof(_MVAL_TYPE),&_MVALUE_LAYOUT);
 			// a tombstone at the end is simply given back
 			while( m->nused > 0 && !_MLIVE(m,m->nused - 1) ) m->nused--;
 			return true;
@@ -196,11 +217,28 @@ HL_PRIM bool _MNAME(exists)( t_map *m, t_key key ) {
 	return _MNAME(find)(m,_MNAME(filter)(key)) != NULL;
 }
 
+#ifndef _MSCALAR
 HL_PRIM vdynamic* _MNAME(get)( t_map *m, t_key key ) {
 	vdynamic **v = _MNAME(find)(m,_MNAME(filter)(key));
 	if( v == NULL ) return NULL;
 	return *v;
 }
+#else
+/*
+	A lookup that boxes nothing: the entry holding `key` (-1 when there is none), then the value of an entry so found,
+	valid until the map next changes.
+*/
+HL_PRIM int _MNAME(index)( t_map *m, t_key key ) {
+	int klen;
+	key = _MNAME(filter)(key);
+	klen = _MKLEN(key);
+	return _MNAME(probe_index)(m,key,_MHASHN(key,klen),klen);
+}
+
+HL_PRIM _MVAL_TYPE _MNAME(value)( t_map *m, int c ) {
+	return _MVALUE(m,c);
+}
+#endif
 
 HL_PRIM bool _MNAME(remove)( t_map *m, t_key key ) {
 	int klen;
@@ -222,6 +260,7 @@ HL_PRIM varray* _MNAME(keys)( t_map *m ) {
 	return a;
 }
 
+#ifndef _MSCALAR
 HL_PRIM varray* _MNAME(values)( t_map *m ) {
 	varray *a = hl_alloc_array(&hlt_dyn,m->nentries);
 	vdynamic **values = hl_aptr(a,vdynamic*);
@@ -229,10 +268,24 @@ HL_PRIM varray* _MNAME(values)( t_map *m ) {
 	int c;
 	for(c=0;c<m->nused;c++) {
 		if( !_MLIVE(m,c) ) continue;
-		hl_gc_store_ref(&values[p++],m->values[c].value,&hlt_dyn);
+		hl_gc_store_ref(&values[p++],_MVALUE(m,c),&hlt_dyn);
 	}
 	return a;
 }
+#else
+// The values as an array of `t`, the scalar type they were stored from (hl_map_scalar_read).
+HL_PRIM varray* _MNAME(values)( t_map *m, hl_type *t ) {
+	varray *a = hl_alloc_array(t,m->nentries);
+	int size = hl_type_size(t);
+	int p = 0;
+	int c;
+	for(c=0;c<m->nused;c++) {
+		if( !_MLIVE(m,c) ) continue;
+		hl_map_scalar_read(hl_aptr(a,vbyte) + (p++) * size,_MVALUE(m,c),t);
+	}
+	return a;
+}
+#endif
 
 // Maps that are cleared and refilled every frame would otherwise regrow through the whole size ladder each time,
 // so a cleared map of moderate size keeps its storage and only forgets its entries.
@@ -262,7 +315,7 @@ HL_PRIM t_map *_MNAME(copy)( t_map *m ) {
 	int ksize = _MSMALL(m) ? 1 : sizeof(int);
 	hl_gc_store_ref(&c->entries,(t_entry*)hl_gc_alloc_noptr(m->maxentries * sizeof(t_entry)),&hlt_bytes);
 	memcpy(c->entries,m->entries,m->maxentries * sizeof(t_entry));
-	hl_gc_store_ref(&c->values,(t_value*)hl_gc_alloc_raw(m->maxentries * sizeof(t_value)),&hlt_bytes);
+	hl_gc_store_ref(&c->values,(t_value*)hl_gc_alloc_gen(&_MVALUES_TYPE,m->maxentries * sizeof(t_value),_MVALUES_KIND),&hlt_bytes);
 	memcpy(c->values,m->values,m->maxentries * sizeof(t_value));
 	hl_gc_record_write(c->values,m->maxentries * sizeof(t_value));
 	hl_gc_store_ref(&c->cells,hl_gc_alloc_noptr((m->ncells + m->maxentries) * ksize),&hlt_bytes);
@@ -300,3 +353,7 @@ HL_PRIM int _MNAME(size)( t_map *m ) {
 #undef _MHASHN
 
 #undef _MVALUE_LAYOUT
+#undef _MVALUE
+#undef _MVALUES_KIND
+#undef _MVALUES_TYPE
+#undef _MSCALAR

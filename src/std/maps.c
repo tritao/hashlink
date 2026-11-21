@@ -33,6 +33,20 @@ static int H_PRIMES[] = {
 
 #define _MVAL_TYPE vdynamic*
 
+/*
+	A map of scalar values (_MSCALAR) keeps each in 64 bits: an Int or a Bool widened, a Float by its bits. Its values are
+	read back as the type they were stored from.
+*/
+static void hl_map_scalar_read( void *slot, int64 value, hl_type *t ) {
+	switch( t->kind ) {
+	case HI32: *(int*)slot = (int)value; break;
+	case HBOOL: *(bool*)slot = value != 0; break;
+	case HF64: memcpy(slot,&value,sizeof(double)); break;
+	case HI64: *(int64*)slot = value; break;
+	default: hl_error("Invalid scalar map value type %s",hl_type_str(t));
+	}
+}
+
 // ----- INT MAP ---------------------------------
 
 typedef struct {
@@ -218,8 +232,86 @@ HL_API bool hl_hbremove_s( void *m, vstring *key ) {
 	return hl_hbprobe_remove((hl_hb_map*)m,HB_SKEY(key),hl_hbstring_hash(key),HB_SLEN(key));
 }
 
+// ----- BYTES MAP OF SCALARS ---------------------------------
+
+// The value is with the key's hash, where no pointer scan reads it; the values block holds only keys.
+typedef struct {
+	unsigned int hash;
+	int len;
+	int64 value;
+} hl_hbs__entry;
+
+typedef struct {
+	uchar *key;
+} hl_hbs__value;
+
+#undef _MVAL_TYPE
+#define _MVAL_TYPE int64
+#define hlt_key		hlt_bytes
+#define hl_hbs_filter(key) key
+#define _MKLEN(key)	((key) == NULL ? -1 : (int)hb_ulen(key))
+#define _MHASHN(key,klen)	hl_hbhash_n(key,klen)
+#define _MKEY_TYPE	uchar*
+#define _MNAME(n)	hl_hbs_##n
+#define _MMATCH(c)	(m->entries[c].hash == hash && m->entries[c].len == klen && (m->values[c].key == key || memcmp(m->values[c].key,key,(size_t)klen * sizeof(uchar)) == 0))
+#define _MKEY(m,c)	m->values[c].key
+#define	_MSET(c)	m->entries[c].hash = hash; m->entries[c].len = klen; hl_gc_store_ref(&m->values[c].key,key,&hlt_key)
+#define _MREHASH(m,c)	((m)->entries[c].hash)
+#define _MERASE(c)  hl_gc_store_ref(&m->values[c].key,NULL,&hlt_key)
+#define _MSCALAR
+#define _MVALUE(m,c) (m)->entries[c].value
+#define _MVALUE_LAYOUT hlt_i64
+
+#include "maps.h"
+
+HL_API void hl_hbs_set_s( void *m, vstring *key, int64 value ) {
+	hl_hbs_probe_set((hl_hbs__map*)m,HB_SKEY(key),hl_hbstring_hash(key),HB_SLEN(key),value);
+}
+
+HL_API bool hl_hbs_exists_s( void *m, vstring *key ) {
+	return hl_hbs_probe_index((hl_hbs__map*)m,HB_SKEY(key),hl_hbstring_hash(key),HB_SLEN(key)) >= 0;
+}
+
+HL_API int hl_hbs_index_s( void *m, vstring *key ) {
+	return hl_hbs_probe_index((hl_hbs__map*)m,HB_SKEY(key),hl_hbstring_hash(key),HB_SLEN(key));
+}
+
+HL_API bool hl_hbs_remove_s( void *m, vstring *key ) {
+	return hl_hbs_probe_remove((hl_hbs__map*)m,HB_SKEY(key),hl_hbstring_hash(key),HB_SLEN(key));
+}
+
 #undef HB_SKEY
 #undef HB_SLEN
+
+// ----- INT MAP OF SCALARS ---------------------------------
+
+typedef struct {
+	int key;
+} hl_his__entry;
+
+// The values block holds no pointers.
+typedef struct {
+	int64 value;
+} hl_his__value;
+
+#define hlt_key		hlt_i32
+#define hl_his_filter(key) key
+#define hl_his_hash(h)	((unsigned)(h))
+#define _MKEY_TYPE	int
+#define _MNAME(n)	hl_his_##n
+#define _MMATCH(c)	m->entries[c].key == key
+#define _MKEY(m,c)	m->entries[c].key
+#define	_MSET(c)	m->entries[c].key = key
+#define _MERASE(c)
+#define _MSCALAR
+#define _MVALUE_LAYOUT hlt_i64
+#define _MVALUES_KIND MEM_KIND_NOPTR
+#define _MVALUES_TYPE hlt_bytes
+
+#include "maps.h"
+
+#undef _MVAL_TYPE
+#define _MVAL_TYPE vdynamic*
 
 // ----- OBJECT MAP ---------------------------------
 
