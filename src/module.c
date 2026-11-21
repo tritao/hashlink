@@ -1318,9 +1318,9 @@ static void hl_module_add( hl_module *m ) {
 	hl_profile_stream_notify_module(m->diagnostics_id);
 }
 
-int hl_module_init( hl_module *m, int flags ) {
+/* What every module's initialization does before its functions have code: GC ownership, globals, natives and indexes. */
+static bool module_init_prepare( hl_module *m, int flags ) {
 	int i;
-	jit_ctx *ctx;
 	// Only runtime-owned (patchable) modules are ever retired against their allocations. Their objects live in
 	// pages of their own, so counting what a module still holds costs nothing until the module is retired.
 	void *gc_owner = (flags & HL_MODULE_PATCHABLE) != 0 ? m : NULL;
@@ -1341,7 +1341,7 @@ int hl_module_init( hl_module *m, int flags ) {
 		memset(m->globals_data + m->globals_size,0xFF,HOT_RELOAD_EXTRA_GLOBALS * sizeof(void*));
 	}
 	else if( (flags & HL_MODULE_PATCHABLE) != 0 && !module_reserve_patch_globals(m) )
-		return 0;
+		return false;
 	// RESET globals
 	for(i=0;i<m->code->nglobals;i++) {
 		hl_type *t = m->code->globals[i];
@@ -1353,6 +1353,27 @@ int hl_module_init( hl_module *m, int flags ) {
 	if( hot_reload ) m->hash = hl_code_hash_alloc(m->code);
 	hl_module_init_natives(m);
 	hl_module_init_indexes(m);
+	return true;
+}
+
+/* What every module's initialization does once its functions have code: string types, constants, the module registry. */
+static void module_init_publish( hl_module *m ) {
+	int i;
+	for(i=0;i<m->code->ntypes;i++) hl_register_string_type(m->code->types + i);
+	// INIT constants
+	for(i=0;i<m->code->nconstants;i++) {
+		hl_constant *c = m->code->constants + i;
+		hl_module_init_constant(m, c);
+	}
+	hl_module_add(m);
+}
+
+int hl_module_init( hl_module *m, int flags ) {
+	int i;
+	jit_ctx *ctx;
+	bool hot_reload = (flags & HL_MODULE_HOT_RELOAD) != 0;
+	if( !module_init_prepare(m, flags) )
+		return 0;
 #	ifdef WIN64_UNWIND_TABLES
 	m->unwind_table_size = m->code->nfunctions + 10; // extra space for jit internals
 	m->unwind_table = malloc(sizeof(RUNTIME_FUNCTION) * m->unwind_table_size);
@@ -1386,13 +1407,7 @@ int hl_module_init( hl_module *m, int flags ) {
 		m->functions_ptrs[f->findex] = ((unsigned char*)m->jit_code) + ((int_val)m->functions_ptrs[f->findex]);
 	}
 	if( m->patchable && !module_init_patch_entries(m) ) return 0;
-	for(i=0;i<m->code->ntypes;i++) hl_register_string_type(m->code->types + i);
-	// INIT constants
-	for(i=0;i<m->code->nconstants;i++) {
-		hl_constant *c = m->code->constants + i;
-		hl_module_init_constant(m, c);
-	}
-	hl_module_add(m);
+	module_init_publish(m);
 	hl_gdb_jit_register(m);
 	hl_setup.resolve_symbol = module_resolve_symbol;
 	hl_setup.capture_stack = module_capture_stack;
@@ -1409,6 +1424,28 @@ int hl_module_init( hl_module *m, int flags ) {
 		hl_code_hash_finalize(m->hash);
 		m->jit_ctx = ctx;
 	}
+	return 1;
+}
+
+/*
+	Initializes a module whose functions were compiled ahead of time: `functions[findex]` is the code of each function of the
+	module, as the JIT would have made it. Nothing is compiled; the module is otherwise initialized as `hl_module_init` does
+	without flags. The caller provides `hl_setup.static_call`, `get_wrapper`, `resolve_symbol` and `capture_stack`, which the
+	JIT would have set.
+*/
+int hl_module_init_aot( hl_module *m, void **functions ) {
+	int i;
+	if( !module_init_prepare(m, 0) )
+		return 0;
+	m->debug = false;
+	m->patchable = false;
+	for(i=0;i<m->code->nfunctions;i++) {
+		hl_function *f = m->code->functions + i;
+		if( functions[f->findex] == NULL )
+			return 0;
+		m->functions_ptrs[f->findex] = functions[f->findex];
+	}
+	module_init_publish(m);
 	return 1;
 }
 

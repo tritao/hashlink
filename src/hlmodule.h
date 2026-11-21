@@ -466,6 +466,7 @@ const char *hl_jit_support_symbol( void *addr, void **start, void **base, int *s
 
 HL_EXTERN_C HL_EXPORT hl_module *hl_module_alloc( hl_code *code );
 HL_EXTERN_C HL_EXPORT int hl_module_init( hl_module *m, int flags );
+HL_EXTERN_C HL_EXPORT int hl_module_init_aot( hl_module *m, void **functions );
 h_bool hl_module_patch( hl_module *m, hl_code *code );
 /** Atomically redirect compatible function indices to an initialized generation. */
 HL_EXTERN_C HL_EXPORT h_bool hl_module_patch_slots( hl_module *target, hl_module *generation, const int *indices, int count );
