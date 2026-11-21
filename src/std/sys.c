@@ -47,8 +47,14 @@
 #	define getcwd(buf,size) (void*)(int_val)GetCurrentDirectoryW(size,buf)
 #	define chdir	!SetCurrentDirectoryW
 #	define system	_wsystem
+#	ifdef __MINGW32__
+// msvcrt.dll, which MinGW links, has no _wstat32; the fields read here fit in either layout.
+typedef struct _stat64 pstat;
+#	define stat		_wstat64
+#	else
 typedef struct _stat32 pstat;
 #	define stat		_wstat32
+#	endif
 #	define unlink	_wunlink
 #	define rename	_wrename
 #	define mkdir(path,mode)	_wmkdir(path)

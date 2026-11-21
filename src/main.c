@@ -56,7 +56,12 @@ typedef struct {
 } main_context;
 
 static int pfiletime( pchar *file )	{
-#ifdef HL_WIN
+#if defined(HL_WIN) && defined(__MINGW32__)
+	// msvcrt.dll, which MinGW links, has no _wstat32.
+	struct _stat64 st;
+	_wstat64(file,&st);
+	return (int)st.st_mtime;
+#elif defined(HL_WIN)
 	struct _stat32 st;
 	_wstat32(file,&st);
 	return (int)st.st_mtime;

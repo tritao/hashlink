@@ -226,6 +226,11 @@ if (WITH_VM)
     if (WIN32)
         target_link_libraries(hl user32 dbghelp)
     endif()
+    # MinGW gives an executable an import library too, named libhl.dll.a like libhl's: relinking hl would overwrite the
+    # one it links against.
+    if (MINGW)
+        set_target_properties(hl PROPERTIES IMPORT_SUFFIX ".exe.a")
+    endif()
 endif()
 
 # The function hooks linked into natively instrumented modules on Linux (see src/prof_hooks.c). Position independent, as

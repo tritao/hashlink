@@ -1421,7 +1421,7 @@ void *hl_gc_alloc_gen_owner( hl_type *t, int size, int flags, void *owner ) {
 	}
 	void (*allocation_callback)(hl_type*,int,int,void*) = gc_profile_allocation_callback;
 	if( allocation_callback ) {
-#ifdef HL_WIN
+#if defined(HL_WIN) && !defined(__GNUC__)
 		allocation_callback(t,size,allocated,_ReturnAddress());
 #else
 		allocation_callback(t,size,allocated,__builtin_return_address(0));
