@@ -1297,7 +1297,7 @@ static void *gc_tlab_alloc( hl_thread_info *th, int size, int flags, int oc ) {
 }
 #endif
 
-#ifdef GC_ALLOC_FAST_SUPPORTED
+// Keeps a function out of its callers' frames: the allocation slow path, and the census's stack wipe on every target.
 #if defined(HL_VCC)
 # define GC_ALLOC_NOINLINE __declspec(noinline)
 #elif defined(HL_GCC) || defined(HL_CLANG)
@@ -1306,6 +1306,7 @@ static void *gc_tlab_alloc( hl_thread_info *th, int size, int flags, int oc ) {
 # define GC_ALLOC_NOINLINE
 #endif
 
+#ifdef GC_ALLOC_FAST_SUPPORTED
 // Keep special allocation modes and refill bookkeeping out of the small-allocation entry's stack frame.
 static GC_ALLOC_NOINLINE void *gc_alloc_gen_owner_full( hl_type *t, int size, int flags, void *owner ) {
 #else
