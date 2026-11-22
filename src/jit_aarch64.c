@@ -117,9 +117,8 @@ void hl_jit_init_regs( regs_config *cfg ) {
 	cfg->stack_align = 16;      // AAPCS64 mandates
 	cfg->clear_stack_on_return = 1;
 	cfg->stack_stores = true;
-	// Inline allocation stays opt-in here until it is validated on AArch64; x86-64 has it on (see GC_JIT_INLINE_ALLOC).
-	const char *alloc = getenv("HL_JIT_ALLOC_INLINE");
-	cfg->alloc_inline = alloc && strcmp(alloc,"1") == 0;
+	// Small objects are allocated inline (ALLOC_OBJECT), with a cold call when the thread's run is exhausted.
+	cfg->alloc_inline = true;
 	const char *box = getenv("HL_JIT_ALLOC_BOX");
 	cfg->alloc_box = box && strcmp(box,"1") == 0;
 	// HL's internal calling convention uses one 8-byte slot per stack-passed
