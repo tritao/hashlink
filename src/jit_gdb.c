@@ -228,6 +228,18 @@ static int function_name( hl_code *code, hl_function *f, char *out, int size ) {
 	return snprintf(out,size,"fun$%d",f->findex);
 }
 
+/* The in-memory ELF image costs a few percent of a large module's start-up, so it is built only for a debugger: one
+   tracing the process when the module is registered (gdb or lldb running it), or one that cannot be seen from inside,
+   asked for with HL_GDB_JIT=1 (gdb attaching later, a core dumped outside gdb, qemu-user's gdb stub). */
+static bool gdb_jit_wanted( void ) {
+	static int wanted = -1;
+	if( wanted < 0 ) {
+		const char *option = getenv("HL_GDB_JIT");
+		wanted = (option && strcmp(option,"1") == 0) || hl_detect_debugger();
+	}
+	return wanted;
+}
+
 void hl_gdb_jit_register( hl_module *m ) {
 	static const char shnames[] = "\0.text\0.symtab\0.strtab\0.shstrtab\0.debug_line\0.debug_info\0.debug_abbrev\0.debug_frame\0";
 	static const unsigned char debug_abbrev[] = {
@@ -261,7 +273,7 @@ void hl_gdb_jit_register( hl_module *m ) {
 	Elf64_Shdr *sections;
 	Elf64_Sym *symbols;
 	char *strings;
-	if( !m || !m->jit_code || !m->jit_debug || m->gdb_jit_entry ) return;
+	if( !m || !m->jit_code || !m->jit_debug || m->gdb_jit_entry || !gdb_jit_wanted() ) return;
 	for(i=0;i<m->code->nfunctions;i++) if( m->jit_debug[i].offsets ) {
 		int length = function_name(m->code,m->code->functions+i,name,sizeof(name));
 		if( length < 0 ) return;
