@@ -2514,6 +2514,9 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 					if( name != NULL )
 						hashed_name = hl_hash_gen(name, true);
 				}
+			} else if( next->op == OArraySize && next->p2 == o->p1 ) {
+				// An array's size is its `length` field in Haxe, which a null access names.
+				hashed_name = hl_hash_gen(USTR("length"), true);
 			}
 			// -----------------------------------------
 			int_arr_add(ctx->null_checks, jthrow);
