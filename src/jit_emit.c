@@ -75,15 +75,11 @@ typedef struct _tmp_phi tmp_phi;
 #include "data_struct.c"
 #define phi_add(set,v)		phi_add_impl(DEF_ALLOC,&(set),v)
 
-#define S_SORTED
-
-#define S_MAP
-#define S_TYPE			ereg_map
-#define S_NAME(name)	ereg_##name
-#define S_KEY			ereg
-#define S_VALUE			emit_block*
-#include "data_struct.c"
-#define ereg_add(set,k,v)		ereg_add_pair_impl(DEF_ALLOC,&(set),k,v)
+// One operand of a phi: the value it takes when control comes from the block.
+typedef struct {
+	ereg value;
+	emit_block *from;
+} phi_val;
 
 struct _linked_inf {
 	int id;
@@ -115,7 +111,10 @@ struct _tmp_phi {
 	bool opt;
 	emit_mode mode;
 	emit_block *b;
-	ereg_map vals;
+	// The operands, unordered and without duplicate pairs: a phi has one per predecessor, so a scan beats a sorted map.
+	phi_val *vals;
+	int nvals;
+	int max_vals;
 	phi_arr ref_phis;
 	linked_inf *ref_blocks;
 };
@@ -610,9 +609,16 @@ static void emit_cmp( emit_ctx *ctx, ereg a, ereg b, hl_op o ) {
 	patch_instr_mode(ctx, GET_MODE(a));
 }
 
-static void phi_remove_val( emit_ctx *ctx, tmp_phi *p, ereg v ) {
-	ereg_remove(&p->vals,v);
-	emit_debug("%sPHI-REM-DEP %s = %s\n", phi_prefix(ctx), val_str(p->value,p->mode), val_str(v,p->mode));
+// Removes one operand of value v; returns the block it came from, NULL if there was none.
+static emit_block *phi_remove_val( emit_ctx *ctx, tmp_phi *p, ereg v ) {
+	for(int i=0;i<p->nvals;i++)
+		if( p->vals[i].value == v ) {
+			emit_block *from = p->vals[i].from;
+			p->vals[i] = p->vals[--p->nvals];
+			emit_debug("%sPHI-REM-DEP %s = %s\n", phi_prefix(ctx), val_str(p->value,p->mode), val_str(v,p->mode));
+			return from;
+		}
+	return NULL;
 }
 
 static void phi_add_val( emit_ctx *ctx, tmp_phi *p, ereg v, emit_block *from ) {
@@ -620,8 +626,19 @@ static void phi_add_val( emit_ctx *ctx, tmp_phi *p, ereg v, emit_block *from ) {
 	if( IS_NULL(v) ) jit_assert();
 	if( p->value == v )
 		return;
-	if( !ereg_add(p->vals,v,from) )
-		return;
+	for(int i=0;i<p->nvals;i++)
+		if( p->vals[i].value == v && p->vals[i].from == from )
+			return;
+	if( p->nvals == p->max_vals ) {
+		int size = p->max_vals ? p->max_vals << 1 : 4;
+		phi_val *vals = (phi_val*)hl_malloc(&ctx->jit->falloc, sizeof(phi_val) * size);
+		memcpy(vals, p->vals, sizeof(phi_val) * p->nvals);
+		p->vals = vals;
+		p->max_vals = size;
+	}
+	p->vals[p->nvals].value = v;
+	p->vals[p->nvals].from = from;
+	p->nvals++;
 	emit_debug("%sPHI-DEP %s:#%d = %s\n", phi_prefix(ctx), val_str(p->value,p->mode), from->id, val_str(v,p->mode));
 	if( v < 0 ) {
 		tmp_phi *p2 = GET_PHI(v);
@@ -633,7 +650,8 @@ static ereg optimize_phi_rec( emit_ctx *ctx, tmp_phi *p ) {
 
 	if( p->locked ) jit_assert();
 	ereg same = UNUSED;
-	for_iter_key(ereg,v,p->vals) {
+	for(int i=0;i<p->nvals;i++) {
+		ereg v = p->vals[i].value;
 		if( v == same || v == p->value )
 			continue;
 		if( !IS_NULL(same) )
@@ -659,8 +677,7 @@ static ereg optimize_phi_rec( emit_ctx *ctx, tmp_phi *p ) {
 		l = l->next;
 	}
 	for_iter(phi,p2,p->ref_phis) {
-		emit_block *bsame = ereg_find(p2->vals,p->value);
-		phi_remove_val(ctx,p2,p->value);
+		emit_block *bsame = phi_remove_val(ctx,p2,p->value);
 		phi_add_val(ctx,p2,same,bsame);
 	}
 	p->ref_blocks = NULL;
@@ -1064,17 +1081,25 @@ static void emit_write_block( emit_ctx *ctx, emit_block *b ) {
 		else
 			p2->value = -p->final_id;
 		p2->mode = p->mode;
-		p2->nvalues = ereg_count(p->vals);
+		p2->nvalues = p->nvals;
 		p2->values = (ereg*)hl_malloc(&jit->falloc,sizeof(ereg)*p2->nvalues);
 		p2->blocks = (ereg*)hl_malloc(&jit->falloc,sizeof(int)*p2->nvalues);
-		int k = 0;
-		for_iter_key(ereg,v,p->vals) {
-			remap_phi_reg(ctx, &v);
-			p2->values[k++] = v;
+		// The operands in a stable order, by value then block, whatever order the construction left them in.
+		for(int k=1;k<p->nvals;k++) {
+			phi_val cur = p->vals[k];
+			int j = k;
+			while( j > 0 && (p->vals[j-1].value > cur.value || (p->vals[j-1].value == cur.value && p->vals[j-1].from->id > cur.from->id)) ) {
+				p->vals[j] = p->vals[j-1];
+				j--;
+			}
+			p->vals[j] = cur;
 		}
-		k = 0;
-		for_iter(ereg,bfrom,p->vals)
-			p2->blocks[k++] = bfrom->id;
+		for(int k=0;k<p->nvals;k++) {
+			ereg v = p->vals[k].value;
+			remap_phi_reg(ctx, &v);
+			p2->values[k] = v;
+			p2->blocks[k] = p->vals[k].from->id;
+		}
 	}
 }
 
