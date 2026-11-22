@@ -100,6 +100,8 @@ struct _regs_ctx {
 	int *call_seen;
 	int *call_work;
 	int persists_uses[2];
+	// No value in scratch or persists is read last before this instruction, so none expires before it.
+	int live_expiry;
 	int epilog_pos;
 };
 
@@ -239,6 +241,11 @@ static void spill( regs_ctx *ctx, value_info *v ) {
 	regs_debug("REG SPILL %s @%X\n",value_str(v),ctx->cur_op);
 }
 
+static void live_add( regs_ctx *ctx, values *set, value_info *v ) {
+	values_add(*set, v);
+	if( v->last_read < ctx->live_expiry ) ctx->live_expiry = v->last_read;
+}
+
 static bool reg_is_free( regs_ctx *ctx, ereg r ) {
 	for_iter(values,v,ctx->scratch)
 		if( v->reg == r ) return false;
@@ -319,13 +326,13 @@ static void regs_alloc_reg( regs_ctx *ctx, value_info *v, bool across_call ) {
 		if( IS_NULL(r) ) r = steal_persist(ctx, mode, v->tot_reads);
 		if( !IS_NULL(r) ) {
 			v->reg = r;
-			values_add(ctx->persists, v);
+			live_add(ctx, &ctx->persists, v);
 			return;
 		}
 	}
 	if( pref_free && !reg_is_persist(cfg,v->pref_reg) ) {
 		v->reg = v->pref_reg;
-		values_add(ctx->scratch, v);
+		live_add(ctx, &ctx->scratch, v);
 		return;
 	}
 	value_info *first = NULL;
@@ -345,7 +352,7 @@ static void regs_alloc_reg( regs_ctx *ctx, value_info *v, bool across_call ) {
 		}
 		if( !IS_NULL(r) ) {
 			v->reg = r;
-			values_add(ctx->scratch, v);
+			live_add(ctx, &ctx->scratch, v);
 			return;
 		}
 	}
@@ -353,7 +360,7 @@ static void regs_alloc_reg( regs_ctx *ctx, value_info *v, bool across_call ) {
 		ereg r = alloc_persist(ctx, mode);
 		if( !IS_NULL(r) ) {
 			v->reg = r;
-			values_add(ctx->persists, v);
+			live_add(ctx, &ctx->persists, v);
 			return;
 		}
 	}
@@ -361,7 +368,7 @@ static void regs_alloc_reg( regs_ctx *ctx, value_info *v, bool across_call ) {
 	if( !first ) jit_assert();
 	v->reg = first->reg;
 	spill(ctx, first);
-	values_add(ctx->scratch, v);
+	live_add(ctx, &ctx->scratch, v);
 }
 
 // Phase 0 found no gain for unconditional returning calls in hot loops.
@@ -659,10 +666,10 @@ static void regs_assign_regs( regs_ctx *ctx ) {
 			ereg p = live_across_call(ctx,v,0) ? alloc_persist(ctx,REG_MODE(e->mode)) : UNUSED;
 			if( !IS_NULL(p) ) {
 				v->reg = p;
-				values_add(ctx->persists,v);
+				live_add(ctx, &ctx->persists, v);
 			} else {
 				v->reg = r;
-				values_add(ctx->scratch,v);
+				live_add(ctx, &ctx->scratch, v);
 			}
 		}
 	if( IS_NULL(r) || IS_WINCALL64 ) {
@@ -693,13 +700,21 @@ static void regs_assign_regs( regs_ctx *ctx ) {
 			}
 		}
 
-		for_iter_back(values,v,ctx->scratch) {
-			if( v->last_read <= cur_op )
-				values_remove(&ctx->scratch,v);
-		}
-		for_iter_back(values,v2,ctx->persists) {
-			if( v2->last_read <= cur_op )
-				values_remove(&ctx->persists,v2);
+		if( cur_op >= ctx->live_expiry ) {
+			int expiry = 0x7FFFFFFF;
+			for_iter_back(values,v,ctx->scratch) {
+				if( v->last_read <= cur_op )
+					values_remove(&ctx->scratch,v);
+				else if( v->last_read < expiry )
+					expiry = v->last_read;
+			}
+			for_iter_back(values,v2,ctx->persists) {
+				if( v2->last_read <= cur_op )
+					values_remove(&ctx->persists,v2);
+				else if( v2->last_read < expiry )
+					expiry = v2->last_read;
+			}
+			ctx->live_expiry = expiry;
 		}
 
 		if( IS_CALL(e.op) ) {
@@ -1256,6 +1271,7 @@ void hl_regs_function( jit_ctx *jit ) {
 	jit->reg_instrs = NULL;
 	values_free(&ctx->scratch);
 	values_free(&ctx->persists);
+	ctx->live_expiry = 0x7FFFFFFF;
 	int_arr_free(&ctx->jump_regs);
 	int_arr_free(&ctx->pack_movs);
 	ctx->cur_block = NULL;
