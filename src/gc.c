@@ -1191,10 +1191,11 @@ HL_API bool hl_jit_alloc_prepare(hl_type *type, hl_jit_alloc_data *data) {
 	// An object of no owner allocates from the thread's unowned slots, which are an arena's while one is current.
 	data->tlab_field = !home ? (int)offsetof(hl_thread_info,gc_tlab_unowned) : (int)offsetof(hl_thread_info,gc_tlab);
 	data->slot_offset = (oc * GC_TLAB_SLOTS + ((part << PAGE_KIND_BITS) | (rt->hasPtr ? MEM_KIND_DYNAMIC : MEM_KIND_NOPTR))) * sizeof(gc_tlab_slot);
-#define GC_TLAB_GUARD(value, bits, width) \
+// One statement, so that `if( !home ) GC_TLAB_GUARD(...)` guards all of it.
+#define GC_TLAB_GUARD(value, bits, width) { \
 	data->guards[data->nguards].address = (void*)&(value); \
 	data->guards[data->nguards].mask = (bits); \
-	data->guards[data->nguards++].bytes = (width);
+	data->guards[data->nguards++].bytes = (width); }
 	GC_TLAB_POLICY(GC_TLAB_GUARD)
 	// A pending collection must force a safepoint through the existing slow path.
 	GC_TLAB_GUARD(gc_threads.stopping_world,1,1)
