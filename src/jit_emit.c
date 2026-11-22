@@ -85,15 +85,6 @@ typedef struct _tmp_phi tmp_phi;
 #include "data_struct.c"
 #define ereg_add(set,k,v)		ereg_add_pair_impl(DEF_ALLOC,&(set),k,v)
 
-#define S_MAP
-
-#define S_TYPE			vreg_map
-#define S_NAME(name)	vreg_##name
-#define S_KEY			int
-#define S_VALUE			ereg
-#include "data_struct.c"
-#define vreg_replace(set,k,v) vreg_replace_impl(DEF_ALLOC,&(set),k,v)
-
 struct _linked_inf {
 	int id;
 	void *ptr;
@@ -108,7 +99,9 @@ struct _emit_block {
 	bool sealed;
 	blocks nexts;
 	blocks preds;
-	vreg_map written_vars;
+	// The value of each register at the block's end so far, by register id (UNUSED when unknown): read and written on every
+	// variable lookup, so a direct index rather than a search.
+	ereg *written_vars;
 	phi_arr phis;
 	emit_block *wait_seal_next;
 };
@@ -444,6 +437,7 @@ static tmp_phi *alloc_phi( emit_ctx *ctx, emit_block *b, vreg *r ) {
 
 static emit_block *alloc_block( emit_ctx *ctx ) {
 	emit_block *b = hl_zalloc(&ctx->jit->falloc, sizeof(emit_block));
+	b->written_vars = (ereg*)hl_zalloc(&ctx->jit->falloc, sizeof(ereg) * ctx->fun->nregs);
 	b->id = blocks_count(ctx->blocks);
 	b->start_pos = ctx->emit_pos;
 	blocks_add(ctx->blocks, b);
@@ -462,7 +456,9 @@ static void block_add_pred( emit_ctx *ctx, emit_block *b, emit_block *p ) {
 
 static void store_block_var( emit_ctx *ctx, emit_block *b, vreg *r, ereg v ) {
 	if( IS_NULL(v) ) jit_assert();
-	if( vreg_replace(b->written_vars,r->id,v) && v < 0 ) {
+	if( b->written_vars[r->id] == v ) return;
+	b->written_vars[r->id] = v;
+	if( v < 0 ) {
 		tmp_phi *p = GET_PHI(v);
 		p->ref_blocks = link_add(ctx,b->id,b,p->ref_blocks);
 	}
@@ -658,7 +654,7 @@ static ereg optimize_phi_rec( emit_ctx *ctx, tmp_phi *p ) {
 	linked_inf *l = p->ref_blocks;
 	while( l ) {
 		emit_block *b = (emit_block*)l->ptr;
-		if( vreg_find(b->written_vars,p->r->id) == p->value )
+		if( b->written_vars[p->r->id] == p->value )
 			store_block_var(ctx,b,p->r,same);
 		l = l->next;
 	}
@@ -690,7 +686,7 @@ static ereg gather_phis( emit_ctx *ctx, tmp_phi *p ) {
 }
 
 static ereg emit_load_reg_block( emit_ctx *ctx, emit_block *b, vreg *r ) {
-	ereg v = vreg_find(b->written_vars,r->id);
+	ereg v = b->written_vars[r->id];
 	if( !IS_NULL(v) )
 		return v;
 	if( !b->sealed ) {
