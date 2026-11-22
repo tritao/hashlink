@@ -238,7 +238,7 @@ typedef struct {
 	// never moving SP one word at a time: AArch64 faults on a load or store through an SP that is not 16-byte aligned.
 	bool stack_stores;
 	int debug_prefix_size;
-	bool alloc_inline; // Opt-in backend support; false on all other targets.
+	bool alloc_inline; // Inline small-object allocation: on for Linux x86-64; opt-in on AArch64; false on all other targets.
 	bool alloc_box; // Independent opt-in integer boxing expansion.
 	int regopt; // Backend-supported HL_JIT_REGOPT bits; zero retains baseline.
 	ereg req_bit_shifts;

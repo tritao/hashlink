@@ -466,8 +466,8 @@ void hl_jit_init_regs( regs_config *cfg ) {
 	cfg->regopt = option ? (int)strtol(option,NULL,0) & (JIT_REGOPT_CALL_SAVE | JIT_REGOPT_LOOP_PHI) : (JIT_REGOPT_CALL_SAVE | JIT_REGOPT_LOOP_PHI);
 #endif
 #if defined(__linux__) && defined(__x86_64__) && !defined(HL_WIN_CALL)
-	const char *alloc = getenv("HL_JIT_ALLOC_INLINE");
-	cfg->alloc_inline = alloc && strcmp(alloc,"1") == 0;
+	// Small objects are allocated inline (ALLOC_OBJECT), with a cold call when the thread's run is exhausted.
+	cfg->alloc_inline = true;
 	const char *box = getenv("HL_JIT_ALLOC_BOX");
 	cfg->alloc_box = box && strcmp(box,"1") == 0;
 #endif

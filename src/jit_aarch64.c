@@ -117,7 +117,7 @@ void hl_jit_init_regs( regs_config *cfg ) {
 	cfg->stack_align = 16;      // AAPCS64 mandates
 	cfg->clear_stack_on_return = 1;
 	cfg->stack_stores = true;
-	// Inline allocation is opt-in, as on x86-64 (see GC_JIT_INLINE_ALLOC).
+	// Inline allocation stays opt-in here until it is validated on AArch64; x86-64 has it on (see GC_JIT_INLINE_ALLOC).
 	const char *alloc = getenv("HL_JIT_ALLOC_INLINE");
 	cfg->alloc_inline = alloc && strcmp(alloc,"1") == 0;
 	const char *box = getenv("HL_JIT_ALLOC_BOX");
