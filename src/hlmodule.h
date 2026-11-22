@@ -94,6 +94,10 @@ typedef struct {
 	int *fields;
 } hl_constant;
 
+/* A debug section whose payload is its decoded size (an unsigned index) followed by one LZ4 block. The loader decodes it, so
+   readers of hl_debug_section.data see the plain payload. */
+#define HL_DEBUG_SECTION_LZ4 1
+
 typedef struct {
 	int kind;
 	int version;

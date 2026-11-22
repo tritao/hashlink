@@ -20,6 +20,8 @@
  * DEALINGS IN THE SOFTWARE.
  */
 #include <hl.h>
+#include "../../include/lz4/lz4.h"
+#include "../../include/lz4/lz4hc.h"
 
 HL_PRIM vbyte *hl_alloc_bytes( int size ) {
 	return (vbyte*)hl_gc_alloc_noptr(size);
@@ -292,6 +294,13 @@ HL_PRIM int hl_bytes_get_memsize( vbyte *ptr ) {
 	return hl_gc_get_memsize(ptr);
 }
 
+/* One LZ4 block of `src` into `dst`, which holds `cap` bytes: LZ4's fast mode at level 0, LZ4 HC at levels 1 to 12. Returns the
+   block's size, 0 when it does not fit. The output depends only on the input and the level, so every build writes the same bytes. */
+HL_PRIM int hl_bytes_lz4_compress( vbyte *src, int len, vbyte *dst, int cap, int level ) {
+	if( level <= 0 ) return LZ4_compress_default((const char*)src,(char*)dst,len,cap);
+	return LZ4_compress_HC((const char*)src,(char*)dst,len,cap,level);
+}
+
 DEFINE_PRIM(_BYTES,alloc_bytes,_I32);
 DEFINE_PRIM(_VOID,bytes_blit,_BYTES _I32 _BYTES _I32 _I32);
 DEFINE_PRIM(_I32,bytes_compare,_BYTES _I32 _BYTES _I32 _I32);
@@ -313,3 +322,4 @@ DEFINE_PRIM(_BYTES,bytes_from_address, _I32 _I32);
 DEFINE_PRIM(_I64,bytes_address64, _BYTES);
 DEFINE_PRIM(_BYTES,bytes_from_address64, _I64);
 DEFINE_PRIM(_I32, bytes_get_memsize, _BYTES);
+DEFINE_PRIM(_I32, bytes_lz4_compress, _BYTES _I32 _BYTES _I32 _I32);

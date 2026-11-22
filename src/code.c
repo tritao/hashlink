@@ -20,6 +20,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 #include "hlmodule.h"
+#include "../include/lz4/lz4.h"
 
 #define OP(_,_a,_b,_c) (_b == AR ? _c : (_c == X ? (_b == X ? (_a == X ? 0 : 1) : 2) : 3)),
 #define OP_BEGIN static int hl_op_nargs[] = {
@@ -734,6 +735,16 @@ hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg ) {
 			s->data = hl_malloc(&c->falloc,s->size);
 			hl_read_bytes(r,s->data,s->size);
 			CHK_ERROR();
+			if( s->flags & HL_DEBUG_SECTION_LZ4 ) {
+				hl_reader packed = { s->data, s->size, 0, 0, c };
+				int size = hl_read_uindex(&packed);
+				if( packed.error || size < 0 ) EXIT("Invalid compressed debug section");
+				unsigned char *data = hl_malloc(&c->falloc,size > 0 ? size : 1);
+				if( LZ4_decompress_safe((const char*)s->data + packed.pos,(char*)data,s->size - packed.pos,size) != size )
+					EXIT("Invalid compressed debug section");
+				s->data = data;
+				s->size = size;
+			}
 			if( s->kind == 1 && s->version == 1 ) {
 				hl_read_function_identities(r,s->data,s->size);
 				CHK_ERROR();

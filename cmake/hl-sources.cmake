@@ -4,7 +4,7 @@
 #
 #   HL_JIT_AARCH64     ON when the AArch64 JIT backend is built (else x86 or x86-64)
 #   HL_PCRE_SOURCES    the bundled PCRE2 (built with HAVE_CONFIG_H and PCRE2_STATIC, include/pcre on the include path)
-#   HL_LIBHL_SOURCES   libhl: the GC, the profiler, number formatting and the standard library natives for this platform
+#   HL_LIBHL_SOURCES   libhl: the GC, the profiler, number formatting, LZ4 and the standard library natives for this platform
 #   HL_VM_SOURCES      the VM, less main.c: the bytecode loader, patching, the debugger, diagnostics and the profiler
 #   HL_JIT_SOURCES     the JIT for this processor
 #   HL_NO_JIT_SOURCES  in place of HL_JIT_SOURCES, the JIT's entry points for a VM without it, whose modules were compiled
@@ -37,6 +37,7 @@ foreach(_source IN ITEMS gc.c prof.c ryu/d2s.c ryu/f2s.c
         std/types.c std/ucs2.c std/thread.c std/process.c)
     list(APPEND HL_LIBHL_SOURCES "${_hl_root}/src/${_source}")
 endforeach()
+list(APPEND HL_LIBHL_SOURCES "${_hl_root}/include/lz4/lz4.c" "${_hl_root}/include/lz4/lz4hc.c")
 if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
     list(APPEND HL_LIBHL_SOURCES
         "${_hl_root}/include/mdbg/mdbg.c"
@@ -53,7 +54,7 @@ endif()
 
 set(HL_VM_SOURCES)
 foreach(_source IN ITEMS src/code.c src/module.c src/hlpatch.c src/hlruntime.c src/debugger.c src/diagnostics.c
-        src/diagnostics_transport.c src/profile.c src/prof_boundary.c include/lz4/lz4.c)
+        src/diagnostics_transport.c src/profile.c src/prof_boundary.c)
     list(APPEND HL_VM_SOURCES "${_hl_root}/${_source}")
 endforeach()
 
