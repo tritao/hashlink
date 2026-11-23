@@ -700,11 +700,6 @@ HL_API void hl_array_ensure( varray *a, int index );
 HL_API HL_NO_RETURN( void hl_array_out_of_bounds( varray *a, int index ) );
 HL_API vdynamic *hl_alloc_dynamic( hl_type *t );
 
-// String-keyed (hl_bytes_map) operations for a 0-terminated key whose length in code units is already known.
-HL_API void hl_hbset_n( void *map, uchar *key, int len, vdynamic *value );
-HL_API bool hl_hbexists_n( void *map, uchar *key, int len );
-HL_API vdynamic *hl_hbget_n( void *map, uchar *key, int len );
-HL_API bool hl_hbremove_n( void *map, uchar *key, int len );
 HL_API vdynamic *hl_alloc_dynbool( bool b );
 HL_API vdynamic *hl_alloc_obj( hl_type *t );
 // Private JIT/runtime contract. The descriptor belongs to one compiled function.
@@ -1127,15 +1122,6 @@ typedef struct {
 HL_API hl_type *hl_string_type;
 HL_API bool hl_is_string_type( hl_type *t );
 HL_API bool hl_string_hashes( void );
-HL_API vdynamic *hl_hbget_s( void *map, vstring *key );
-HL_API bool hl_hbexists_s( void *map, vstring *key );
-HL_API void hl_hbset_s( void *map, vstring *key, vdynamic *value );
-HL_API bool hl_hbremove_s( void *map, vstring *key );
-/* The same for a String-keyed map of scalar values (hl_hbs_, maps.c), which boxes nothing. */
-HL_API void hl_hbs_set_s( void *map, vstring *key, int64 value );
-HL_API bool hl_hbs_exists_s( void *map, vstring *key );
-HL_API int hl_hbs_index_s( void *map, vstring *key );
-HL_API bool hl_hbs_remove_s( void *map, vstring *key );
 HL_API void hl_register_string_type( hl_type *t );
 /* Wraps UTF-16 data (not copied) in a String object; NULL when no String type is registered. */
 HL_API vstring *hl_alloc_string( uchar *bytes, int length );

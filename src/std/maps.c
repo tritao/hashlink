@@ -166,40 +166,14 @@ static unsigned hl_hbhash_n( const uchar *key, int len ) {
 
 #include "maps.h"
 
-/*
-	The same operations for a caller that already knows the key's length in code units, as a String does: the key is
-	neither scanned for its terminator nor compared past it. `key` must still be 0-terminated, since the map keeps it.
-*/
-#define HB_LEN(key,len) ((key) == NULL ? -1 : (len))
-
-HL_API void hl_hbset_n( void *m, uchar *key, int len, vdynamic *value ) {
-	len = HB_LEN(key,len);
-	hl_hbprobe_set((hl_hb_map*)m,key,hl_hbhash_n(key,len),len,value);
-}
-
-HL_API bool hl_hbexists_n( void *m, uchar *key, int len ) {
-	len = HB_LEN(key,len);
-	return hl_hbprobe_find((hl_hb_map*)m,key,hl_hbhash_n(key,len),len) != NULL;
-}
-
-HL_API vdynamic *hl_hbget_n( void *m, uchar *key, int len ) {
-	len = HB_LEN(key,len);
-	vdynamic **v = hl_hbprobe_find((hl_hb_map*)m,key,hl_hbhash_n(key,len),len);
-	return v == NULL ? NULL : *v;
-}
-
-HL_API bool hl_hbremove_n( void *m, uchar *key, int len ) {
-	len = HB_LEN(key,len);
-	return hl_hbprobe_remove((hl_hb_map*)m,key,hl_hbhash_n(key,len),len);
-}
-
-#undef HB_LEN
+// ----- STRING MAPS ---------------------------------
 
 /*
-	The same operations for a String key, whose hash is computed once and kept in the String when its type has room
-	(hl_string_hashes): a key that is the stored String itself is then found without reading its code units.
+	Maps keyed by String objects. The map keeps the String it was given, so listing the keys returns those Strings, and a
+	key that is the stored String itself matches without reading its code units. Its hash is computed once and kept in
+	the String when its type has room (hl_string_hashes). Strings are immutable, so a stored key never changes.
 */
-static inline unsigned hl_hbstring_hash( vstring *s ) {
+static inline unsigned hl_hshash( vstring *s ) {
 	if( s == NULL ) return 0u;
 	if( s->t == hl_string_type && hl_string_type->obj->nfields == 3 ) {
 		unsigned h = (unsigned)s->hash;
@@ -212,50 +186,56 @@ static inline unsigned hl_hbstring_hash( vstring *s ) {
 	return hl_hbhash_n(s->bytes,s->length);
 }
 
-#define HB_SKEY(s) ((s) == NULL ? NULL : (s)->bytes)
-#define HB_SLEN(s) ((s) == NULL ? -1 : (s)->length)
-
-HL_API void hl_hbset_s( void *m, vstring *key, vdynamic *value ) {
-	hl_hbprobe_set((hl_hb_map*)m,HB_SKEY(key),hl_hbstring_hash(key),HB_SLEN(key),value);
+// Another String with the same code units; a null key only matches itself.
+static inline bool hl_hs_same_text( vstring *a, vstring *b ) {
+	return a != NULL && b != NULL && a->length == b->length && memcmp(a->bytes,b->bytes,(size_t)a->length * sizeof(uchar)) == 0;
 }
 
-HL_API bool hl_hbexists_s( void *m, vstring *key ) {
-	return hl_hbprobe_find((hl_hb_map*)m,HB_SKEY(key),hl_hbstring_hash(key),HB_SLEN(key)) != NULL;
-}
+typedef struct {
+	unsigned int hash;
+} hl_hs_entry;
 
-HL_API vdynamic *hl_hbget_s( void *m, vstring *key ) {
-	vdynamic **v = hl_hbprobe_find((hl_hb_map*)m,HB_SKEY(key),hl_hbstring_hash(key),HB_SLEN(key));
-	return v == NULL ? NULL : *v;
-}
+typedef struct {
+	vstring *key;
+	vdynamic *value;
+} hl_hs_value;
 
-HL_API bool hl_hbremove_s( void *m, vstring *key ) {
-	return hl_hbprobe_remove((hl_hb_map*)m,HB_SKEY(key),hl_hbstring_hash(key),HB_SLEN(key));
-}
+// The keys listing is an array of String.
+#define hlt_key		(*hl_string_type)
+#define hl_hsfilter(key) key
+#define _MHASHN(key,klen)	hl_hshash(key)
+#define _MKEY_TYPE	vstring*
+#define _MNAME(n)	hl_hs##n
+#define _MMATCH(c)	(m->entries[c].hash == hash && (m->values[c].key == key || hl_hs_same_text(m->values[c].key,key)))
+#define _MKEY(m,c)	m->values[c].key
+#define	_MSET(c)	m->entries[c].hash = hash; hl_gc_store_ref(&m->values[c].key,key,&hlt_key)
+#define _MREHASH(m,c)	((m)->entries[c].hash)
+#define _MERASE(c)  hl_gc_store_ref(&m->values[c].key,NULL,&hlt_key)
 
-// ----- BYTES MAP OF SCALARS ---------------------------------
+#include "maps.h"
+
+// ----- STRING MAP OF SCALARS ---------------------------------
 
 // The value is with the key's hash, where no pointer scan reads it; the values block holds only keys.
 typedef struct {
 	unsigned int hash;
-	int len;
 	int64 value;
-} hl_hbs__entry;
+} hl_hss__entry;
 
 typedef struct {
-	uchar *key;
-} hl_hbs__value;
+	vstring *key;
+} hl_hss__value;
 
 #undef _MVAL_TYPE
 #define _MVAL_TYPE int64
-#define hlt_key		hlt_bytes
-#define hl_hbs_filter(key) key
-#define _MKLEN(key)	((key) == NULL ? -1 : (int)hb_ulen(key))
-#define _MHASHN(key,klen)	hl_hbhash_n(key,klen)
-#define _MKEY_TYPE	uchar*
-#define _MNAME(n)	hl_hbs_##n
-#define _MMATCH(c)	(m->entries[c].hash == hash && m->entries[c].len == klen && (m->values[c].key == key || memcmp(m->values[c].key,key,(size_t)klen * sizeof(uchar)) == 0))
+#define hlt_key		(*hl_string_type)
+#define hl_hss_filter(key) key
+#define _MHASHN(key,klen)	hl_hshash(key)
+#define _MKEY_TYPE	vstring*
+#define _MNAME(n)	hl_hss_##n
+#define _MMATCH(c)	(m->entries[c].hash == hash && (m->values[c].key == key || hl_hs_same_text(m->values[c].key,key)))
 #define _MKEY(m,c)	m->values[c].key
-#define	_MSET(c)	m->entries[c].hash = hash; m->entries[c].len = klen; hl_gc_store_ref(&m->values[c].key,key,&hlt_key)
+#define	_MSET(c)	m->entries[c].hash = hash; hl_gc_store_ref(&m->values[c].key,key,&hlt_key)
 #define _MREHASH(m,c)	((m)->entries[c].hash)
 #define _MERASE(c)  hl_gc_store_ref(&m->values[c].key,NULL,&hlt_key)
 #define _MSCALAR
@@ -263,25 +243,6 @@ typedef struct {
 #define _MVALUE_LAYOUT hlt_i64
 
 #include "maps.h"
-
-HL_API void hl_hbs_set_s( void *m, vstring *key, int64 value ) {
-	hl_hbs_probe_set((hl_hbs__map*)m,HB_SKEY(key),hl_hbstring_hash(key),HB_SLEN(key),value);
-}
-
-HL_API bool hl_hbs_exists_s( void *m, vstring *key ) {
-	return hl_hbs_probe_index((hl_hbs__map*)m,HB_SKEY(key),hl_hbstring_hash(key),HB_SLEN(key)) >= 0;
-}
-
-HL_API int hl_hbs_index_s( void *m, vstring *key ) {
-	return hl_hbs_probe_index((hl_hbs__map*)m,HB_SKEY(key),hl_hbstring_hash(key),HB_SLEN(key));
-}
-
-HL_API bool hl_hbs_remove_s( void *m, vstring *key ) {
-	return hl_hbs_probe_remove((hl_hbs__map*)m,HB_SKEY(key),hl_hbstring_hash(key),HB_SLEN(key));
-}
-
-#undef HB_SKEY
-#undef HB_SLEN
 
 // ----- INT MAP OF SCALARS ---------------------------------
 
