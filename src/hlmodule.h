@@ -436,7 +436,13 @@ typedef struct {
 	char *patch_refusal;
 } hl_module;
 
+/* Reads an HLB file. A sectioned file (HLB 9) goes to hl_code_link; the result is the same dense hl_code either way. */
 HL_EXTERN_C HL_EXPORT hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg );
+/* Links the per-module sections of an HLB 9 file into one hl_code (link.c). On failure it returns NULL and sets error_msg to a
+   message naming the section and the key involved, valid until the thread's next failed link. */
+HL_EXTERN_C HL_EXPORT hl_code *hl_code_link( const unsigned char *data, int size, char **error_msg );
+/* The control-flow checks every loaded function passes: jump targets inside the function and trap regions well nested. */
+const char *hl_validate_function_control_flow( hl_function *f );
 
 hl_code_hash *hl_code_hash_alloc( hl_code *c );
 void hl_code_hash_finalize( hl_code_hash *h );

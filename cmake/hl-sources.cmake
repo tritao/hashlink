@@ -53,7 +53,7 @@ if(IOS_PLATFORM)
 endif()
 
 set(HL_VM_SOURCES)
-foreach(_source IN ITEMS src/code.c src/module.c src/hlpatch.c src/hlruntime.c src/debugger.c src/diagnostics.c
+foreach(_source IN ITEMS src/code.c src/link.c src/module.c src/hlpatch.c src/hlruntime.c src/debugger.c src/diagnostics.c
         src/diagnostics_transport.c src/profile.c src/prof_boundary.c)
     list(APPEND HL_VM_SOURCES "${_hl_root}/${_source}")
 endforeach()

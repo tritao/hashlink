@@ -475,7 +475,7 @@ static const char *hl_validate_trap_regions( hl_function *f ) {
 	return error;
 }
 
-static const char *hl_validate_function_control_flow( hl_function *f ) {
+const char *hl_validate_function_control_flow( hl_function *f ) {
 	for( int i = 0; i < f->nops; i++ ) {
 		hl_opcode *op = f->ops + i;
 #define VALID_TARGET(offset) (i + 1 + (offset) >= 0 && i + 1 + (offset) < f->nops)
@@ -605,6 +605,9 @@ hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg ) {
 	int i;
 	int flags;
 	int max_version = 8;
+	// HLB 9 holds per-module sections, which the linker joins into the same tables.
+	if( size >= 4 && data[0] == 'H' && data[1] == 'L' && data[2] == 'B' && data[3] == 9 )
+		return hl_code_link(data, size, error_msg);
 	hl_alloc_init(&alloc);
 	c = hl_zalloc(&alloc,sizeof(hl_code));
 	c->alloc = alloc;
