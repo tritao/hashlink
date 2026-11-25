@@ -1351,6 +1351,22 @@ static void read_function( link_ctx *L, link_section *s, int i ) {
 	}
 }
 
+/*
+	The section's debug sub-sections (opcode source spans, source snapshots), each a kind, a version, flags, a size and a
+	payload as HLB 8's debug sections are. Tools read them from the file; the loader only checks that they are well formed.
+*/
+static void skip_debug_sections( link_ctx *L ) {
+	int count = rd_count(L);
+	for(int i=0;i<count && !L->error;i++) {
+		int kind = rd_uindex(L), version = rd_uindex(L), flags = rd_uindex(L), size = rd_uindex(L);
+		if( L->error ) return;
+		if( kind <= 0 || version <= 0 ) { malformed(L, "invalid debug section header"); return; }
+		// The section's own compression covers them.
+		if( flags != 0 ) { malformed(L, "a compressed debug section"); return; }
+		rd_raw(L, size);
+	}
+}
+
 static void read_code( link_ctx *L, int si ) {
 	link_section *s = L->sections + si;
 	L->cur = si;
@@ -1361,6 +1377,7 @@ static void read_code( link_ctx *L, int si ) {
 	hl_alloc_init(&L->scratch);
 	read_constants(L, s);
 	for(int i=0;i<s->nfunctions && !L->error;i++) read_function(L, s, i);
+	if( !L->error ) skip_debug_sections(L);
 	if( !L->error && L->pos != L->size ) malformed(L, "trailing data");
 }
 
