@@ -1895,6 +1895,7 @@ void hl_module_free_shutdown( hl_module *m ) {
 	free(m->globals_indexes);
 	free(m->globals_data);
 	free(m->debug_hlb);
+	hl_code_link_state_free(m->code);
 	if( m->jit_debug ) {
 		int i;
 		for(i=0;i<m->code->nfunctions;i++) {

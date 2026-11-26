@@ -158,6 +158,9 @@ typedef struct {
 	hl_debug_section*debugsections;
 	hl_alloc	alloc;
 	hl_alloc	falloc;
+	/* What linking an HLB 9 file left for patches to link against (link.c), when it was read to be patched; the module that
+	   loads the code owns it. */
+	struct hl_link_state *link_state;
 } hl_code;
 
 typedef struct {
@@ -279,6 +282,8 @@ typedef struct {
 	int type;
 	int stable_id;
 	int findex;
+	/* HLP 12 names the class and the function by key, which the patch linker resolves (`hl_module_link_patch`). */
+	char *type_module, *type_member, *function_module, *function_member;
 } hl_patch_migration;
 
 /*
@@ -291,7 +296,23 @@ typedef struct {
 	int stable_id;
 	int findex;
 	char *description;
+	/* HLP 12 names the function by key. */
+	char *module, *member;
 } hl_patch_guard;
+
+/* An HLP 12 section: a module's code in the HLB 9 encoding, which replaces the section of the same path. */
+typedef struct {
+	char *path;
+	unsigned char *data;
+	int size;
+} hl_patch_section;
+
+/* An HLP 12 rename: the function keyed (module, from) is keyed (module, to) from this patch on, in the slot it has. */
+typedef struct {
+	char *module, *from, *to;
+	/* The slot, once linked. */
+	int slot;
+} hl_patch_rename;
 
 typedef struct {
 	unsigned char module_id[16];
@@ -334,6 +355,16 @@ typedef struct {
 	int global_name_count;
 	int *global_name_indexes;
 	char **global_names;
+	/* HLP 12: what the patch linker links against the module's link state into the tables above. */
+	int version;
+	int section_count;
+	hl_patch_section *sections;
+	int removed_count;
+	char **removed;
+	int rename_count;
+	hl_patch_rename *renames;
+	/* The linker's tentative additions to the link state, committed with the patch or dropped (`hl_link_patch_end`). */
+	struct hl_link_patch *linked;
 } hl_patch;
 
 HL_EXTERN_C HL_EXPORT hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error_msg );
@@ -438,9 +469,15 @@ typedef struct {
 
 /* Reads an HLB file. A sectioned file (HLB 9) goes to hl_code_link; the result is the same dense hl_code either way. */
 HL_EXTERN_C HL_EXPORT hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg );
+/* Reads an HLB file for a module that takes patches: an HLB 9 file keeps its link state (`hl_code.link_state`), which HLP 12
+   patches link against. */
+HL_EXTERN_C HL_EXPORT hl_code *hl_code_read_patchable( const unsigned char *data, int size, char **error_msg );
+HL_EXTERN_C HL_EXPORT void hl_code_link_state_free( hl_code *c );
 /* Links the per-module sections of an HLB 9 file into one hl_code (link.c). On failure it returns NULL and sets error_msg to a
    message naming the section and the key involved, valid until the thread's next failed link. */
 HL_EXTERN_C HL_EXPORT hl_code *hl_code_link( const unsigned char *data, int size, char **error_msg );
+/* hl_code_link that keeps the link state for patches (`hl_code.link_state`). */
+HL_EXTERN_C HL_EXPORT hl_code *hl_code_link_patchable( const unsigned char *data, int size, char **error_msg );
 /* The control-flow checks every loaded function passes: jump targets inside the function and trap regions well nested. */
 const char *hl_validate_function_control_flow( hl_function *f );
 
@@ -463,6 +500,14 @@ const char* hl_op_name( int op );
 const char *hl_code_function_name( hl_code *code, hl_function *function );
 
 typedef unsigned char h_bool;
+/* Links an HLP 12 patch's sections against the module's link state into the patch's tables, as `hl_patch_read` fills them
+   for HLP 11: functions by slot, added functions with the stable ids the loader mints (their slots), types, globals and
+   literals after the module's. A function whose linked code is the running one's is left out. False with a message naming
+   the section and the key on failure. The additions are tentative until `hl_module_apply_patch` commits them. */
+HL_EXTERN_C HL_EXPORT h_bool hl_module_link_patch( hl_module *m, hl_patch *patch, const char **error_msg );
+/* Commits the patch linker's additions once the patch applied, or drops them; `hl_module_apply_patch` and `hl_patch_free`
+   call it. */
+void hl_link_patch_end( hl_patch *patch, bool applied );
 
 #define HL_MODULE_HOT_RELOAD 1
 #define HL_MODULE_DUMP 2
@@ -607,6 +652,9 @@ typedef enum {
 /* What keeps the module from retiring (its live blocks, their types and holders), or NULL; the caller frees it. */
 HL_EXTERN_C HL_EXPORT uchar *hl_runtime_module_describe_borrowers( hl_runtime_module *runtime );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length, const unsigned char *identity, int identity_length, hl_runtime_module **out );
+/** The stable id of the function named `name` (its key's member, as `hl_code.function_names` has it), or -1. With an HLI 4
+    identity the loader mints the ids: a function's slot, which a rename keeps. */
+HL_EXTERN_C HL_EXPORT int hl_runtime_module_function_id( hl_runtime_module *runtime, const char *name );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_i32( hl_runtime_module *runtime, int stable_id, int *result, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_void( hl_runtime_module *runtime, int stable_id, vdynamic **exception );
 HL_EXTERN_C HL_EXPORT hl_runtime_status hl_runtime_module_call_bytes( hl_runtime_module *runtime, int stable_id, vbyte **result, vdynamic **exception );

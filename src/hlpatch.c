@@ -568,6 +568,16 @@ static bool read_patch_object_type( patch_reader *r, hl_patch_type *type ) {
 void hl_patch_free( hl_patch *patch ) {
 	int i, j;
 	if( patch == NULL ) return;
+	// A linked patch that did not apply leaves nothing in the module's link state.
+	hl_link_patch_end(patch,false);
+	for(i=0;i<patch->section_count;i++) { free(patch->sections[i].path); free(patch->sections[i].data); }
+	free(patch->sections);
+	for(i=0;i<patch->removed_count;i++) free(patch->removed[i]);
+	free(patch->removed);
+	for(i=0;i<patch->rename_count;i++) { free(patch->renames[i].module); free(patch->renames[i].from); free(patch->renames[i].to); }
+	free(patch->renames);
+	for(i=0;i<patch->guard_count;i++) { free(patch->guards[i].module); free(patch->guards[i].member); }
+	for(i=0;i<patch->migration_count;i++) { free(patch->migrations[i].type_module); free(patch->migrations[i].type_member); free(patch->migrations[i].function_module); free(patch->migrations[i].function_member); }
 	for(i=0;i<patch->string_count;i++) free(patch->strings[i]);
 	for(i=0;i<patch->function_count;i++) {
 		hl_patch_function *f = patch->functions + i;
@@ -597,6 +607,68 @@ void hl_patch_free( hl_patch *patch ) {
 	free(patch->debug_files); free(patch->debug_file_lens); free(patch->functions); free(patch->strings); free(patch->string_lens); free(patch->floats); free(patch->ints); free(patch);
 }
 
+/* A length-prefixed text, copied NUL-terminated. */
+static bool read_text( patch_reader *r, char **out ) {
+	const unsigned char *p; int length;
+	if( !read_count(r,&length) || !take(r,length,&p) ) return false;
+	*out = (char*)malloc(length + 1);
+	if( *out == NULL ) { r->error = "Out of memory reading HLP"; return false; }
+	memcpy(*out,p,length); (*out)[length] = 0;
+	return true;
+}
+
+/*
+ * HLP 12, after the magic, the version, the module id and the revisions: the sections it replaces (a path, a byte size, then a
+ * section in the HLB 9 encoding), the paths of the sections it removes, its renames (module, from, to), its guards (module,
+ * member, description) and its migrations (the class's module and member, then the function's). Everything is named by key; the
+ * patch linker resolves it against the module (`hl_module_link_patch`).
+ */
+static bool read_hlp12( patch_reader *r, hl_patch *patch ) {
+	int count;
+	if( !read_count(r,&count) ) return false;
+	patch->sections = (hl_patch_section*)calloc(count + 1,sizeof(hl_patch_section));
+	if( patch->sections == NULL ) { r->error = "Out of memory reading HLP"; return false; }
+	for(int i=0;i<count;i++) {
+		hl_patch_section *section = patch->sections + i; const unsigned char *p;
+		patch->section_count = i + 1;
+		if( !read_text(r,&section->path) || !read_i32(r,&section->size) ) return false;
+		if( section->size <= 0 || r->end - r->p < section->size ) { r->error = "Invalid HLP section size"; return false; }
+		if( !take(r,section->size,&p) ) return false;
+		section->data = (unsigned char*)malloc(section->size);
+		if( section->data == NULL ) { r->error = "Out of memory reading HLP"; return false; }
+		memcpy(section->data,p,section->size);
+	}
+	if( !read_count(r,&count) ) return false;
+	patch->removed = (char**)calloc(count + 1,sizeof(char*));
+	for(int i=0;i<count;i++) { patch->removed_count = i + 1; if( !read_text(r,patch->removed + i) ) return false; }
+	if( !read_count(r,&count) ) return false;
+	patch->renames = (hl_patch_rename*)calloc(count + 1,sizeof(hl_patch_rename));
+	for(int i=0;i<count;i++) {
+		hl_patch_rename *rename = patch->renames + i;
+		patch->rename_count = i + 1;
+		if( !read_text(r,&rename->module) || !read_text(r,&rename->from) || !read_text(r,&rename->to) ) return false;
+	}
+	if( !read_count(r,&count) ) return false;
+	patch->guards = (hl_patch_guard*)calloc(count + 1,sizeof(hl_patch_guard));
+	for(int i=0;i<count;i++) {
+		hl_patch_guard *guard = patch->guards + i;
+		patch->guard_count = i + 1;
+		guard->findex = -1;
+		if( !read_text(r,&guard->module) || !read_text(r,&guard->member) || !read_text(r,&guard->description) ) return false;
+	}
+	if( !read_count(r,&count) ) return false;
+	patch->migrations = (hl_patch_migration*)calloc(count + 1,sizeof(hl_patch_migration));
+	for(int i=0;i<count;i++) {
+		hl_patch_migration *migration = patch->migrations + i;
+		patch->migration_count = i + 1;
+		migration->findex = -1;
+		if( !read_text(r,&migration->type_module) || !read_text(r,&migration->type_member)
+			|| !read_text(r,&migration->function_module) || !read_text(r,&migration->function_member) ) return false;
+	}
+	if( r->p != r->end ) { r->error = "Trailing HLP data"; return false; }
+	return true;
+}
+
 hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error_msg ) {
 	patch_reader r = { data, data + (size < 0 ? 0 : size), NULL };
 	hl_patch *patch = (hl_patch*)calloc(1,sizeof(hl_patch));
@@ -607,12 +679,18 @@ hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error
 	if( !take(&r,3,&p) ) goto fail;
 	if( memcmp(p,"HLP",3) != 0 ) FAIL("Invalid HLP magic");
 	if( !read_byte(&r,&version) ) goto fail;
-	// Version 11 adds stable nominal identities to virtual types.
-	if( version != 11 ) FAIL("Unsupported HLP version");
+	// Version 11 adds stable nominal identities to virtual types; version 12 is made of module sections.
+	if( version != 11 && version != 12 ) FAIL("Unsupported HLP version");
+	patch->version = version;
 	if( !take(&r,16,&p) ) goto fail;
 	memcpy(patch->module_id,p,16);
 	if( !read_count(&r,&patch->base_revision) || !read_count(&r,&patch->revision) ) goto fail;
 	if( patch->revision <= patch->base_revision ) FAIL("Invalid patch revision range");
+	if( version == 12 ) {
+		if( !read_hlp12(&r,patch) ) goto fail;
+		if( error_msg ) *error_msg=NULL;
+		return patch;
+	}
 	if( !read_count(&r,&section_count) ) goto fail;
 	for(int section=0;section<section_count;section++) {
 		patch_reader s;
@@ -1578,12 +1656,24 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 	hl_patch_migration_report ignored;const char *error=NULL;hl_patch_code *allocation=NULL;jit_ctx *jit=NULL;int *offsets=NULL,*combined_ints=NULL,*combined_string_lens=NULL;double *combined_floats=NULL;char **combined_strings=NULL,*combined_string_data=NULL;uchar **combined_ustrings=NULL;hl_function *combined_functions=NULL;void **type_allocations=NULL;int type_allocation_count=0;hl_code code;hl_module temp;patch_layout layout={0};bool staged_added=false;hl_patch_live *live_block=NULL;hl_patch_code *superseded=NULL;int globals_size=0;bool staged_globals=false;patch_object_field_stage *staged_fields=NULL;bool temp_ready=false;
 	if(report==NULL)report=&ignored;
 	memset(report,0,sizeof(*report));
+	char **added_files=NULL,**renamed_names=NULL;int *added_file_lens=NULL,renamed_count=0;
 	if(!m||!patch||!m->patchable){error="Module is not patchable";goto fail;}
-	if(patch->function_count<=0){error="Patch contains no functions";goto fail;}
 	if(m->revision!=patch->base_revision||patch->revision<=patch->base_revision){error="Stale patch revision";goto fail;}
-	if(patch->base_int_count!=m->code->nints||patch->base_float_count!=m->code->nfloats||patch->base_string_count!=m->code->nstrings||patch->base_type_count!=m->code->ntypes){error="Patch symbol base does not match module";goto fail;}
-	if(patch->int_prefix_hash!=hash_int_prefix(m->code,patch->base_int_count)||patch->float_prefix_hash!=hash_float_prefix(m->code,patch->base_float_count)||patch->string_prefix_hash!=hash_string_prefix(m->code,patch->base_string_count)||patch->type_prefix_hash!=hash_type_prefix(m,patch->base_type_count)){error="Patch symbol prefix hash does not match module";goto fail;}
-	if(patch->global_count>0&&(patch->base_global_count!=m->code->nglobals||patch->global_prefix_hash!=hash_global_prefix(m->code,patch->base_global_count))){error="Patch global base does not match module";goto fail;}
+	// A patch of sections names everything by key; the linker gives it the module's indices, and its additions after them.
+	if(patch->version==12&&!patch->linked&&!hl_module_link_patch(m,patch,&error))goto fail;
+	if(patch->version==12&&patch->function_count==0&&patch->type_count==0&&patch->global_count==0&&patch->object_field_count==0&&patch->migration_count==0&&patch->guard_count==0){
+		// Every function the sections define runs as it is: only the revision and the keys (renames) move.
+		hl_module_crash_write_lock();
+		for(int i=0;i<patch->rename_count;i++){int at=m->functions_indexes[patch->renames[i].slot],length=(int)strlen(patch->renames[i].to);char *name=(char*)hl_malloc(&m->code->alloc,length+1);memcpy(name,patch->renames[i].to,length+1);m->code->function_names[at]=name;m->code->function_names_lens[at]=length;}
+		m->revision=patch->revision;
+		hl_module_crash_write_unlock();
+		hl_link_patch_end(patch,true);
+		if(error_msg)*error_msg=NULL;return true;
+	}
+	if(patch->function_count<=0){error="Patch contains no functions";goto fail;}
+	if(patch->version!=12&&(patch->base_int_count!=m->code->nints||patch->base_float_count!=m->code->nfloats||patch->base_string_count!=m->code->nstrings||patch->base_type_count!=m->code->ntypes)){error="Patch symbol base does not match module";goto fail;}
+	if(patch->version!=12&&(patch->int_prefix_hash!=hash_int_prefix(m->code,patch->base_int_count)||patch->float_prefix_hash!=hash_float_prefix(m->code,patch->base_float_count)||patch->string_prefix_hash!=hash_string_prefix(m->code,patch->base_string_count)||patch->type_prefix_hash!=hash_type_prefix(m,patch->base_type_count))){error="Patch symbol prefix hash does not match module";goto fail;}
+	if(patch->version!=12&&patch->global_count>0&&(patch->base_global_count!=m->code->nglobals||patch->global_prefix_hash!=hash_global_prefix(m->code,patch->base_global_count))){error="Patch global base does not match module";goto fail;}
 	if(!validate_patch_types(m,patch,patch->base_string_count+patch->string_count,&error))goto fail;
 	if(!validate_patch_globals(m,patch,&globals_size,&error))goto fail;
 	if(!validate_patch_object_fields(m,patch,patch->base_string_count+patch->string_count,&error))goto fail;
@@ -1609,7 +1699,7 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 	allocation->function_count=patch->function_count;allocation->functions=(hl_function*)calloc(patch->function_count,sizeof(hl_function));allocation->debug_spans=(hl_source_span**)calloc(patch->function_count,sizeof(hl_source_span*));
 	offsets=(int*)calloc(patch->function_count,sizeof(int));if(!allocation->functions||!allocation->debug_spans||!offsets){error="Out of memory applying patch";goto fail;}
 	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;hl_function *live;dst->type=m->code->types+src->type;dst->findex=src->findex;live=combined_functions+layout.indexes[dst->findex];if(live){dst->obj=live->obj;dst->field=live->field;dst->ref=live->ref;}dst->nregs=src->register_count;dst->nops=src->instruction_count;dst->regs=(hl_type**)calloc(dst->nregs,sizeof(hl_type*));dst->ops=(hl_opcode*)calloc(dst->nops,sizeof(hl_opcode));if(!dst->regs||!dst->ops){error="Out of memory applying patch";goto fail;}for(int j=0;j<dst->nregs;j++)dst->regs[j]=m->code->types+src->registers[j];for(int j=0;j<dst->nops;j++){hl_patch_instruction *s=src->instructions+j;hl_opcode *d=dst->ops+j;d->op=(hl_op)s->opcode;if(s->operand_count>0)d->p1=s->operands[0];if(s->operand_count>1)d->p2=s->operands[1];if(s->operand_count>2)d->p3=s->operands[2];if(d->op==OSwitch){int cases=s->operands[1];d->p1=s->operands[0];d->p2=cases;d->p3=s->operands[2+cases];d->extra=(int*)malloc(sizeof(int)*(cases>0?cases:1));if(!d->extra){error="Out of memory applying patch";goto fail;}memcpy(d->extra,s->operands+2,sizeof(int)*cases);continue;}if(s->operand_count==4&&d->op!=OCallN&&d->op!=OCallMethod&&d->op!=OCallThis&&d->op!=OCallClosure&&d->op!=OMakeEnum)d->extra=(int*)(int_val)s->operands[3];if(s->operand_count>3&&(d->op==OCall3||d->op==OCall4||d->op==OCallN||d->op==OCallMethod||d->op==OCallThis||d->op==OCallClosure||d->op==OMakeEnum)){int count=d->op==OCall3?2:d->op==OCall4?3:s->operand_count-3;d->extra=(int*)malloc(sizeof(int)*count);if(!d->extra){error="Out of memory applying patch";goto fail;}memcpy(d->extra,s->operands+3,sizeof(int)*count);}}}
-	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;if(src->debug_count){dst->debug=(int*)calloc(src->debug_count*2,sizeof(int));allocation->debug_spans[i]=(hl_source_span*)calloc(src->debug_count,sizeof(hl_source_span));if(!dst->debug||!allocation->debug_spans[i]){error="Out of memory applying patch debug metadata";goto fail;}for(int j=0;j<src->debug_count;j++){hl_source_span span=src->debug_spans[j];int file=find_debug_file(m->code,patch->debug_files[span.file],patch->debug_file_lens[span.file]);if(file<0){error="Patch debug file is not present in module";goto fail;}span.file=file;dst->debug[j*2]=file;dst->debug[j*2+1]=span.line;allocation->debug_spans[i][j]=span;}}}
+	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;if(src->debug_count){dst->debug=(int*)calloc(src->debug_count*2,sizeof(int));allocation->debug_spans[i]=(hl_source_span*)calloc(src->debug_count,sizeof(hl_source_span));if(!dst->debug||!allocation->debug_spans[i]){error="Out of memory applying patch debug metadata";goto fail;}for(int j=0;j<src->debug_count;j++){hl_source_span span=src->debug_spans[j];int file=patch->version==12?(span.file<m->code->ndebugfiles+patch->debug_file_count?span.file:-1):find_debug_file(m->code,patch->debug_files[span.file],patch->debug_file_lens[span.file]);if(file<0){error="Patch debug file is not present in module";goto fail;}span.file=file;dst->debug[j*2]=file;dst->debug[j*2+1]=span.line;allocation->debug_spans[i][j]=span;}}}
 	for(int i=0;i<patch->function_count;i++) {
 		int function_index=layout.indexes[allocation->functions[i].findex];
 		if(function_index<0||function_index>=layout.count){error="Invalid patch function slot";goto fail;}
@@ -1646,6 +1736,17 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 	if(inject_patch_failure(m,3,&error))goto fail;
 	temp.jit_code=allocation->code;temp.codesize=allocation->code_size;temp.jit_debug=allocation->jit_debug;temp.gdb_jit_entry=NULL;hl_gdb_jit_register_patch(&temp);allocation->gdb_jit_entry=temp.gdb_jit_entry;free(combined_functions);combined_functions=NULL;
 	if(!reserve_patch_type_allocations(m,type_allocation_count)){error="Out of memory publishing patch types";goto fail;}
+	if(patch->version==12&&patch->rename_count>0){
+		renamed_count=patch->rename_count;renamed_names=(char**)hl_malloc(&m->code->alloc,sizeof(char*)*renamed_count);
+		for(int i=0;i<renamed_count;i++){int length=(int)strlen(patch->renames[i].to);renamed_names[i]=(char*)hl_malloc(&m->code->alloc,length+1);memcpy(renamed_names[i],patch->renames[i].to,length+1);}
+	}
+	// A patch of sections brings the debug files its new code is in; they follow the module's.
+	if(patch->version==12&&patch->debug_file_count>0){
+		int n=m->code->ndebugfiles+patch->debug_file_count;
+		added_files=(char**)hl_malloc(&m->code->alloc,sizeof(char*)*n);added_file_lens=(int*)hl_malloc(&m->code->alloc,sizeof(int)*n);
+		memcpy(added_files,m->code->debugfiles,sizeof(char*)*m->code->ndebugfiles);memcpy(added_file_lens,m->code->debugfiles_lens,sizeof(int)*m->code->ndebugfiles);
+		for(int i=0;i<patch->debug_file_count;i++){int at=m->code->ndebugfiles+i;added_files[at]=(char*)hl_malloc(&m->code->alloc,patch->debug_file_lens[i]+1);memcpy(added_files[at],patch->debug_files[i],patch->debug_file_lens[i]+1);added_file_lens[at]=patch->debug_file_lens[i];}
+	}
 	/*
 	 * Nothing below can fail. The commit and the migrations run with every other thread stopped, so a thread sees the
 	 * patch's functions all old or all new (a new constructor never meets an old reader of its fields), and never runs the
@@ -1666,6 +1767,9 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 	m->code->nglobals+=patch->global_count;m->code->npatchglobals+=patch->global_count;m->globals_size=globals_size;staged_globals=false;
 	if(staged_fields){commit_patch_object_fields(m,staged_fields,patch->object_field_count);staged_fields=NULL;}
 	hl_module_crash_write_lock();
+	// A renamed function's name is its key's member, which stack traces and profiles show.
+	for(int i=0;i<renamed_count;i++){int at=m->functions_indexes[patch->renames[i].slot];m->code->function_names[at]=renamed_names[i];m->code->function_names_lens[at]=(int)strlen(renamed_names[i]);}
+	if(added_files){m->code->debugfiles=added_files;m->code->debugfiles_lens=added_file_lens;m->code->ndebugfiles+=patch->debug_file_count;}
 	if(m->patch_lo==NULL||allocation->code<m->patch_lo)m->patch_lo=allocation->code;
 	if(m->patch_hi==NULL||(void*)((unsigned char*)allocation->code+allocation->code_size)>m->patch_hi)m->patch_hi=(unsigned char*)allocation->code+allocation->code_size;
 	for(int i=0;i<patch->function_count;i++){int slot=allocation->functions[i].findex;hl_patch_code *old=m->patch_owners[slot];void *target=(unsigned char*)allocation->code+offsets[i];hl_module_redirect_slot(m,slot,target);m->patch_owners[slot]=allocation;allocation->references++;if(old&&--old->references==0){if(m->patch_targets){old->next_retired=superseded;superseded=old;}else{old->next_retired=m->retired_patch_code;patch_store(m->retired_patch_code,old);}}}
@@ -1688,8 +1792,10 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 	m->revision=patch->revision;m->patch_jit_count+=patch->function_count;m->static_closure_count=temp.static_closure_count;hl_module_crash_write_unlock();free(offsets);
 	if(patch->migration_count>0)migrate_patch_instances(m,patch,report);
 	hl_gc_exclusive_end();
+	hl_link_patch_end(patch,true);
 	if(error_msg)*error_msg=NULL;return true;
 fail:
+	hl_link_patch_end(patch,false);
 	if(jit) hl_jit_free(jit,false);
 	// Keep the list the JIT may have moved; the entries it added for the discarded code stay uncounted (their code is freed).
 	if(temp_ready){m->static_closures=temp.static_closures;m->static_closure_capacity=temp.static_closure_capacity;}

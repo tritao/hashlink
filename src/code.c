@@ -597,6 +597,12 @@ static int *hl_read_debug_infos( hl_reader *r, int nops ) {
 	return debug;
 }
 
+hl_code *hl_code_read_patchable( const unsigned char *data, int size, char **error_msg ) {
+	if( size >= 4 && data[0] == 'H' && data[1] == 'L' && data[2] == 'B' && data[3] == 9 )
+		return hl_code_link_patchable(data, size, error_msg);
+	return hl_code_read(data, size, error_msg);
+}
+
 hl_code *hl_code_read( const unsigned char *data, int size, char **error_msg ) {
 	hl_reader _r = { data, size, 0, 0, NULL };
 	hl_reader *r = &_r;
@@ -771,6 +777,7 @@ void hl_code_free( hl_code *c ) {
 
 void hl_code_destroy( hl_code *c ) {
 	if( c == NULL ) return;
+	hl_code_link_state_free(c);
 	hl_code_free_function_data(c);
 	hl_free(&c->alloc);
 }
