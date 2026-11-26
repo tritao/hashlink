@@ -929,6 +929,12 @@ HL_API void hl_remove_root( void *ptr );
 HL_API int hl_gc_owner_root_count( void *owner );
 HL_API void hl_gc_major( void );
 /**
+ * Accounts for `delta` bytes of memory outside the heap that a heap object owns and frees when it is finalized: positive
+ * when it is allocated, negative when it is freed. The bytes added count toward starting a collection as heap allocation
+ * does, so garbage that is mostly such memory is collected. Callable from any thread and from finalizers.
+ */
+HL_API void hl_gc_external_bytes( int64 delta );
+/**
  * Live objects of any of `types` (object types), after a full mark. The array is pinned: every collection marks the
  * objects in it, from the moment the world restarts, until `hl_gc_live_instances_release` frees it.
  */

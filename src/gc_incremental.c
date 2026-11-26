@@ -10,7 +10,7 @@
 static void gc_major(void);
 static void **gc_inc_cursor, **gc_inc_end;
 static void *gc_inc_block;
-static int64 gc_inc_start_bytes, gc_inc_start_allocs, gc_inc_last_step_bytes;
+static int64 gc_inc_start_bytes, gc_inc_start_allocs, gc_inc_start_external, gc_inc_last_step_bytes;
 static double gc_inc_cycle_limit;
 static unsigned long long gc_inc_cycles_started, gc_inc_cycles_completed;
 static unsigned long long gc_inc_pressure_fallbacks, gc_inc_tracking_fallbacks;
@@ -533,6 +533,7 @@ static bool gc_incremental_step_unbudgeted_locked(double budget_micros) {
 			gc_inc_cycle_limit = hl_gc_trigger_bytes();
 			gc_inc_start_bytes = gc_stats.total_allocated;
 			gc_inc_start_allocs = gc_stats.allocation_count;
+			gc_inc_start_external = gc_external_read(&gc_external_added);
 			if( ++gc_incremental_epoch == 0 ) hl_fatal("Incremental GC epoch overflow");
 			gc_inc_prepare_pid = 0;
 			gc_inc_prepare_cursor = NULL;
@@ -589,6 +590,7 @@ static bool gc_incremental_step_unbudgeted_locked(double budget_micros) {
 			// Charge allocations during marking to the NEXT cycle so pacing cannot hide churn.
 			gc_stats.last_mark = gc_inc_start_bytes;
 			gc_stats.last_mark_allocs = gc_inc_start_allocs;
+			gc_external_last_mark = gc_inc_start_external;
 			gc_stats.mark_count++;
 		}
 		double rearmed = gc_latency_stamp();
@@ -620,7 +622,7 @@ static bool gc_incremental_step_unbudgeted_locked(double budget_micros) {
 }
 
 HL_API double hl_gc_trigger_bytes(void) {
-	double trigger = gc_stats.pages_total_memory * gc_mark_threshold;
+	double trigger = (gc_stats.pages_total_memory + gc_external_read(&gc_external_live)) * gc_mark_threshold;
 	return trigger < gc_min_trigger_bytes ? (double)gc_min_trigger_bytes : trigger;
 }
 

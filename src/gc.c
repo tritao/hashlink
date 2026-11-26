@@ -378,6 +378,32 @@ static int64 gc_total_allocated_bytes( void ) {
 	return gc_stats.total_allocated;
 }
 
+// Memory outside the heap that heap objects own and free when they are finalized, such as the data of Haxeon's Bytes
+// (hl_gc_external_bytes): all that was ever added, its total when the last collection started, and what is alive. What was
+// added since that collection counts toward starting the next one as heap allocation does, and what is alive toward the
+// heap's size, so a program whose garbage is mostly such memory still collects it. Changed without the GC lock (a
+// finalizer frees it while the collector holds the lock), so the counters are atomic.
+static int64 gc_external_added = 0;
+static int64 gc_external_last_mark = 0;
+static int64 gc_external_live = 0;
+// What external memory added since the last collection starts the next one when the heap's own trigger is below it.
+static int64 gc_external_min_trigger_bytes = 16 << 20;
+
+#if defined(__GNUC__)
+#	define gc_external_add(counter,delta) __atomic_add_fetch(counter,delta,__ATOMIC_RELAXED)
+#	define gc_external_read(counter) __atomic_load_n(counter,__ATOMIC_RELAXED)
+#elif defined(HL_WIN)
+#	define gc_external_add(counter,delta) InterlockedExchangeAdd64((volatile LONG64*)(counter),delta)
+#	define gc_external_read(counter) InterlockedOr64((volatile LONG64*)(counter),0)
+#else
+#	error "gc_external_add needs an atomic add on this compiler"
+#endif
+
+// The external bytes added since the last collection started.
+static int64 gc_external_since_mark( void ) {
+	return gc_external_read(&gc_external_added) - gc_external_last_mark;
+}
+
 static struct {
 	int64 total_allocated;
 	int64 allocation_count;
@@ -1860,6 +1886,7 @@ static void gc_major() {
 	double mark_started = hl_sys_time();
 	gc_stats.last_mark = gc_stats.total_allocated;
 	gc_stats.last_mark_allocs = gc_stats.allocation_count;
+	gc_external_last_mark = gc_external_read(&gc_external_added);
 	MZERO(gc_class_allocated,sizeof(gc_class_allocated));
 	MZERO(gc_class_allocations,sizeof(gc_class_allocations));
 	gc_stop_world(true);
@@ -2221,15 +2248,20 @@ HL_API int hl_gc_get_memsize( void *ptr ) {
 static bool gc_is_active = true;
 
 static void gc_check_mark() {
-	int64 m = gc_stats.total_allocated - gc_stats.last_mark;
+	int64 external_live = gc_external_read(&gc_external_live);
+	int64 external = gc_external_since_mark();
+	int64 m = gc_stats.total_allocated - gc_stats.last_mark + external;
 	int64 b = gc_stats.allocation_count - gc_stats.last_mark_allocs;
-	int64 bytes_limit = (int64)(gc_stats.pages_total_memory * gc_mark_threshold);
+	int64 bytes_limit = (int64)((gc_stats.pages_total_memory + external_live) * gc_mark_threshold);
 	int64 blocks_limit = (int64)(gc_stats.pages_blocks * gc_mark_threshold);
 	if( gc_live_ratio > 0 ) {
 		// Sized by what is alive: the block count, which the heap's size inflates the same way, does not start one.
-		bytes_limit = (int64)(gc_live_bytes * gc_live_ratio);
+		bytes_limit = (int64)((gc_live_bytes + external_live) * gc_live_ratio);
 		blocks_limit = INT64_MAX;
 	}
+	// External memory alone starts one sooner than the floor: it costs memory but no marking, so a small heap whose
+	// garbage owns much of it is collected after that much, not only once the floor's worth of allocation is reached.
+	int64 external_limit = bytes_limit < gc_external_min_trigger_bytes ? gc_external_min_trigger_bytes : bytes_limit;
 	if( bytes_limit < gc_min_trigger_bytes ) bytes_limit = gc_min_trigger_bytes;
 	// the same floor for the block count, assuming the smallest blocks are 16 bytes
 	if( blocks_limit < gc_min_trigger_bytes / 16 ) blocks_limit = gc_min_trigger_bytes / 16;
@@ -2238,7 +2270,7 @@ static void gc_check_mark() {
 		start_bytes = (int64)(bytes_limit * (gc_inc_start_percent / 100.0));
 		start_blocks = (int64)(blocks_limit * (gc_inc_start_percent / 100.0));
 	}
-	if( gc_is_active && (gc_incremental_active || gc_inc_reclaiming || m > start_bytes || b > start_blocks || (gc_flags & GC_FORCE_MAJOR)) ) {
+	if( gc_is_active && (gc_incremental_active || gc_inc_reclaiming || m > start_bytes || b > start_blocks || external > external_limit || (gc_flags & GC_FORCE_MAJOR)) ) {
 		// A mutator that outruns marking must eventually reclaim, even during continuous animation.
 		if( (gc_incremental_enabled || gc_incremental_active || gc_inc_reclaiming) && !(gc_flags & GC_FORCE_MAJOR) && m <= bytes_limit * 4 ) {
 			if( (!gc_incremental_active && !gc_inc_reclaiming) || gc_stats.total_allocated - gc_inc_last_step_bytes >= gc_inc_step_bytes )
@@ -2837,6 +2869,15 @@ HL_PRIM double hl_gc_heap_bytes() {
 	return (double)gc_stats.pages_total_memory;
 }
 
+HL_API void hl_gc_external_bytes( int64 delta ) {
+	gc_external_add(&gc_external_live,delta);
+	if( delta > 0 ) gc_external_add(&gc_external_added,delta);
+}
+
+HL_PRIM double hl_gc_external_live_bytes() {
+	return (double)gc_external_read(&gc_external_live);
+}
+
 // A collection starts once the bytes (or blocks) allocated since the last one exceed this fraction of the heap.
 HL_PRIM void hl_gc_set_mark_threshold( double fraction ) {
 	if( fraction < 0.05 ) fraction = 0.05;
@@ -3395,6 +3436,7 @@ DEFINE_PRIM(_F64, gc_mark_micros, _NO_ARG);
 DEFINE_PRIM(_F64, gc_last_pause_micros, _NO_ARG);
 DEFINE_PRIM(_F64, gc_max_pause_micros, _NO_ARG);
 DEFINE_PRIM(_F64, gc_heap_bytes, _NO_ARG);
+DEFINE_PRIM(_F64, gc_external_live_bytes, _NO_ARG);
 DEFINE_PRIM(_F64, gc_allocated_since_collection, _NO_ARG);
 DEFINE_PRIM(_VOID, gc_set_mark_threshold, _F64);
 DEFINE_PRIM(_VOID, gc_set_min_trigger, _F64);
