@@ -38,7 +38,9 @@ bool hl_jit_is_callback( void *native ) {
 }
 
 void hl_jit_error( const char *msg, const char *func, int line ) {
-	printf("*** JIT ERROR %s:%d (%s)****\n", func, line, msg);
+	// The reason first, unbuffered: dumping a half-built function may itself fail.
+	fprintf(stderr, "*** JIT ERROR %s:%d (%s)****\n", func, line, msg);
+	fflush(stderr);
 	if( current_ctx  ) {
 		jit_ctx *ctx = current_ctx;
 		current_ctx = NULL;

@@ -370,9 +370,7 @@ static void emit_store_mem( emit_ctx *ctx, ereg to, int offs, ereg from ) {
 }
 
 #define store_args hl_emit_store_args
-void hl_emit_store_args( emit_ctx *ctx, einstr *e, ereg *args, int count ) {
-	if( count < 0 ) jit_assert();
-	if( count > 256 ) jit_error("Too many arguments");
+static void store_entries( emit_ctx *ctx, einstr *e, ereg *args, int count ) {
 	e->nargs = (unsigned short)count;
 	if( count == 0 ) return;
 	if( count == 1 ) {
@@ -382,6 +380,20 @@ void hl_emit_store_args( emit_ctx *ctx, einstr *e, ereg *args, int count ) {
 	int *args_data = int_arr_reserve(ctx->args_data, count);
 	e->size_offs = (int)(args_data - ctx->args_data.values);
 	memcpy(args_data, args, sizeof(int) * count);
+}
+
+/* A call's arguments: the register pass indexes fixed 256-entry buffers by argument. */
+void hl_emit_store_args( emit_ctx *ctx, einstr *e, ereg *args, int count ) {
+	if( count < 0 ) jit_assert();
+	if( count > 256 ) jit_error("Too many arguments");
+	store_entries(ctx, e, args, count);
+}
+
+/* A jump table's targets: any number its count field holds, since OSwitch has no smaller limit. */
+void hl_emit_store_table( emit_ctx *ctx, einstr *e, ereg *targets, int count ) {
+	if( count < 0 ) jit_assert();
+	if( count > 0xFFFF ) jit_error("Jump table too large");
+	store_entries(ctx, e, targets, count);
 }
 
 ereg *hl_emit_get_args( emit_ctx *ctx, einstr *e ) {
@@ -2736,7 +2748,7 @@ static void emit_opcode( emit_ctx *ctx, hl_opcode *o ) {
 			einstr *e = emit_instr(ctx, JUMP_TABLE);
 			e->a = v;
 			patch_instr_mode(ctx, M_NORET);
-			store_args(ctx,e,(ereg*)o->extra,count);
+			hl_emit_store_table(ctx,e,(ereg*)o->extra,count);
 			register_jump(ctx, pos, 0);
 			for(int k=0;k<count;k++) {
 				int offs = o->extra[k];

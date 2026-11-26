@@ -1113,7 +1113,7 @@ static void regs_emit_instrs( regs_ctx *ctx ) {
 				if( !noret ) flush_phis(ctx,cur_block, e.op == JCOND ? PHI_COND: PHI_JUMP);
 				if( e.op == JUMP_TABLE ) {
 					// copy args (remap later)
-					hl_emit_store_args(jit->emit,&e,hl_emit_get_args(jit->emit,&e),e.nargs);
+					hl_emit_store_table(jit->emit,&e,hl_emit_get_args(jit->emit,&e),e.nargs);
 				}
 				regs_write_instr(ctx, &e, out);
 				int_arr_add(ctx->jump_regs, ctx->emit_pos - 1);

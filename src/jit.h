@@ -319,6 +319,7 @@ double hl_jit_wrapper_d( vclosure_wrapper *c, char *stack_args, void **regs );
 void hl_emit_dump( jit_ctx *ctx );
 const char *hl_emit_regstr( ereg v, emit_mode m );
 void hl_emit_store_args( emit_ctx *ctx, einstr *e, ereg *args, int count );
+void hl_emit_store_table( emit_ctx *ctx, einstr *e, ereg *targets, int count );
 void hl_emit_remap_jumps( emit_ctx *ctx, void *jumps, einstr *instrs, int *pos_map );
 ereg *hl_emit_get_args( emit_ctx *ctx, einstr *e );
 ereg **hl_emit_get_regs( einstr *e, int *count );
