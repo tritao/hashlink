@@ -307,10 +307,13 @@ typedef struct {
 	int size;
 } hl_patch_section;
 
-/* An HLP 12 rename: the function keyed (module, from) is keyed (module, to) from this patch on, in the slot it has. */
+/*
+ * An HLP 12 rename: the function, type or global keyed (module, from) is keyed (module, to) from this patch on, in the slot it
+ * has (a closure's environment is renamed with its lambda, and the environment's class value with it).
+ */
 typedef struct {
 	char *module, *from, *to;
-	/* The slot, once linked. */
+	/* The function's slot once linked, or -1 for a type or a global. */
 	int slot;
 } hl_patch_rename;
 

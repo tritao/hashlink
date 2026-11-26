@@ -1664,7 +1664,7 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 	if(patch->version==12&&patch->function_count==0&&patch->type_count==0&&patch->global_count==0&&patch->object_field_count==0&&patch->migration_count==0&&patch->guard_count==0){
 		// Every function the sections define runs as it is: only the revision and the keys (renames) move.
 		hl_module_crash_write_lock();
-		for(int i=0;i<patch->rename_count;i++){int at=m->functions_indexes[patch->renames[i].slot],length=(int)strlen(patch->renames[i].to);char *name=(char*)hl_malloc(&m->code->alloc,length+1);memcpy(name,patch->renames[i].to,length+1);m->code->function_names[at]=name;m->code->function_names_lens[at]=length;}
+		for(int i=0;i<patch->rename_count;i++)if(patch->renames[i].slot>=0){int at=m->functions_indexes[patch->renames[i].slot],length=(int)strlen(patch->renames[i].to);char *name=(char*)hl_malloc(&m->code->alloc,length+1);memcpy(name,patch->renames[i].to,length+1);m->code->function_names[at]=name;m->code->function_names_lens[at]=length;}
 		m->revision=patch->revision;
 		hl_module_crash_write_unlock();
 		hl_link_patch_end(patch,true);
@@ -1768,7 +1768,7 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 	if(staged_fields){commit_patch_object_fields(m,staged_fields,patch->object_field_count);staged_fields=NULL;}
 	hl_module_crash_write_lock();
 	// A renamed function's name is its key's member, which stack traces and profiles show.
-	for(int i=0;i<renamed_count;i++){int at=m->functions_indexes[patch->renames[i].slot];m->code->function_names[at]=renamed_names[i];m->code->function_names_lens[at]=(int)strlen(renamed_names[i]);}
+	for(int i=0;i<renamed_count;i++)if(patch->renames[i].slot>=0){int at=m->functions_indexes[patch->renames[i].slot];m->code->function_names[at]=renamed_names[i];m->code->function_names_lens[at]=(int)strlen(renamed_names[i]);}
 	if(added_files){m->code->debugfiles=added_files;m->code->debugfiles_lens=added_file_lens;m->code->ndebugfiles+=patch->debug_file_count;}
 	if(m->patch_lo==NULL||allocation->code<m->patch_lo)m->patch_lo=allocation->code;
 	if(m->patch_hi==NULL||(void*)((unsigned char*)allocation->code+allocation->code_size)>m->patch_hi)m->patch_hi=(unsigned char*)allocation->code+allocation->code_size;

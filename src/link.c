@@ -2370,7 +2370,7 @@ static link_text text_of( const char *s ) {
 	return t;
 }
 
-/* The patch's renames, before its sections are read, so they find each renamed function under its new key. */
+/* The patch's renames, before its sections are read, so they find each renamed function, type or global under its new key. */
 static void apply_renames( link_ctx *L, hl_patch *patch ) {
 	link_patch *P = L->P;
 	int duplicate;
@@ -2381,24 +2381,27 @@ static void apply_renames( link_ctx *L, hl_patch *patch ) {
 		hl_patch_rename *r = patch->renames + k;
 		link_text module = text_of(r->module), from = text_of(r->from);
 		int id = key_find(L, KEY_FUNCTION, module, from);
+		bool function = id >= 0;
+		if( !function ) id = key_find(L, KEY_TYPE, module, from);
+		if( id < 0 ) id = key_find(L, KEY_GLOBAL, module, from);
 		if( id < 0 ) {
-			link_fail(L, "The patch renames function `" KEY_FMT "`, which the running module does not have", KEY_ARGS(module, from));
+			link_fail(L, "The patch renames `" KEY_FMT "`, which the running module has no function, type or global keyed by", KEY_ARGS(module, from));
 			return;
 		}
 		for(int j=0;j<P->nrenamed;j++)
 			if( P->renamed[j] == id ) {
-				link_fail(L, "The patch renames function `" KEY_FMT "` twice", KEY_ARGS(module, from));
+				link_fail(L, "The patch renames `" KEY_FMT "` twice", KEY_ARGS(module, from));
 				return;
 			}
 		P->renamed[P->nrenamed] = id;
 		P->renamed_from[P->nrenamed++] = L->entries[id].member;
-		r->slot = L->entries[id].value;
+		r->slot = function ? L->entries[id].value : -1;
 	}
 	for(int k=0;k<P->nrenamed;k++) L->entries[P->renamed[k]].member = text_of(patch->renames[k].to);
 	duplicate = rebuild_keys(L);
 	if( duplicate >= 0 ) {
 		link_entry *e = L->entries + duplicate;
-		link_fail(L, "The patch renames a function to `" KEY_FMT "`, which another function of the running module is keyed by", KEY_ARGS(e->module, e->member));
+		link_fail(L, "The patch renames to `" KEY_FMT "`, which another entry of the running module is keyed by", KEY_ARGS(e->module, e->member));
 	}
 }
 
