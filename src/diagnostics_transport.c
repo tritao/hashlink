@@ -15,19 +15,16 @@ struct _hl_socket {
 	SOCKET sock;
 };
 
-/* std/socket.c's functions, declared without HL_API: with MSVC that would make them imports, which a program linking the VM
-   statically (hlvm) only resolves when something else already pulled socket.obj into the link. As plain externs they link
-   directly there, and hl.exe reaches them in libhl.dll through the import library's thunks. */
-extern void hl_socket_init();
-extern hl_socket *hl_socket_new( bool udp );
-extern bool hl_socket_bind( hl_socket *s, int host, int port );
-extern bool hl_socket_listen( hl_socket *s, int n );
-extern bool hl_socket_connect( hl_socket *s, int host, int port );
-extern void hl_socket_close( hl_socket *s );
-extern hl_socket *hl_socket_accept( hl_socket *s );
-extern int hl_socket_send( hl_socket *s, vbyte *buf, int pos, int len );
-extern int hl_socket_recv( hl_socket *s, vbyte *buf, int pos, int len );
-extern bool hl_socket_shutdown( hl_socket *s, bool read, bool write );
+HL_API void hl_socket_init();
+HL_API hl_socket *hl_socket_new( bool udp );
+HL_API bool hl_socket_bind( hl_socket *s, int host, int port );
+HL_API bool hl_socket_listen( hl_socket *s, int n );
+HL_API bool hl_socket_connect( hl_socket *s, int host, int port );
+HL_API void hl_socket_close( hl_socket *s );
+HL_API hl_socket *hl_socket_accept( hl_socket *s );
+HL_API int hl_socket_send( hl_socket *s, vbyte *buf, int pos, int len );
+HL_API int hl_socket_recv( hl_socket *s, vbyte *buf, int pos, int len );
+HL_API bool hl_socket_shutdown( hl_socket *s, bool read, bool write );
 
 struct _hl_diag_transport {
 	hl_socket *listener;

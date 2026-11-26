@@ -235,9 +235,12 @@ typedef unsigned long long uint64;
 #include <stdio.h>
 #include <memory.h>
 
+/* With HL_LIBHL_IN_VM the VM's own objects are linked with libhl's, in hl or in a static library of the VM, so they
+   reference its functions directly: an import would resolve in a static program only if something else pulled in the
+   object that defines the function. */
 #if defined(LIBHL_EXPORTS)
 #define HL_API extern HL_EXPORT
-#elif defined(LIBHL_STATIC)
+#elif defined(LIBHL_STATIC) || defined(HL_LIBHL_IN_VM)
 #define HL_API extern
 #else
 #define	HL_API HL_IMPORT
