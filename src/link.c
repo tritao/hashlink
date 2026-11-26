@@ -253,9 +253,18 @@ static unsigned int hash_mix( unsigned int h, unsigned int v ) {
 	return h ^ (h >> 15);
 }
 
+/* Eight bytes a step: the text of keys and strings is most of what a link hashes. */
 static unsigned int hash_text( unsigned int h, const char *s, int len ) {
-	for(int i=0;i<len;i++) h = (h ^ (unsigned char)s[i]) * 0x01000193;
-	return hash_mix(h, (unsigned int)len);
+	unsigned long long x = h;
+	int i = 0;
+	for(;i+8<=len;i+=8) {
+		unsigned long long w;
+		memcpy(&w, s + i, 8);
+		x = (x ^ w) * 0x100000001B3ULL;
+		x ^= x >> 29;
+	}
+	for(;i<len;i++) x = (x ^ (unsigned char)s[i]) * 0x100000001B3ULL;
+	return hash_mix((unsigned int)(x ^ (x >> 32)), (unsigned int)len);
 }
 
 static void table_init( link_table *t, int expected ) {
@@ -323,15 +332,20 @@ static bool key_equal( link_ctx *L, int id, const void *key ) {
 	return e->kind == k->kind && same_text(e->module, k->module) && same_text(e->member, k->member);
 }
 
-static int key_find( link_ctx *L, link_key_kind kind, link_text module, link_text member ) {
+static int key_find_hashed( link_ctx *L, unsigned int h, link_key_kind kind, link_text module, link_text member ) {
 	link_key k = { kind, module, member };
-	return table_find(L, &L->keys, key_hash(kind, module, member), key_equal, &k);
+	return table_find(L, &L->keys, h, key_equal, &k);
+}
+
+static int key_find( link_ctx *L, link_key_kind kind, link_text module, link_text member ) {
+	return key_find_hashed(L, key_hash(kind, module, member), kind, module, member);
 }
 
 /* Enters a key; returns its entry, or -1 when it is already taken. */
 static int key_add( link_ctx *L, link_key_kind kind, link_text module, link_text member, int value, int extra ) {
 	link_entry *e;
-	if( key_find(L, kind, module, member) >= 0 ) return -1;
+	unsigned int h = key_hash(kind, module, member);
+	if( key_find_hashed(L, h, kind, module, member) >= 0 ) return -1;
 	if( L->nentries == L->entries_capacity ) {
 		L->entries_capacity = L->entries_capacity ? L->entries_capacity * 2 : 1024;
 		L->entries = (link_entry*)realloc(L->entries, sizeof(link_entry) * L->entries_capacity);
@@ -343,7 +357,7 @@ static int key_add( link_ctx *L, link_key_kind kind, link_text module, link_text
 	e->value = value;
 	e->section = L->cur;
 	e->extra = extra;
-	table_add(&L->keys, key_hash(kind, module, member), L->nentries);
+	table_add(&L->keys, h, L->nentries);
 	return L->nentries++;
 }
 
@@ -1061,24 +1075,25 @@ static void read_types( link_ctx *L, int si ) {
 	for(int i=0;i<s->ndebugfiles && !L->error;i++) s->dmap[i] = intern_file(L, strings[i]);
 	if( L->error ) return;
 
+	// A structural type refers only to the structural types before it and to definitions, whose slots are known: it is read in
+	// table order. A definition can refer to a structural type after it, so it is stepped over and read once they all are.
 	positions = (int*)hl_malloc(&L->tmp, sizeof(int) * (s->ntypes + 1));
-	for(int i=0;i<s->ntypes && !L->error;i++) {
-		positions[i] = L->pos;
-		skip_type(L);
-	}
-	end = L->pos;
 	hl_free(&L->scratch);
 	hl_alloc_init(&L->scratch);
 	for(int i=0;i<s->ntypes && !L->error;i++) {
 		hl_type t;
-		if( s->type_roles[i] != ROLE_STRUCTURAL ) continue;
+		positions[i] = L->pos;
+		if( s->type_roles[i] != ROLE_STRUCTURAL ) {
+			skip_type(L);
+			continue;
+		}
 		memset(&t, 0, sizeof(t));
-		L->pos = positions[i];
 		read_type(L, s, &t, &L->scratch);
 		if( L->error ) return;
 		if( (int)t.kind != s->type_kinds[i] ) { malformed(L, "a type differs from its head"); return; }
 		s->tmap[s->ntimports + i] = intern_structural(L, &t);
 	}
+	end = L->pos;
 	for(int i=0;i<s->ntypes && !L->error;i++) {
 		int slot = s->tmap[s->ntimports + i];
 		link_text key;
