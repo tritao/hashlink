@@ -50,11 +50,6 @@ static hl_function *layout_function( patch_layout *layout, int findex ) {
 	return index < 0 || index >= layout->count ? NULL : layout->functions + index;
 }
 
-static int find_debug_file( hl_code *code, const char *path, int length ) {
-	for(int i=0;i<code->ndebugfiles;i++)if(code->debugfiles_lens[i]==length&&!memcmp(code->debugfiles[i],path,length))return i;
-	return -1;
-}
-
 static void patch_code_free( hl_patch_code *code ) {
 	if(!code)return;
 	if(code->gdb_jit_entry){hl_module module={0};module.gdb_jit_entry=code->gdb_jit_entry;hl_gdb_jit_unregister(&module);code->gdb_jit_entry=NULL;}
@@ -332,187 +327,15 @@ static bool read_count( patch_reader *r, int *out ) {
 	return true;
 }
 
-static bool read_hash( patch_reader *r, unsigned int *out ) {
+static bool read_i32( patch_reader *r, int *out ) {
 	const unsigned char *p;
 	if( !take(r,4,&p) ) return false;
-	*out = p[0] | (p[1] << 8) | (p[2] << 16) | ((unsigned int)p[3] << 24);
+	*out = (int)(p[0] | (p[1] << 8) | (p[2] << 16) | ((unsigned int)p[3] << 24));
 	return true;
-}
-
-static bool read_i32( patch_reader *r, int *out ) {
-	unsigned int value;
-	if( !read_hash(r,&value) ) return false;
-	*out = (int)value;
-	return true;
-}
-
-static unsigned int hash_bytes( unsigned int hash, const unsigned char *p, int length ) {
-	for(int i=0;i<length;i++) hash = (hash ^ p[i]) * 16777619U;
-	return hash;
-}
-
-static unsigned int hash_i32( unsigned int hash, int value ) {
-	unsigned char bytes[4] = { value & 255, (value >> 8) & 255, (value >> 16) & 255, ((unsigned int)value >> 24) & 255 };
-	return hash_bytes(hash,bytes,4);
-}
-
-static unsigned int hash_global_prefix( hl_code *code, int count ) {
-	unsigned int hash=2166136261U;for(int i=0;i<count;i++)hash=hash_i32(hash,(int)(code->globals[i]-code->types));return hash;
-}
-static unsigned int hash_int_prefix( hl_code *code, int count ) {
-	unsigned int hash=2166136261U;for(int i=0;i<count;i++)hash=hash_i32(hash,code->ints[i]);return hash;
-}
-
-static unsigned int hash_float_prefix( hl_code *code, int count ) {
-	unsigned int hash=2166136261U;for(int i=0;i<count;i++)hash=hash_bytes(hash,(unsigned char*)(code->floats+i),8);return hash;
-}
-
-static unsigned int hash_string_prefix( hl_code *code, int count ) {
-	unsigned int hash=2166136261U;for(int i=0;i<count;i++){int length=code->strings_lens[i];hash=hash_i32(hash,length);hash=hash_bytes(hash,(unsigned char*)code->strings[i],length);}return hash;
-}
-
-/* Maps string content to the first string-table index holding it. Hashing a type prefix looks up every type, field,
-   method and constructor name, and scanning the table for each made a patch of the editor take about 2 s. */
-typedef struct {
-	int *slots;
-	int *lengths;
-	int mask;
-} type_string_index;
-
-static unsigned int hash_ustring( const uchar *s, int length ) {
-	return hash_bytes(2166136261U,(const unsigned char*)s,length * (int)sizeof(uchar));
-}
-
-static void type_string_index_free( type_string_index *index ) {
-	free(index->slots);free(index->lengths);index->slots=NULL;index->lengths=NULL;
-}
-
-/* Leaves the index empty when out of memory; lookups then scan the table. */
-static void type_string_index_build( hl_code *code, type_string_index *index ) {
-	int size=16;
-	while( size < code->nstrings * 2 ) size<<=1;
-	index->slots=(int*)malloc(sizeof(int)*size);index->lengths=(int*)malloc(sizeof(int)*(code->nstrings>0?code->nstrings:1));index->mask=size-1;
-	if( !index->slots || !index->lengths ) { type_string_index_free(index); return; }
-	memset(index->slots,0xFF,sizeof(int)*size);
-	for(int i=0;i<code->nstrings;i++) {
-		const uchar *s=hl_get_ustring(code,i);int length=ustrlen(s);unsigned int slot=hash_ustring(s,length)&index->mask;
-		index->lengths[i]=length;
-		while( index->slots[slot] >= 0 ) {
-			int other=index->slots[slot];
-			if( index->lengths[other] == length && memcmp(hl_get_ustring(code,other),s,length * sizeof(uchar)) == 0 ) break;
-			slot=(slot+1)&index->mask;
-		}
-		if( index->slots[slot] < 0 ) index->slots[slot]=i;
-	}
-}
-
-static int hash_type_string_index( hl_code *code, type_string_index *index, const uchar *name ) {
-	int length = ustrlen(name);
-	if( index->slots ) {
-		unsigned int slot=hash_ustring(name,length)&index->mask;
-		while( index->slots[slot] >= 0 ) {
-			int i=index->slots[slot];
-			if( index->lengths[i] == length && memcmp(hl_get_ustring(code,i),name,length * sizeof(uchar)) == 0 ) return i;
-			slot=(slot+1)&index->mask;
-		}
-		return -1;
-	}
-	for(int i=0;i<code->nstrings;i++) {
-		const uchar *candidate = hl_get_ustring(code,i);
-		if( ustrlen(candidate) == length && memcmp(candidate,name,length * sizeof(uchar)) == 0 )
-			return i;
-	}
-	return -1;
-}
-
-static int hash_type_index( hl_code *code, hl_type *type ) {
-	return type == NULL ? -1 : (int)(type - code->types);
-}
-
-static int hash_type_global_index( hl_module *module, void **value ) {
-	int low = 0, high = module->code->nglobals;
-	ptrdiff_t offset;
-	if( value == NULL ) return 0;
-	offset = (unsigned char*)value - module->globals_data;
-	// Globals are laid out in index order, so the offsets only grow. A module holds thousands of String constants and a hash
-	// asks for the global of every type that has one.
-	while( low < high ) {
-		int middle = low + (high - low) / 2;
-		if( module->globals_indexes[middle] < offset ) low = middle + 1;
-		else high = middle;
-	}
-	return low < module->code->nglobals && module->globals_indexes[low] == offset ? low + 1 : -1;
-}
-
-static unsigned int hash_type_prefix( hl_module *module, int count ) {
-	hl_code *code = module->code;
-	unsigned int hash=2166136261U;
-	type_string_index strings={0};
-	type_string_index_build(code,&strings);
-	for(int i=0;i<count;i++){
-		hl_type *type=code->types+i;
-		hash=hash_i32(hash,type->kind);
-		switch(type->kind) {
-		case HENUMTAG:
-			hash=hash_i32(hash,hash_type_index(code,type->tenumtag->boxed_type));
-			hash=hash_i32(hash,type->tenumtag->ncases);
-			for(int j=0;j<type->tenumtag->ncases;j++) hash=hash_i32(hash,type->tenumtag->cache_globals[j]);
-			break;
-		case HFUN:
-			hash=hash_i32(hash,type->fun->nargs);
-			for(int j=0;j<type->fun->nargs;j++) hash=hash_i32(hash,hash_type_index(code,type->fun->args[j]));
-			hash=hash_i32(hash,hash_type_index(code,type->fun->ret));
-			break;
-		case HABSTRACT:
-			hash=hash_i32(hash,hash_type_string_index(code,&strings,type->abs_name));
-			break;
-		case HREF: case HNULL: case HPACKED:
-			hash=hash_i32(hash,hash_type_index(code,type->tparam));
-			break;
-		case HOBJ: case HSTRUCT: {
-			hl_type_obj *obj=type->obj;
-			hash=hash_i32(hash,hash_type_string_index(code,&strings,obj->name));
-			hash=hash_i32(hash,obj->super == NULL ? -1 : hash_type_index(code,obj->super));
-			hash=hash_i32(hash,hash_type_global_index(module,obj->global_value));
-			hash=hash_i32(hash,obj->nfields);
-			for(int j=0;j<obj->nfields;j++) { hash=hash_i32(hash,hash_type_string_index(code,&strings,obj->fields[j].name)); hash=hash_i32(hash,hash_type_index(code,obj->fields[j].t)); }
-			hash=hash_i32(hash,obj->nproto);
-			for(int j=0;j<obj->nproto;j++) { hash=hash_i32(hash,hash_type_string_index(code,&strings,obj->proto[j].name)); hash=hash_i32(hash,obj->proto[j].findex); hash=hash_i32(hash,obj->proto[j].pindex); }
-			hash=hash_i32(hash,obj->nbindings);
-			for(int j=0;j<obj->nbindings*2;j++) hash=hash_i32(hash,obj->bindings[j]);
-			break;
-		}
-		case HVIRTUAL:
-			hash=hash_i32(hash,hash_type_string_index(code,&strings,type->virt->nominal_identity));
-			hash=hash_i32(hash,type->virt->nfields);
-			for(int j=0;j<type->virt->nfields;j++) { hash=hash_i32(hash,hash_type_string_index(code,&strings,type->virt->fields[j].name)); hash=hash_i32(hash,hash_type_index(code,type->virt->fields[j].t)); }
-			break;
-		case HENUM:
-			hash=hash_i32(hash,hash_type_string_index(code,&strings,type->tenum->name));
-			hash=hash_i32(hash,hash_type_global_index(module,type->tenum->global_value));
-			hash=hash_i32(hash,type->tenum->nconstructs);
-			for(int j=0;j<type->tenum->nconstructs;j++) { hl_enum_construct *c=type->tenum->constructs+j; hash=hash_i32(hash,hash_type_string_index(code,&strings,c->name)); hash=hash_i32(hash,c->nparams); for(int k=0;k<c->nparams;k++) hash=hash_i32(hash,hash_type_index(code,c->params[k])); }
-			break;
-		default:
-			break;
-		}
-	}
-	type_string_index_free(&strings);
-	return hash;
-}
-
-#define OP_BEGIN static const signed char opcode_operand_counts[] = {
-#define OP(o,a,b,c) c == VAR_ARGS ? -1 : b == AR ? c : (a != X) + (b != X) + (c != X),
-#define OP_END };
-#include "opcodes.h"
-
-static int opcode_operands( int opcode ) {
-	if( opcode < 0 || opcode >= OLast ) return -2;
-	return opcode_operand_counts[opcode];
 }
 
 /*
- * Object, struct and virtual types a patch appends (HLP 10). A new class or closure environment is a new object type; the type
+ * Object, struct and virtual types a patch appends. A new class or closure environment is a new object type; the type
  * table is a non-moving arena (HL_PATCH_TYPE_RESERVE), so loaded code keeps its `hl_type*` pointers, and the new entries are
  * built in place, linked to the module once its globals are staged, and published with the patch. Nothing here changes a type
  * the module already has.
@@ -524,45 +347,6 @@ static bool patch_type_is_class( int tag ) {
 
 static bool patch_type_is_object( int tag ) {
 	return patch_type_is_class(tag) || tag == HVIRTUAL;
-}
-
-/* Room for `count` records of `width` indexes each, `size` bytes apiece. */
-static bool alloc_patch_records( patch_reader *r, int count, int width, size_t size, void **out ) {
-	// Every index takes a byte at least, so the section bounds the count before anything is allocated.
-	if( count > (int)(r->end - r->p) / width ) { r->error = "Truncated HLP data"; return false; }
-	*out = calloc(count > 0 ? count : 1, size);
-	if( *out == NULL ) { r->error = "Out of memory reading patch types"; return false; }
-	return true;
-}
-
-static bool read_patch_type_fields( patch_reader *r, int count, hl_patch_type_field **out ) {
-	if( !alloc_patch_records(r,count,2,sizeof(**out),(void**)out) ) return false;
-	for(int i=0;i<count;i++) if( !read_index(r,&(*out)[i].name) || !read_index(r,&(*out)[i].type) ) return false;
-	return true;
-}
-
-static bool read_patch_type_methods( patch_reader *r, int count, hl_patch_type_method **out ) {
-	if( !alloc_patch_records(r,count,3,sizeof(**out),(void**)out) ) return false;
-	for(int i=0;i<count;i++) if( !read_index(r,&(*out)[i].name) || !read_index(r,&(*out)[i].findex) || !read_index(r,&(*out)[i].pindex) ) return false;
-	return true;
-}
-
-static bool read_patch_type_bindings( patch_reader *r, int count, hl_patch_type_binding **out ) {
-	if( !alloc_patch_records(r,count,2,sizeof(**out),(void**)out) ) return false;
-	for(int i=0;i<count;i++) if( !read_index(r,&(*out)[i].field) || !read_index(r,&(*out)[i].findex) ) return false;
-	return true;
-}
-
-/* In HLB order: name, super, global, the counts, then fields, methods and bindings. A virtual has its fields only. */
-static bool read_patch_object_type( patch_reader *r, hl_patch_type *type ) {
-	hl_patch_object_type *o = &type->data.obj;
-	memset(o,0,sizeof(*o));
-	o->super = -1;
-	if( type->tag == HVIRTUAL )
-		return read_index(r,&o->name) && read_count(r,&o->field_count) && read_patch_type_fields(r,o->field_count,&o->fields);
-	return read_index(r,&o->name) && read_index(r,&o->super) && read_count(r,&o->global) && read_count(r,&o->field_count)
-		&& read_count(r,&o->proto_count) && read_count(r,&o->binding_count) && read_patch_type_fields(r,o->field_count,&o->fields)
-		&& read_patch_type_methods(r,o->proto_count,&o->protos) && read_patch_type_bindings(r,o->binding_count,&o->bindings);
 }
 
 void hl_patch_free( hl_patch *patch ) {
@@ -582,7 +366,7 @@ void hl_patch_free( hl_patch *patch ) {
 	for(i=0;i<patch->function_count;i++) {
 		hl_patch_function *f = patch->functions + i;
 		for(j=0;j<f->instruction_count;j++) free(f->instructions[j].operands);
-		free(f->instructions); free(f->registers); free(f->relocation_instructions); free(f->relocation_stable_ids); free(f->debug_spans);
+		free(f->instructions); free(f->registers); free(f->debug_spans);
 	}
 	for(i=0;i<patch->type_count;i++) {
 		hl_patch_type *type = patch->types + i;
@@ -623,7 +407,7 @@ static bool read_text( patch_reader *r, char **out ) {
  * member, description) and its migrations (the class's module and member, then the function's). Everything is named by key; the
  * patch linker resolves it against the module (`hl_module_link_patch`).
  */
-static bool read_hlp12( patch_reader *r, hl_patch *patch ) {
+static bool read_sections( patch_reader *r, hl_patch *patch ) {
 	int count;
 	if( !read_count(r,&count) ) return false;
 	patch->sections = (hl_patch_section*)calloc(count + 1,sizeof(hl_patch_section));
@@ -672,183 +456,19 @@ static bool read_hlp12( patch_reader *r, hl_patch *patch ) {
 hl_patch *hl_patch_read( const unsigned char *data, int size, const char **error_msg ) {
 	patch_reader r = { data, data + (size < 0 ? 0 : size), NULL };
 	hl_patch *patch = (hl_patch*)calloc(1,sizeof(hl_patch));
-	const unsigned char *p; int version, i, j, count, tag, section_count, section_length;
-	bool have_symbols = false, have_functions = false, have_debug = false, have_snapshots = false, have_added = false, have_globals = false, have_object_fields = false, have_migrations = false, have_guards = false;
+	const unsigned char *p; int version;
 #define FAIL(msg) do { r.error = msg; goto fail; } while(0)
 	if( patch == NULL ) FAIL("Out of memory reading HLP");
 	if( !take(&r,3,&p) ) goto fail;
 	if( memcmp(p,"HLP",3) != 0 ) FAIL("Invalid HLP magic");
 	if( !read_byte(&r,&version) ) goto fail;
-	// Version 11 adds stable nominal identities to virtual types; version 12 is made of module sections.
-	if( version != 11 && version != 12 ) FAIL("Unsupported HLP version");
-	patch->version = version;
+	// Version 12 is made of module sections, which the patch linker links against the running module.
+	if( version != 12 ) FAIL("Unsupported HLP version");
 	if( !take(&r,16,&p) ) goto fail;
 	memcpy(patch->module_id,p,16);
 	if( !read_count(&r,&patch->base_revision) || !read_count(&r,&patch->revision) ) goto fail;
 	if( patch->revision <= patch->base_revision ) FAIL("Invalid patch revision range");
-	if( version == 12 ) {
-		if( !read_hlp12(&r,patch) ) goto fail;
-		if( error_msg ) *error_msg=NULL;
-		return patch;
-	}
-	if( !read_count(&r,&section_count) ) goto fail;
-	for(int section=0;section<section_count;section++) {
-		patch_reader s;
-		if( !read_byte(&r,&tag) || !read_count(&r,&section_length) || r.end-r.p<section_length ) goto fail;
-		s.p=r.p;s.end=r.p+section_length;s.error=NULL;r.p=s.end;
-		if( tag == 1 ) {
-			if( have_symbols ) FAIL("Duplicate HLP symbols section");
-			have_symbols=true;
-			if( !read_hash(&s,&patch->int_prefix_hash) || !read_count(&s,&patch->base_int_count) || !read_count(&s,&patch->int_count) ) goto section_fail;
-			patch->ints=(int*)calloc(patch->int_count,sizeof(int));
-			for(i=0;i<patch->int_count;i++){if(!take(&s,4,&p))goto section_fail;patch->ints[i]=(int)(p[0]|(p[1]<<8)|(p[2]<<16)|((unsigned int)p[3]<<24));}
-			if(!read_hash(&s,&patch->float_prefix_hash)||!read_count(&s,&patch->base_float_count)||!read_count(&s,&patch->float_count))goto section_fail;
-			patch->floats=(double*)calloc(patch->float_count,sizeof(double));for(i=0;i<patch->float_count;i++){if(!take(&s,8,&p))goto section_fail;memcpy(patch->floats+i,p,8);}
-			if(!read_hash(&s,&patch->string_prefix_hash)||!read_count(&s,&patch->base_string_count)||!read_count(&s,&patch->string_count))goto section_fail;
-			patch->strings=(char**)calloc(patch->string_count,sizeof(char*));patch->string_lens=(int*)calloc(patch->string_count,sizeof(int));for(i=0;i<patch->string_count;i++){if(!read_count(&s,&count)||!take(&s,count,&p))goto section_fail;patch->string_lens[i]=count;patch->strings[i]=(char*)malloc(count+1);if(!patch->strings[i])FAIL("Out of memory reading HLP");memcpy(patch->strings[i],p,count);patch->strings[i][count]=0;}
-			if(!read_hash(&s,&patch->type_prefix_hash)||!read_count(&s,&patch->base_type_count)||!read_count(&s,&patch->type_count))goto section_fail;
-			patch->types=(hl_patch_type*)calloc(patch->type_count,sizeof(hl_patch_type));if(patch->type_count&&!patch->types)FAIL("Out of memory reading patch types");
-			for(i=0;i<patch->type_count;i++){
-				hl_patch_type *type=patch->types+i;if(!read_byte(&s,&type->tag))goto section_fail;
-				if(type->tag==HFUN){if(!read_byte(&s,&type->data.fun.count))goto section_fail;type->data.fun.arguments=(int*)calloc(type->data.fun.count,sizeof(int));if(type->data.fun.count&&!type->data.fun.arguments)FAIL("Out of memory reading function type");for(j=0;j<type->data.fun.count;j++)if(!read_index(&s,type->data.fun.arguments+j))goto section_fail;if(!read_index(&s,&type->data.fun.result))goto section_fail;}
-				else if(type->tag==HABSTRACT){if(!read_index(&s,&type->data.name))goto section_fail;}
-				else if(type->tag==HREF||type->tag==HNULL||type->tag==HPACKED){if(!read_index(&s,&type->data.parameter))goto section_fail;}
-				else if(patch_type_is_object(type->tag)){if(!read_patch_object_type(&s,type))goto section_fail;}
-				else if(type->tag<HVOID||type->tag>HGUID||type->tag==HOBJ||type->tag==HVIRTUAL||type->tag==HENUM||type->tag==HPACKED)FAIL("Unsupported HLP type");
-			}
-		} else if( tag == 2 ) {
-			if( have_functions ) FAIL("Duplicate HLP functions section");
-			have_functions=true;if(!read_count(&s,&patch->function_count))goto section_fail;
-			patch->functions=(hl_patch_function*)calloc(patch->function_count,sizeof(hl_patch_function));
-				for(i=0;i<patch->function_count;i++){hl_patch_function *f=patch->functions+i;int length;const unsigned char *end;if(!read_count(&s,&length)||s.end-s.p<length)goto section_fail;end=s.p+length;if(!read_count(&s,&f->stable_id)||!read_index(&s,&f->type)||!read_count(&s,&f->findex)||!read_count(&s,&f->register_count)||!read_count(&s,&f->instruction_count))goto section_fail;f->registers=(int*)calloc(f->register_count,sizeof(int));for(j=0;j<f->register_count;j++)if(!read_index(&s,f->registers+j))goto section_fail;f->instructions=(hl_patch_instruction*)calloc(f->instruction_count,sizeof(hl_patch_instruction));for(j=0;j<f->instruction_count;j++){hl_patch_instruction *op=f->instructions+j;if(!read_byte(&s,&op->opcode))goto section_fail;op->operand_count=opcode_operands(op->opcode);if(op->opcode==OSwitch){/* the register, the table size, its offsets, the end offset */int reg,cases;if(!read_index(&s,&reg)||!read_count(&s,&cases))goto section_fail;if(cases<0||cases>0x1000000)FAIL("Invalid switch size");op->operand_count=3+cases;op->operands=(int*)calloc(op->operand_count,sizeof(int));if(!op->operands)FAIL("Out of memory reading patch operands");op->operands[0]=reg;op->operands[1]=cases;for(int k=0;k<cases+1;k++)if(!read_index(&s,op->operands+2+k))goto section_fail;continue;}if(op->operand_count<0){if(op->opcode!=OCallN&&op->opcode!=OCallMethod&&op->opcode!=OCallThis&&op->opcode!=OCallClosure&&op->opcode!=OMakeEnum)FAIL("Unsupported patch opcode");op->operand_count=3;}op->operands=(int*)calloc(op->operand_count,sizeof(int));for(int k=0;k<op->operand_count;k++)if(!read_index(&s,op->operands+k))goto section_fail;if(opcode_operands(op->opcode)<0){int count=op->operands[2];if(count<0||count>0x1000000)FAIL("Invalid variable operand count");op->operand_count=3+count;op->operands=(int*)realloc(op->operands,sizeof(int)*op->operand_count);if(!op->operands)FAIL("Out of memory reading patch operands");for(int k=3;k<op->operand_count;k++)if(!read_index(&s,op->operands+k))goto section_fail;}}if(!read_count(&s,&f->relocation_count))goto section_fail;f->relocation_instructions=(int*)calloc(f->relocation_count,sizeof(int));f->relocation_stable_ids=(int*)calloc(f->relocation_count,sizeof(int));for(j=0;j<f->relocation_count;j++)if(!read_count(&s,f->relocation_instructions+j)||!read_count(&s,f->relocation_stable_ids+j))goto section_fail;if(s.p!=end)FAIL("Invalid patch function length");}
-		} else if( tag == 3 ) {
-			if( have_debug || !have_functions ) FAIL("Duplicate or misplaced HLP debug section");
-			have_debug=true;if(!read_count(&s,&patch->debug_file_count))goto section_fail;
-			patch->debug_files=(char**)calloc(patch->debug_file_count,sizeof(char*));patch->debug_file_lens=(int*)calloc(patch->debug_file_count,sizeof(int));if(patch->debug_file_count&&(!patch->debug_files||!patch->debug_file_lens))FAIL("Out of memory reading patch debug files");
-			for(i=0;i<patch->debug_file_count;i++){if(!read_count(&s,&count)||!take(&s,count,&p))goto section_fail;patch->debug_file_lens[i]=count;patch->debug_files[i]=(char*)malloc(count+1);if(!patch->debug_files[i])FAIL("Out of memory reading patch debug files");memcpy(patch->debug_files[i],p,count);patch->debug_files[i][count]=0;}
-			if(!read_count(&s,&count)||count!=patch->function_count)FAIL("HLP debug function count mismatch");
-			for(i=0;i<count;i++){
-				int stable_id,nops,found=-1;
-				if(!read_count(&s,&stable_id)||!read_count(&s,&nops))goto section_fail;
-				for(j=0;j<patch->function_count;j++)if(patch->functions[j].stable_id==stable_id){if(found>=0)FAIL("Duplicate HLP function debug metadata");found=j;}
-				if(found<0)FAIL("Unknown HLP debug function");
-				hl_patch_function *f=patch->functions+found;
-				if(f->debug_count)FAIL("Duplicate HLP function debug metadata");
-				if(nops!=f->instruction_count)FAIL("HLP debug opcode count mismatch");
-				f->debug_count=nops;f->debug_spans=(hl_source_span*)calloc(nops,sizeof(hl_source_span));
-				if(nops&&!f->debug_spans)FAIL("Out of memory reading patch debug metadata");
-				for(j=0;j<nops;j++){
-					hl_source_span *span=f->debug_spans+j;
-					if(!read_count(&s,&span->file)||!read_count(&s,&span->line)||!read_count(&s,&span->column)||!read_count(&s,&span->end_line)
-						||!read_count(&s,&span->end_column)||!read_i32(&s,&span->source_hash)||!read_index(&s,&span->start)||!read_index(&s,&span->end)||!read_count(&s,&span->flags))goto section_fail;
-					span->start--;span->end--;
-					if(span->file>=patch->debug_file_count||span->line<1||span->column<1||span->end_line<span->line||span->end_column<1
-						||(span->end_line==span->line&&span->end_column<span->column)
-						||!((span->start==-1&&span->end==-1)||(span->start>=0&&span->end>=span->start)))FAIL("Invalid HLP debug location");
-				}
-			}
-		} else if( tag == 4 ) {
-			if( have_snapshots ) FAIL("Duplicate HLP source snapshot section");
-			have_snapshots=true;
-			if(!read_count(&s,&patch->source_snapshot_count))goto section_fail;
-			patch->source_snapshots=(hl_source_snapshot*)calloc(patch->source_snapshot_count,sizeof(hl_source_snapshot));
-			if(patch->source_snapshot_count&&!patch->source_snapshots)FAIL("Out of memory reading source snapshots");
-			for(i=0;i<patch->source_snapshot_count;i++) {
-				hl_source_snapshot *snapshot=patch->source_snapshots+i;const unsigned char *content;unsigned int hash=2166136261u;
-				if(!read_i32(&s,&snapshot->source_hash)||snapshot->source_hash==0||!read_count(&s,&snapshot->length)||!take(&s,snapshot->length,&content))goto section_fail;
-				for(j=0;j<i;j++)if(patch->source_snapshots[j].source_hash==snapshot->source_hash)FAIL("Duplicate HLP source snapshot");
-				for(j=0;j<snapshot->length;j++){hash^=content[j];hash*=16777619u;}
-				if((int)hash!=snapshot->source_hash)FAIL("Invalid HLP source snapshot hash");
-				snapshot->content=(unsigned char*)malloc(snapshot->length);if(snapshot->length&&!snapshot->content)FAIL("Out of memory reading source snapshot");
-				memcpy(snapshot->content,content,snapshot->length);
-			}
-		} else if( tag == 5 ) {
-			if( have_added ) FAIL("Duplicate HLP added functions section");
-			have_added=true;
-			if(!read_count(&s,&patch->added_function_count))goto section_fail;
-			patch->added_functions=(hl_patch_added_function*)calloc(patch->added_function_count,sizeof(hl_patch_added_function));
-			if(patch->added_function_count&&!patch->added_functions)FAIL("Out of memory reading added functions");
-			for(i=0;i<patch->added_function_count;i++) {
-				hl_patch_added_function *added=patch->added_functions+i;
-				if(!read_count(&s,&added->stable_id)||!read_count(&s,&added->findex)||!read_index(&s,&added->type)||!read_count(&s,&count)||!take(&s,count,&p))goto section_fail;
-				added->name=(char*)malloc(count+1);if(!added->name)FAIL("Out of memory reading added functions");
-				memcpy(added->name,p,count);added->name[count]=0;
-				for(j=0;j<i;j++)if(patch->added_functions[j].stable_id==added->stable_id||patch->added_functions[j].findex==added->findex)FAIL("Duplicate HLP added function");
-			}
-		} else if( tag == 6 ) {
-			if( have_globals ) FAIL("Duplicate HLP globals section");
-			have_globals=true;
-			if(!read_hash(&s,&patch->global_prefix_hash)||!read_count(&s,&patch->base_global_count)||!read_count(&s,&patch->global_count))goto section_fail;
-			// Each global is at least a type and a field count, so the section bounds the count before anything is allocated.
-			if(patch->global_count<=0||patch->global_count>(s.end-s.p)/2)FAIL("Invalid HLP globals section");
-			patch->globals=(hl_patch_global*)calloc(patch->global_count,sizeof(hl_patch_global));if(!patch->globals)FAIL("Out of memory reading patch globals");
-			for(i=0;i<patch->global_count;i++){
-				hl_patch_global *global=patch->globals+i;
-				int kind;if(!read_byte(&s,&kind))goto section_fail;if(kind==0){global->field_count=-1;if(!read_count(&s,&global->type))goto section_fail;global->fields=NULL;continue;}if(kind!=1)FAIL("Invalid HLP global kind");
-				if(!read_count(&s,&global->type)||!read_count(&s,&global->field_count))goto section_fail;
-				if(global->field_count>s.end-s.p)FAIL("Truncated HLP data");
-				global->fields=(int*)calloc(global->field_count>0?global->field_count:1,sizeof(int));if(!global->fields)FAIL("Out of memory reading patch globals");
-				for(j=0;j<global->field_count;j++)if(!read_count(&s,global->fields+j))goto section_fail;
-			}
-		} else if( tag == 7 ) {
-			if( have_object_fields ) FAIL("Duplicate HLP object fields section");
-			have_object_fields=true;
-			// Each entry is at least four one-byte indexes, so the section bounds the count before anything is allocated.
-			if(!read_count(&s,&patch->object_field_count))goto section_fail;
-			if(patch->object_field_count<=0||patch->object_field_count>(s.end-s.p)/4)FAIL("Invalid HLP object fields section");
-			patch->object_fields=(hl_patch_object_field*)calloc(patch->object_field_count,sizeof(hl_patch_object_field));if(!patch->object_fields)FAIL("Out of memory reading patch object fields");
-			for(i=0;i<patch->object_field_count;i++){
-				hl_patch_object_field *field=patch->object_fields+i;
-				if(!read_count(&s,&field->type)||!read_count(&s,&field->field)||!read_count(&s,&field->name)||!read_count(&s,&field->field_type))goto section_fail;
-				for(j=0;j<i;j++)if(patch->object_fields[j].type==field->type&&patch->object_fields[j].field==field->field)FAIL("Duplicate HLP object field");
-			}
-		} else if( tag == 8 ) {
-			if( have_migrations ) FAIL("Duplicate HLP migrations section");
-			have_migrations=true;
-			if(!read_count(&s,&patch->migration_count))goto section_fail;
-			if(patch->migration_count<=0||patch->migration_count>(s.end-s.p)/2)FAIL("Invalid HLP migrations section");
-			patch->migrations=(hl_patch_migration*)calloc(patch->migration_count,sizeof(hl_patch_migration));if(!patch->migrations)FAIL("Out of memory reading patch migrations");
-			for(i=0;i<patch->migration_count;i++){
-				hl_patch_migration *migration=patch->migrations+i;
-				if(!read_count(&s,&migration->type)||!read_count(&s,&migration->stable_id))goto section_fail;
-				migration->findex=-1;
-				for(j=0;j<i;j++)if(patch->migrations[j].type==migration->type)FAIL("Duplicate HLP migration");
-			}
-		} else if( tag == 9 ) {
-			if( have_guards ) FAIL("Duplicate HLP guards section");
-			have_guards=true;
-			if(!read_count(&s,&patch->guard_count))goto section_fail;
-			if(patch->guard_count<=0||patch->guard_count>(s.end-s.p)/2)FAIL("Invalid HLP guards section");
-			patch->guards=(hl_patch_guard*)calloc(patch->guard_count,sizeof(hl_patch_guard));if(!patch->guards)FAIL("Out of memory reading patch guards");
-			for(i=0;i<patch->guard_count;i++){
-				hl_patch_guard *guard=patch->guards+i;
-				if(!read_count(&s,&guard->stable_id)||!read_count(&s,&count)||!take(&s,count,&p))goto section_fail;
-				guard->findex=-1;
-				guard->description=(char*)malloc(count+1);if(!guard->description)FAIL("Out of memory reading patch guards");
-				memcpy(guard->description,p,count);guard->description[count]=0;
-			}
-			if(!read_count(&s,&patch->global_name_count))goto section_fail;
-			if(patch->global_name_count<0||patch->global_name_count>(s.end-s.p)/2)FAIL("Invalid HLP guards section");
-			if(patch->global_name_count>0){
-				patch->global_names=(char**)calloc(patch->global_name_count,sizeof(char*));
-				patch->global_name_indexes=(int*)calloc(patch->global_name_count,sizeof(int));
-				if(!patch->global_names||!patch->global_name_indexes)FAIL("Out of memory reading patch guards");
-			}
-			for(i=0;i<patch->global_name_count;i++){
-				if(!read_count(&s,patch->global_name_indexes+i)||!read_count(&s,&count)||!take(&s,count,&p))goto section_fail;
-				patch->global_names[i]=(char*)malloc(count+1);if(!patch->global_names[i])FAIL("Out of memory reading patch guards");
-				memcpy(patch->global_names[i],p,count);patch->global_names[i][count]=0;
-			}
-		} else {
-			s.p = s.end;
-		}
-		if( s.p != s.end ) FAIL("Invalid HLP section length");
-		continue;
-section_fail:
-		r.error=s.error?s.error:"Truncated HLP data";goto fail;
-	}
-	if( !have_symbols || !have_functions ) FAIL("Missing required HLP section");
-	if(r.p!=r.end)FAIL("Trailing HLP data");
+	if( !read_sections(&r,patch) ) goto fail;
 	if( error_msg ) *error_msg=NULL;
 	return patch;
 fail:
@@ -1287,7 +907,7 @@ static void publish_added_functions( hl_module *m, hl_patch *patch ) {
 		int at=m->code->nfunctions+m->code->npatchfunctions,length=(int)strlen(a->name);
 		hl_function *f=m->code->functions+at;
 		memset(f,0,sizeof(*f));f->type=m->code->types+a->type;f->findex=a->findex;
-		m->code->function_stable_ids[at]=a->stable_id;
+		m->code->function_stable_ids[at]=a->findex;
 		m->code->function_names[at]=(char*)hl_malloc(&m->code->alloc,length+1);
 		memcpy(m->code->function_names[at],a->name,length+1);
 		m->code->function_names_lens[at]=length;
@@ -1660,8 +1280,8 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 	if(!m||!patch||!m->patchable){error="Module is not patchable";goto fail;}
 	if(m->revision!=patch->base_revision||patch->revision<=patch->base_revision){error="Stale patch revision";goto fail;}
 	// A patch of sections names everything by key; the linker gives it the module's indices, and its additions after them.
-	if(patch->version==12&&!patch->linked&&!hl_module_link_patch(m,patch,&error))goto fail;
-	if(patch->version==12&&patch->function_count==0&&patch->type_count==0&&patch->global_count==0&&patch->object_field_count==0&&patch->migration_count==0&&patch->guard_count==0){
+	if(!patch->linked&&!hl_module_link_patch(m,patch,&error))goto fail;
+	if(patch->function_count==0&&patch->type_count==0&&patch->global_count==0&&patch->object_field_count==0&&patch->migration_count==0&&patch->guard_count==0){
 		// Every function the sections define runs as it is: only the revision and the keys (renames) move.
 		hl_module_crash_write_lock();
 		for(int i=0;i<patch->rename_count;i++)if(patch->renames[i].slot>=0){int at=m->functions_indexes[patch->renames[i].slot],length=(int)strlen(patch->renames[i].to);char *name=(char*)hl_malloc(&m->code->alloc,length+1);memcpy(name,patch->renames[i].to,length+1);m->code->function_names[at]=name;m->code->function_names_lens[at]=length;}
@@ -1671,9 +1291,6 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 		if(error_msg)*error_msg=NULL;return true;
 	}
 	if(patch->function_count<=0){error="Patch contains no functions";goto fail;}
-	if(patch->version!=12&&(patch->base_int_count!=m->code->nints||patch->base_float_count!=m->code->nfloats||patch->base_string_count!=m->code->nstrings||patch->base_type_count!=m->code->ntypes)){error="Patch symbol base does not match module";goto fail;}
-	if(patch->version!=12&&(patch->int_prefix_hash!=hash_int_prefix(m->code,patch->base_int_count)||patch->float_prefix_hash!=hash_float_prefix(m->code,patch->base_float_count)||patch->string_prefix_hash!=hash_string_prefix(m->code,patch->base_string_count)||patch->type_prefix_hash!=hash_type_prefix(m,patch->base_type_count))){error="Patch symbol prefix hash does not match module";goto fail;}
-	if(patch->version!=12&&patch->global_count>0&&(patch->base_global_count!=m->code->nglobals||patch->global_prefix_hash!=hash_global_prefix(m->code,patch->base_global_count))){error="Patch global base does not match module";goto fail;}
 	if(!validate_patch_types(m,patch,patch->base_string_count+patch->string_count,&error))goto fail;
 	if(!validate_patch_globals(m,patch,&globals_size,&error))goto fail;
 	if(!validate_patch_object_fields(m,patch,patch->base_string_count+patch->string_count,&error))goto fail;
@@ -1699,7 +1316,7 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 	allocation->function_count=patch->function_count;allocation->functions=(hl_function*)calloc(patch->function_count,sizeof(hl_function));allocation->debug_spans=(hl_source_span**)calloc(patch->function_count,sizeof(hl_source_span*));
 	offsets=(int*)calloc(patch->function_count,sizeof(int));if(!allocation->functions||!allocation->debug_spans||!offsets){error="Out of memory applying patch";goto fail;}
 	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;hl_function *live;dst->type=m->code->types+src->type;dst->findex=src->findex;live=combined_functions+layout.indexes[dst->findex];if(live){dst->obj=live->obj;dst->field=live->field;dst->ref=live->ref;}dst->nregs=src->register_count;dst->nops=src->instruction_count;dst->regs=(hl_type**)calloc(dst->nregs,sizeof(hl_type*));dst->ops=(hl_opcode*)calloc(dst->nops,sizeof(hl_opcode));if(!dst->regs||!dst->ops){error="Out of memory applying patch";goto fail;}for(int j=0;j<dst->nregs;j++)dst->regs[j]=m->code->types+src->registers[j];for(int j=0;j<dst->nops;j++){hl_patch_instruction *s=src->instructions+j;hl_opcode *d=dst->ops+j;d->op=(hl_op)s->opcode;if(s->operand_count>0)d->p1=s->operands[0];if(s->operand_count>1)d->p2=s->operands[1];if(s->operand_count>2)d->p3=s->operands[2];if(d->op==OSwitch){int cases=s->operands[1];d->p1=s->operands[0];d->p2=cases;d->p3=s->operands[2+cases];d->extra=(int*)malloc(sizeof(int)*(cases>0?cases:1));if(!d->extra){error="Out of memory applying patch";goto fail;}memcpy(d->extra,s->operands+2,sizeof(int)*cases);continue;}if(s->operand_count==4&&d->op!=OCallN&&d->op!=OCallMethod&&d->op!=OCallThis&&d->op!=OCallClosure&&d->op!=OMakeEnum)d->extra=(int*)(int_val)s->operands[3];if(s->operand_count>3&&(d->op==OCall3||d->op==OCall4||d->op==OCallN||d->op==OCallMethod||d->op==OCallThis||d->op==OCallClosure||d->op==OMakeEnum)){int count=d->op==OCall3?2:d->op==OCall4?3:s->operand_count-3;d->extra=(int*)malloc(sizeof(int)*count);if(!d->extra){error="Out of memory applying patch";goto fail;}memcpy(d->extra,s->operands+3,sizeof(int)*count);}}}
-	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;if(src->debug_count){dst->debug=(int*)calloc(src->debug_count*2,sizeof(int));allocation->debug_spans[i]=(hl_source_span*)calloc(src->debug_count,sizeof(hl_source_span));if(!dst->debug||!allocation->debug_spans[i]){error="Out of memory applying patch debug metadata";goto fail;}for(int j=0;j<src->debug_count;j++){hl_source_span span=src->debug_spans[j];int file=patch->version==12?(span.file<m->code->ndebugfiles+patch->debug_file_count?span.file:-1):find_debug_file(m->code,patch->debug_files[span.file],patch->debug_file_lens[span.file]);if(file<0){error="Patch debug file is not present in module";goto fail;}span.file=file;dst->debug[j*2]=file;dst->debug[j*2+1]=span.line;allocation->debug_spans[i][j]=span;}}}
+	for(int i=0;i<patch->function_count;i++){hl_patch_function *src=patch->functions+i;hl_function *dst=allocation->functions+i;if(src->debug_count){dst->debug=(int*)calloc(src->debug_count*2,sizeof(int));allocation->debug_spans[i]=(hl_source_span*)calloc(src->debug_count,sizeof(hl_source_span));if(!dst->debug||!allocation->debug_spans[i]){error="Out of memory applying patch debug metadata";goto fail;}for(int j=0;j<src->debug_count;j++){hl_source_span span=src->debug_spans[j];int file=span.file<m->code->ndebugfiles+patch->debug_file_count?span.file:-1;if(file<0){error="Patch debug file is not present in module";goto fail;}span.file=file;dst->debug[j*2]=file;dst->debug[j*2+1]=span.line;allocation->debug_spans[i][j]=span;}}}
 	for(int i=0;i<patch->function_count;i++) {
 		int function_index=layout.indexes[allocation->functions[i].findex];
 		if(function_index<0||function_index>=layout.count){error="Invalid patch function slot";goto fail;}
@@ -1736,12 +1353,12 @@ h_bool hl_module_apply_patch( hl_module *m, hl_patch *patch, hl_patch_migration_
 	if(inject_patch_failure(m,3,&error))goto fail;
 	temp.jit_code=allocation->code;temp.codesize=allocation->code_size;temp.jit_debug=allocation->jit_debug;temp.gdb_jit_entry=NULL;hl_gdb_jit_register_patch(&temp);allocation->gdb_jit_entry=temp.gdb_jit_entry;free(combined_functions);combined_functions=NULL;
 	if(!reserve_patch_type_allocations(m,type_allocation_count)){error="Out of memory publishing patch types";goto fail;}
-	if(patch->version==12&&patch->rename_count>0){
+	if(patch->rename_count>0){
 		renamed_count=patch->rename_count;renamed_names=(char**)hl_malloc(&m->code->alloc,sizeof(char*)*renamed_count);
 		for(int i=0;i<renamed_count;i++){int length=(int)strlen(patch->renames[i].to);renamed_names[i]=(char*)hl_malloc(&m->code->alloc,length+1);memcpy(renamed_names[i],patch->renames[i].to,length+1);}
 	}
 	// A patch of sections brings the debug files its new code is in; they follow the module's.
-	if(patch->version==12&&patch->debug_file_count>0){
+	if(patch->debug_file_count>0){
 		int n=m->code->ndebugfiles+patch->debug_file_count;
 		added_files=(char**)hl_malloc(&m->code->alloc,sizeof(char*)*n);added_file_lens=(int*)hl_malloc(&m->code->alloc,sizeof(int)*n);
 		memcpy(added_files,m->code->debugfiles,sizeof(char*)*m->code->ndebugfiles);memcpy(added_file_lens,m->code->debugfiles_lens,sizeof(int)*m->code->ndebugfiles);

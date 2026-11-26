@@ -230,21 +230,17 @@ typedef struct {
 
 typedef struct {
 	int type;
-	int stable_id;
 	int findex;
 	int register_count;
 	int *registers;
 	int instruction_count;
 	hl_patch_instruction *instructions;
-	int relocation_count;
-	int *relocation_instructions;
-	int *relocation_stable_ids;
 	int debug_count;
 	hl_source_span *debug_spans;
 } hl_patch_function;
 
+/* A function a patch adds, in the slot after the module's: its slot is its stable id. */
 typedef struct {
-	int stable_id;
 	int findex;
 	int type;
 	char *name;
@@ -276,31 +272,28 @@ typedef struct {
 /*
  * Runs `findex`, a function of one argument returning Void, on every live instance of `type` and of its subclasses once
  * the patch commits: it evaluates the declaration initializers of the fields the patch adds, which constructors already
- * run for instances made later. The runtime resolves `stable_id` to `findex` before applying the patch.
+ * run for instances made later. The patch names the class and the function by key, which the patch linker resolves
+ * (`hl_module_link_patch`).
  */
 typedef struct {
 	int type;
-	int stable_id;
 	int findex;
-	/* HLP 12 names the class and the function by key, which the patch linker resolves (`hl_module_link_patch`). */
 	char *type_module, *type_member, *function_module, *function_member;
 } hl_patch_migration;
 
 /*
  * A function the patch leaves behind that closures the running program stored may still reach: one the edit removed, or
  * one whose signature changed with no adapter to bridge the old calls. The patch applies only when no live closure refers
- * to it (`hl_module_apply_patch`); `description` says what happened to it, for the refusal. The runtime resolves
- * `stable_id` to `findex` before applying the patch.
+ * to it (`hl_module_apply_patch`); `description` says what happened to it, for the refusal. The patch names the function by
+ * key, which the patch linker resolves.
  */
 typedef struct {
-	int stable_id;
 	int findex;
 	char *description;
-	/* HLP 12 names the function by key. */
 	char *module, *member;
 } hl_patch_guard;
 
-/* An HLP 12 section: a module's code in the HLB 9 encoding, which replaces the section of the same path. */
+/* A patch's section: a module's code in the HLB 9 encoding, which replaces the section of the same path. */
 typedef struct {
 	char *path;
 	unsigned char *data;
@@ -308,7 +301,7 @@ typedef struct {
 } hl_patch_section;
 
 /*
- * An HLP 12 rename: the function, type or global keyed (module, from) is keyed (module, to) from this patch on, in the slot it
+ * A rename: the function, type or global keyed (module, from) is keyed (module, to) from this patch on, in the slot it
  * has (a closure's environment is renamed with its lambda, and the environment's class value with it).
  */
 typedef struct {
@@ -317,11 +310,14 @@ typedef struct {
 	int slot;
 } hl_patch_rename;
 
+/*
+ * HLP 12: the sections a patch replaces and removes, its renames, guards and migrations, which the patch linker links against the
+ * running module's link state (`hl_module_link_patch`) into the tables after them, numbered after the module's own.
+ */
 typedef struct {
 	unsigned char module_id[16];
 	int base_revision;
 	int revision;
-	unsigned int int_prefix_hash, float_prefix_hash, string_prefix_hash, type_prefix_hash;
 	int base_int_count;
 	int int_count;
 	int *ints;
@@ -344,7 +340,6 @@ typedef struct {
 	int *debug_file_lens;
 	int source_snapshot_count;
 	hl_source_snapshot *source_snapshots;
-	unsigned int global_prefix_hash;
 	int base_global_count;
 	int global_count;
 	hl_patch_global *globals;
@@ -354,12 +349,11 @@ typedef struct {
 	hl_patch_migration *migrations;
 	int guard_count;
 	hl_patch_guard *guards;
-	/* The names of the module's globals (its static fields), sent with the guards so a refusal can name a holder. */
+	/* The names of the module's globals (its static fields), found with the guards so a refusal can name a holder. */
 	int global_name_count;
 	int *global_name_indexes;
 	char **global_names;
-	/* HLP 12: what the patch linker links against the module's link state into the tables above. */
-	int version;
+	/* What the patch linker links against the module's link state into the tables above. */
 	int section_count;
 	hl_patch_section *sections;
 	int removed_count;

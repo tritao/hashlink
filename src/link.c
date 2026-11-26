@@ -1312,9 +1312,8 @@ static void read_interface( link_ctx *L, int si ) {
 				hl_patch_added_function *a;
 				GROW(P->added, P->nadded, P->cadded);
 				a = P->added + P->nadded;
+				// The next slot, which is also the function's stable id.
 				a->findex = P->slots + P->nadded;
-				// The loader mints a function's stable id: its slot.
-				a->stable_id = a->findex;
 				a->type = -1;
 				a->name = (char*)malloc(member.len + 1);
 				memcpy(a->name, member.s, member.len);
@@ -1915,7 +1914,6 @@ static void patch_function( link_ctx *L, link_section *s, int i, hl_function *f 
 	pf = P->functions + P->nfunctions;
 	changed = P->changed + P->nfunctions++;
 	pf->type = type_ref(L, f->type);
-	pf->stable_id = slot;
 	pf->findex = slot;
 	pf->register_count = f->nregs;
 	pf->registers = (int*)malloc(sizeof(int) * (f->nregs + 1));
@@ -2498,7 +2496,7 @@ static void resolve_patch_keys( link_ctx *L, hl_patch *patch ) {
 		link_text module = text_of(g->module), member = text_of(g->member);
 		int id = key_find(L, KEY_FUNCTION, module, member);
 		if( id < 0 ) { link_fail(L, "The patch guards function `" KEY_FMT "`, which the running module does not have", KEY_ARGS(module, member)); return; }
-		g->findex = g->stable_id = L->entries[id].value;
+		g->findex = L->entries[id].value;
 	}
 	for(int k=0;k<patch->migration_count && !L->error;k++) {
 		hl_patch_migration *mg = patch->migrations + k;
@@ -2507,7 +2505,7 @@ static void resolve_patch_keys( link_ctx *L, hl_patch *patch ) {
 		if( type < 0 ) { link_fail(L, "The patch migrates type `" KEY_FMT "`, which the running module does not have", KEY_ARGS(tm, tn)); return; }
 		if( function < 0 ) { link_fail(L, "The patch migrates with function `" KEY_FMT "`, which no section defines", KEY_ARGS(fm, fn)); return; }
 		mg->type = L->entries[type].value;
-		mg->findex = mg->stable_id = L->entries[function].value;
+		mg->findex = L->entries[function].value;
 	}
 	if( patch->guard_count == 0 ) return;
 	for(int i=0;i<L->nentries;i++) if( L->entries[i].kind == KEY_GLOBAL && L->entries[i].value < L->c->nglobals ) nglobals++;
@@ -2530,7 +2528,7 @@ h_bool hl_module_link_patch( hl_module *m, hl_patch *patch, const char **error_m
 	link_patch *P;
 	hl_code *c;
 	if( L == NULL ) { *error_msg = "The module was not loaded to take patches of sections"; return false; }
-	if( patch == NULL || patch->version != 12 || patch->linked ) { *error_msg = "Not a patch of sections, or one already linked"; return false; }
+	if( patch == NULL || patch->linked ) { *error_msg = "No patch, or one already linked"; return false; }
 	c = L->c;
 	P = (link_patch*)calloc(1, sizeof(link_patch));
 	if( P == NULL ) { *error_msg = "Out of memory linking a patch"; return false; }

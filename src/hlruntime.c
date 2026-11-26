@@ -2,9 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Must match the maximum 29-bit stable ID reserved by HlFunctionCache. */
-#define HL_RUNTIME_V2_INIT_STABLE_ID 0x1FFFFFFF
-
 void hl_debug_notify_revision( hl_module *m );
 
 struct _hl_runtime_module {
@@ -147,30 +144,18 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 	hl_code *code;
 	hl_module *module;
 	hl_runtime_module *runtime;
-	int identity_count, initializer_slot, entries_offset, revision, version, i, j;
-	const char *initializer_name = NULL;
-	int initializer_name_length = 0;
+	int identity_count, initializer_slot = -1, revision, i;
+	const char *initializer_name;
+	int initializer_name_length;
 	hl_runtime_failed_retirements_retry();
 	if( out == NULL || bytes == NULL || length <= 0 || identity == NULL || identity_length < 28 ) return HL_RUNTIME_BAD_ARGUMENT;
 	*out = NULL;
-	version = identity[3];
-	if( memcmp(identity,"HLI",3) != 0 || version < 2 || version > 4 ) return HL_RUNTIME_BAD_FORMAT;
+	// HLI 4: the module id, the revision and the initializer's name. The loader mints the stable ids: each function's slot.
+	if( memcmp(identity,"HLI",3) != 0 || identity[3] != 4 ) return HL_RUNTIME_BAD_FORMAT;
 	revision = (int)read_u32(identity + 20);
-	if( version == 4 ) {
-		// HLI 4: the module id, the revision and the initializer's name. The loader mints the stable ids: each function's slot.
-		initializer_name_length = (int)read_u32(identity + 24);
-		if( revision < 0 || initializer_name_length < 0 || identity_length != 28 + initializer_name_length ) return HL_RUNTIME_BAD_FORMAT;
-		initializer_name = (const char*)identity + 28;
-		identity_count = 0;
-		entries_offset = 28;
-		initializer_slot = -1;
-	} else {
-		identity_count = (int)read_u32(identity + 24);
-		entries_offset = version == 3 ? 32 : 28;
-		initializer_slot = version == 3 ? (int)read_u32(identity + 28) : -1;
-		if( revision < 0 || identity_count < 0 || identity_count > 0x100000 || initializer_slot < -1
-			|| identity_length != entries_offset + identity_count * 8 ) return HL_RUNTIME_BAD_FORMAT;
-	}
+	initializer_name_length = (int)read_u32(identity + 24);
+	if( revision < 0 || initializer_name_length < 0 || identity_length != 28 + initializer_name_length ) return HL_RUNTIME_BAD_FORMAT;
+	initializer_name = (const char*)identity + 28;
 	code = hl_code_read_patchable(bytes,length,&error);
 	if( code == NULL ) return HL_RUNTIME_BAD_FORMAT;
 	module = hl_module_alloc(code);
@@ -195,14 +180,12 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 	runtime->module = module;
 	runtime->module->revision = revision;
 	memcpy(runtime->module_id,identity + 4,16);
-	if( version == 4 ) {
-		identity_count = code->nfunctions;
-		for(i=0;i<code->nfunctions && initializer_name;i++)
-			if( initializer_name_length > 0 && code->function_names[i] && code->function_names_lens[i] == initializer_name_length
-				&& memcmp(code->function_names[i],initializer_name,initializer_name_length) == 0 ) initializer_slot = code->functions[i].findex;
-		if( initializer_name_length > 0 && initializer_slot < 0 ) {
-			hl_module_unload(module);free(runtime);return HL_RUNTIME_BAD_FORMAT;
-		}
+	identity_count = code->nfunctions;
+	for(i=0;i<code->nfunctions;i++)
+		if( initializer_name_length > 0 && code->function_names[i] && code->function_names_lens[i] == initializer_name_length
+			&& memcmp(code->function_names[i],initializer_name,initializer_name_length) == 0 ) initializer_slot = code->functions[i].findex;
+	if( initializer_name_length > 0 && initializer_slot < 0 ) {
+		hl_module_unload(module);free(runtime);return HL_RUNTIME_BAD_FORMAT;
 	}
 	runtime->identity_count = identity_count;
 	runtime->stable_ids = (int*)malloc(sizeof(int) * identity_count);
@@ -213,26 +196,11 @@ hl_runtime_status hl_runtime_module_load( const unsigned char *bytes, int length
 		free(runtime->stable_ids);free(runtime->slots);free(runtime);hl_module_unload(module);return HL_RUNTIME_JIT_FAILED;
 	}
 	for(i=0;i<identity_count;i++) {
-		if( version == 4 ) {
-			runtime->stable_ids[i] = code->function_stable_ids[i];
-			runtime->slots[i] = code->functions[i].findex;
-			continue;
-		}
-		runtime->stable_ids[i] = (int)read_u32(identity + entries_offset + i * 8);
-		runtime->slots[i] = (int)read_u32(identity + entries_offset + 4 + i * 8);
-		if( runtime->stable_ids[i] < 0 || find_function(module,runtime->slots[i]) == NULL ) {
-			free(runtime->stable_ids);free(runtime->slots);free(runtime);hl_module_unload(module);return HL_RUNTIME_BAD_FORMAT;
-		}
-		for(j=0;j<i;j++) if( runtime->stable_ids[j] == runtime->stable_ids[i] || runtime->slots[j] == runtime->slots[i] ) {
-			free(runtime->stable_ids);free(runtime->slots);free(runtime);hl_module_unload(module);return HL_RUNTIME_BAD_FORMAT;
-		}
+		runtime->stable_ids[i] = code->function_stable_ids[i];
+		runtime->slots[i] = code->functions[i].findex;
 	}
 	runtime->lock = hl_mutex_alloc(true);
 	hl_add_root(&runtime->lock);
-	if( version == 2 ) {
-		for(i=0;i<identity_count;i++)
-			if( runtime->stable_ids[i] == HL_RUNTIME_V2_INIT_STABLE_ID ) initializer_slot = runtime->slots[i];
-	}
 	if( initializer_slot >= 0 ) {
 		int initializer_id = -1;
 		for(i=0;i<identity_count;i++)
@@ -276,13 +244,6 @@ static int resolve_stable_id( hl_runtime_module *runtime, int stable_id ) {
 	int i;
 	for(i=0;i<runtime->identity_count;i++) if( runtime->stable_ids[i] == stable_id ) return runtime->slots[i];
 	return -1;
-}
-
-/* A stable ID as a patch sees it: the module's functions, then the ones the patch adds. */
-static int resolve_patch_stable_id( hl_runtime_module *runtime, hl_patch *patch, int stable_id ) {
-	int slot = resolve_stable_id(runtime,stable_id);
-	for(int i=0;slot<0&&i<patch->added_function_count;i++) if( patch->added_functions[i].stable_id == stable_id ) slot = patch->added_functions[i].findex;
-	return slot;
 }
 
 const char *hl_runtime_module_resolve_jit_location( hl_runtime_module *runtime, int stable_id ) {
@@ -554,16 +515,13 @@ hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const
 	if( memcmp(runtime->module_id,patch->module_id,16) != 0 ) {
 		hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE;
 	}
-	// A patch of sections is linked against the module first: its functions, guards and migrations then have the slots and
-	// the stable ids the loader mints, which the checks below resolve as they do for HLP 11.
-	if( patch->version == 12 && runtime->module->revision == patch->base_revision && !hl_module_link_patch(runtime->module,patch,&error) ) {
+	// The patch is linked against the module first: its functions, guards and migrations then have their slots, which are
+	// their stable ids, and the functions it adds the slots after the module's.
+	if( runtime->module->revision == patch->base_revision && !hl_module_link_patch(runtime->module,patch,&error) ) {
 		runtime->patch_message = ascii_message(error);
 		hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE;
 	}
-	// Added functions bring new stable IDs, in the slots the module applies them to. Make room for their identities now,
-	// so nothing can fail once the module has taken the patch.
-	for(int i=0;i<patch->added_function_count;i++)
-		if( resolve_stable_id(runtime,patch->added_functions[i].stable_id) >= 0 ) { hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE; }
+	// Make room for the identities of the added functions now, so nothing can fail once the module has taken the patch.
 	if( patch->added_function_count > 0 ) {
 		int capacity = runtime->identity_count + patch->added_function_count;
 		int *stable_ids = (int*)realloc(runtime->stable_ids,sizeof(int) * capacity);
@@ -572,30 +530,10 @@ hl_runtime_status hl_runtime_module_apply_hlp( hl_runtime_module *runtime, const
 		if( slots != NULL ) runtime->slots = slots;
 		if( stable_ids == NULL || slots == NULL ) { hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_JIT_FAILED; }
 	}
-	for(int i=0;i<patch->function_count;i++) {
-		int slot = resolve_patch_stable_id(runtime,patch,patch->functions[i].stable_id);
-		if( slot < 0 ) { hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE; }
-		patch->functions[i].findex = slot;
-		for(int j=0;j<patch->functions[i].relocation_count;j++) {
-			int instruction=patch->functions[i].relocation_instructions[j];
-			int target=resolve_patch_stable_id(runtime,patch,patch->functions[i].relocation_stable_ids[j]);
-			int opcode=instruction<0||instruction>=patch->functions[i].instruction_count?-1:patch->functions[i].instructions[instruction].opcode;
-			if(target<0||(opcode!=OCall0&&opcode!=OCall1&&opcode!=OCall2&&opcode!=OCallN&&opcode!=OStaticClosure&&opcode!=OInstanceClosure)){hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE;}
-			patch->functions[i].instructions[instruction].operands[1]=target;
-		}
-	}
-	for(int i=0;i<patch->migration_count;i++) {
-		patch->migrations[i].findex = resolve_patch_stable_id(runtime,patch,patch->migrations[i].stable_id);
-		if( patch->migrations[i].findex < 0 ) { hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE; }
-	}
-	for(int i=0;i<patch->guard_count;i++) {
-		patch->guards[i].findex = resolve_stable_id(runtime,patch->guards[i].stable_id);
-		if( patch->guards[i].findex < 0 ) { hl_patch_free(patch);hl_mutex_release(runtime->lock);return HL_RUNTIME_INCOMPATIBLE; }
-	}
 	applied = hl_module_apply_patch(runtime->module,patch,&migration,&error);
 	if( applied )
 		for(int i=0;i<patch->added_function_count;i++) {
-			runtime->stable_ids[runtime->identity_count] = patch->added_functions[i].stable_id;
+			runtime->stable_ids[runtime->identity_count] = patch->added_functions[i].findex;
 			runtime->slots[runtime->identity_count++] = patch->added_functions[i].findex;
 		}
 	// Instances made before the patch ran the initializers of the fields it added before any other code did. One that threw
