@@ -37,7 +37,9 @@ HL_PRIM varray *hl_alloc_array( hl_type *at, int size ) {
 	int capacity;
 	varray *a;
 	if( size < 0 ) hl_error("Invalid array size");
-	capacity = size < 4 ? 4 : size + size / 2;
+	// An array made at a size is often never grown (a copy, a map's result, a table sized up front): it gets that size, and
+	// growth adds the headroom (hl_array_reserve).
+	capacity = size < 4 ? 4 : size;
 	a = (varray*)hl_gc_alloc_gen(&hlt_array, sizeof(varray), MEM_KIND_DYNAMIC | MEM_ZERO);
 	a->t = &hlt_array;
 	a->at = at;
