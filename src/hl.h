@@ -977,6 +977,8 @@ HL_API bool hl_gc_incremental_rescanning( void );
 typedef struct {
 	unsigned long long cycles_started, cycles_completed;
 	unsigned long long pressure_fallbacks, tracking_fallbacks;
+	// Cycles ended in a full collection because marking drained and rescanned four times the heap without finishing.
+	unsigned long long work_fallbacks;
 	unsigned int dirty_pages, mark_objects;
 	double cycle_age_micros, last_cycle_micros;
 } hl_gc_incremental_metrics;

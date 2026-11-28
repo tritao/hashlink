@@ -13,7 +13,8 @@ static void *gc_inc_block;
 static int64 gc_inc_start_bytes, gc_inc_start_allocs, gc_inc_last_step_bytes;
 static double gc_inc_cycle_limit;
 static unsigned long long gc_inc_cycles_started, gc_inc_cycles_completed;
-static unsigned long long gc_inc_pressure_fallbacks, gc_inc_tracking_fallbacks;
+static unsigned long long gc_inc_pressure_fallbacks, gc_inc_tracking_fallbacks, gc_inc_work_fallbacks;
+static int64 gc_inc_cycle_scanned_bytes, gc_inc_start_heap_bytes;
 static double gc_inc_cycle_started, gc_inc_last_cycle_micros;
 static bool gc_inc_preparing, gc_inc_discovering, gc_inc_reclaiming;
 static gc_pheader *gc_inc_rescan_cursor;
@@ -202,6 +203,7 @@ static bool gc_inc_rescan_dirty(double deadline) {
 		gc_pheader *p = gc_inc_rescan_cursor;
 		while( gc_inc_rescan_bid < p->alloc.max_blocks ) {
 			int bid = gc_inc_rescan_bid++;
+			gc_inc_cycle_scanned_bytes += p->alloc.block_size;
 			// Marked blocks include new black allocations and floating garbage.
 			if( p->bmp[bid >> 3] & (1 << (bid & 7)) ) {
 				void *block = p->base + bid * p->alloc.block_size;
@@ -260,10 +262,12 @@ static bool gc_inc_drain(double deadline) {
 			if( (++words & 255) == 0 && hl_sys_time() >= deadline ) {
 				gc_inc_cursor = cursor;
 				gc_scan_range(scan_start,cursor);
+				gc_inc_cycle_scanned_bytes += (unsigned char*)cursor-(unsigned char*)scan_start;
 				return false;
 			}
 		}
 		gc_scan_range(scan_start,cursor);
+		gc_inc_cycle_scanned_bytes += (unsigned char*)cursor-(unsigned char*)scan_start;
 		unsigned char *queued = source_page->incremental_bmp + ((source_page->alloc.max_blocks + 7) >> 3);
 		queued[bid >> 3] &= ~(1 << (bid & 7));
 		gc_inc_cursor = gc_inc_end = NULL;
@@ -475,6 +479,7 @@ HL_API void hl_gc_incremental_stats(hl_gc_incremental_metrics *out) {
 	out->cycles_completed = gc_inc_cycles_completed;
 	out->pressure_fallbacks = gc_inc_pressure_fallbacks;
 	out->tracking_fallbacks = gc_inc_tracking_fallbacks;
+	out->work_fallbacks = gc_inc_work_fallbacks;
 	out->last_cycle_micros = gc_inc_last_cycle_micros;
 	if( gc_incremental_active ) {
 		out->cycle_age_micros = (hl_sys_time() - gc_inc_cycle_started) * 1000000.0;
@@ -489,6 +494,19 @@ HL_API void hl_gc_incremental_stats(hl_gc_incremental_metrics *out) {
 }
 
 static double gc_latency_stamp(void) { return gc_latency_trace ? hl_sys_time() : 0; }
+
+/* A cycle ends once marking outruns what the mutator dirties and allocates between slices. A mutator allocating faster
+ * keeps it open, and so does a slice too short to rescan what was dirtied since the last one (a small budget, or a slow
+ * machine), however many slices follow. Past four times the trigger in allocation, or four times the cycle's starting
+ * heap in bytes drained and rescanned (four full marks' worth of work, as allocations in the cycle are black), the cycle
+ * ends in a full collection instead. */
+static bool gc_inc_allocation_overrun(void) {
+	return gc_incremental_active && gc_stats.total_allocated - gc_inc_start_bytes > gc_inc_cycle_limit * 4.0;
+}
+
+static bool gc_inc_work_overrun(void) {
+	return gc_incremental_active && gc_inc_cycle_scanned_bytes > gc_inc_start_heap_bytes * 4;
+}
 
 static bool gc_incremental_step_unbudgeted_locked(double budget_micros) {
 	gc_inc_last_step_bytes = gc_stats.total_allocated;
@@ -508,8 +526,9 @@ static bool gc_incremental_step_unbudgeted_locked(double budget_micros) {
 			!gc_inc_reclaiming,elapsed_ms,(suspended-started)*1000,(reclaimed-suspended)*1000,elapsed_ms-(reclaimed-started)*1000);
 		return !gc_inc_reclaiming;
 	}
-	if( gc_incremental_active && gc_stats.total_allocated - gc_inc_start_bytes > gc_inc_cycle_limit * 4.0 ) {
-		gc_inc_pressure_fallbacks++;
+	bool allocation_overrun = gc_inc_allocation_overrun();
+	if( allocation_overrun || gc_inc_work_overrun() ) {
+		if( allocation_overrun ) gc_inc_pressure_fallbacks++; else gc_inc_work_fallbacks++;
 		gc_major();
 		return true;
 	}
@@ -533,6 +552,8 @@ static bool gc_incremental_step_unbudgeted_locked(double budget_micros) {
 			gc_inc_cycle_limit = hl_gc_trigger_bytes();
 			gc_inc_start_bytes = gc_stats.total_allocated;
 			gc_inc_start_allocs = gc_stats.allocation_count;
+			gc_inc_cycle_scanned_bytes = 0;
+			gc_inc_start_heap_bytes = gc_stats.pages_total_memory;
 			if( ++gc_incremental_epoch == 0 ) hl_fatal("Incremental GC epoch overflow");
 			gc_inc_prepare_pid = 0;
 			gc_inc_prepare_cursor = NULL;
@@ -685,8 +706,8 @@ HL_API void hl_gc_frame_stats(hl_gc_frame_metrics *out) {
 static bool gc_incremental_step_locked(double budget_micros, bool automatic) {
 	if( !gc_frame_recording ) return gc_incremental_step_unbudgeted_locked(budget_micros);
 	double started = gc_frame_clock();
-	// Memory pressure and unsupported-platform full collections bypass deferral.
-	bool pressure = gc_incremental_active && gc_stats.total_allocated - gc_inc_start_bytes > gc_inc_cycle_limit * 4.0;
+	// A cycle that must end in a full collection, and unsupported-platform full collections, bypass deferral.
+	bool pressure = gc_inc_allocation_overrun() || gc_inc_work_overrun();
 	if( gc_frame.budget_micros >= 0 && !pressure && gc_write_tracking.supported() ) {
 		double remaining = gc_frame.budget_micros - gc_frame.spent_micros;
 		if( remaining <= 0 ) { gc_frame.deferred_checks++; return false; }
@@ -717,6 +738,6 @@ static void gc_incremental_shutdown(void) {
 	gc_incremental_discard();
 	gc_write_tracking.shutdown();
 	gc_inc_cycles_started = gc_inc_cycles_completed = 0;
-	gc_inc_pressure_fallbacks = gc_inc_tracking_fallbacks = 0;
+	gc_inc_pressure_fallbacks = gc_inc_tracking_fallbacks = gc_inc_work_fallbacks = 0;
 	gc_inc_cycle_started = gc_inc_last_cycle_micros = 0;
 }
