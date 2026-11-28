@@ -29,6 +29,7 @@ HL_API double hl_sys_time( void );
 #else
 #	include <sys/types.h>
 #	include <sys/mman.h>
+#	include <sched.h>
 #endif
 
 #if defined(__APPLE__) && defined(__aarch64__)
@@ -694,6 +695,19 @@ static void gc_timeline_mark( char kind ) {
 // Depth of `hl_gc_exclusive_begin` sections; only the thread holding the global lock changes it.
 static int gc_exclusive_depth = 0;
 
+#ifdef HL_THREADS
+// Spins a stopping collector makes on a thread before it gives up its core.
+#define GC_STOP_SPINS 1024
+
+static void gc_stop_yield() {
+#	ifdef HL_WIN
+	SwitchToThread();
+#	else
+	sched_yield();
+#	endif
+}
+#endif
+
 static void gc_stop_world( bool b ) {
 	if( b ) gc_timeline_mark('S');
 #	ifdef HL_THREADS
@@ -706,7 +720,16 @@ static void gc_stop_world( bool b ) {
 		gc_threads.stopping_world = true;
 		for(i=0;i<gc_threads.count;i++) {
 			hl_thread_info *t = gc_threads.threads[i];
-			while( t->gc_blocking == 0 ) {}; // spinwait
+			// A thread notices the stop only when it allocates or blocks, which code that does neither can put off for
+			// long: spin for the common short wait, then yield, so a long one costs neither a core nor the instructions
+			// of the spin.
+			int spins = 0;
+			while( t->gc_blocking == 0 ) {
+				if( ++spins >= GC_STOP_SPINS ) {
+					gc_stop_yield();
+					spins = 0;
+				}
+			}
 		}
 #		ifdef GC_TLAB
 		// The blocks reserved in allocation buffers and not handed out are unmarked, so the sweep frees them. The
